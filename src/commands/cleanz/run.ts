@@ -1,4 +1,3 @@
-WHITESLISTING ALL PACKAGE COMPONENTS
 /*
  * Copyright 2026, Salesforce, Inc.
  *
