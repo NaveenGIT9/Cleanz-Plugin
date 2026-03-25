@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -71,6 +70,31 @@ type WhitelistMap = {
   flows: string[];
 };
 
+// ── Global missing cache — confirmed absent from org ──────────
+// Once discovered missing, every subsequent XML is pre-scrubbed
+// for FREE (no deploy call needed) before its loop starts.
+type GlobalMissingCache = {
+  fields: Set<string>;
+  apps: Set<string>;
+  classes: Set<string>;
+  pages: Set<string>;
+  tabs: Set<string>;
+  objects: Set<string>;
+  flows: Set<string>;
+};
+
+function makeGlobalMissingCache(): GlobalMissingCache {
+  return {
+    fields: new Set(),
+    apps: new Set(),
+    classes: new Set(),
+    pages: new Set(),
+    tabs: new Set(),
+    objects: new Set(),
+    flows: new Set(),
+  };
+}
+
 // ===============================================================
 // CONSTANTS / CONFIG
 // ===============================================================
@@ -82,6 +106,7 @@ const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 3;
 const MAX_RETRIES = 3;
+const UNMATCHED_ERRORS_LOG = path.join(REPO_PATH, 'unmatched_errors.log');
 
 // ===============================================================
 // HELPERS
@@ -104,7 +129,8 @@ function prompt(question: string): Promise<string> {
 function formatXml(xml: string): string {
   let formatted = '';
   let indent = 0;
-  const lines = xml.replace(/>\s*</g, '>\n<').split('\n');
+  // Normalise line endings first to avoid \r\n mixed-mode issues
+  const lines = xml.replace(/\r\n/g, '\n').replace(/>\s*</g, '>\n<').split('\n');
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -159,14 +185,16 @@ function removeFieldPermissionsFromXml(
   xmlContent: string,
   missingField: string
 ): { updated: string; removed: boolean } {
+  // Normalise line endings before regex matching
+  const normalised = xmlContent.replace(/\r\n/g, '\n');
   const escapedField = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const innerPattern = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
   const blockRegex = new RegExp(
     `[ \\t]*<fieldPermissions>${innerPattern}<field>[ \\t]*${escapedField}[ \\t]*</field>${innerPattern}</fieldPermissions>[ \\t]*\\r?\\n?`,
     'g'
   );
-  const updated = xmlContent.replace(blockRegex, '');
-  const removed = updated !== xmlContent;
+  const updated = normalised.replace(blockRegex, '');
+  const removed = updated !== normalised;
   return { updated, removed };
 }
 
@@ -185,6 +213,8 @@ function removeXmlBlock(
   keyTag: string,
   missingName: string
 ): { updated: string; removed: boolean } {
+  // Normalise line endings before regex matching
+  const normalised = xmlContent.replace(/\r\n/g, '\n');
   const escapedName = missingName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const escapedBlock = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const innerPattern = `(?:(?!<${escapedBlock}>)[\\s\\S])*?`;
@@ -192,8 +222,8 @@ function removeXmlBlock(
     `[ \\t]*<${escapedBlock}>${innerPattern}<${keyTag}>[ \\t]*${escapedName}[ \\t]*</${keyTag}>${innerPattern}</${escapedBlock}>[ \\t]*\\r?\\n?`,
     'g'
   );
-  const updated = xmlContent.replace(blockRegex, '');
-  const removed = updated !== xmlContent;
+  const updated = normalised.replace(blockRegex, '');
+  const removed = updated !== normalised;
   return { updated, removed };
 }
 
@@ -400,28 +430,28 @@ function sleep(ms: number): Promise<void> {
 
 function shouldSkip(
   log: (msg: string) => void,
-  label: string,              // e.g. 'field', 'app', 'class'
+  label: string,
   name: string,
   whitelistEntries: string[],
   repoFilePath: string,
   skippedFields: string[],
   allSkippedFields: string[]
 ): boolean {
-  // 1. JSON whitelist check
   if (whitelistEntries.includes(name)) {
     log(`   SKIPPING whitelisted ${label} (in JSON): ${name}`);
-    skippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
-    allSkippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
+    skippedFields.push(entry);
+    allSkippedFields.push(entry);
     return true;
   }
 
-  // 2. Repo existence check — committed but not yet deployed
   if (fs.existsSync(repoFilePath)) {
     log(`   SKIPPING ${label} exists in repo but missing from org: ${name}`);
     log(`   WARNING: Deploy the ${label} first, then re-run this script.`);
     log(`   Found at: ${repoFilePath}`);
-    skippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
-    allSkippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
+    skippedFields.push(entry);
+    allSkippedFields.push(entry);
     return true;
   }
 
@@ -430,85 +460,205 @@ function shouldSkip(
 
 // ===============================================================
 // METADATA HANDLER REGISTRY
-// Drives processFailures in a data-driven way — add new types
-// here without touching processFailures at all.
+// Each handler now has MULTIPLE patterns (fallbacks) so SF CLI
+// wording variations are handled gracefully.
 // ===============================================================
 
 type MetadataHandler = {
-  pattern: RegExp;
+  patterns: RegExp[];   // Multiple fallback patterns — first match wins
   label: string;
   whitelistKey: keyof WhitelistMap;
+  cacheKey: keyof GlobalMissingCache;
   repoPathFn: (repoPath: string, name: string) => string;
   removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
-  displayTag: string;   // prefix shown in removed list e.g. '[App]'
+  displayTag: string;
 };
 
 const METADATA_HANDLERS: MetadataHandler[] = [
   {
-    pattern: /no CustomApplication named (.+?) found/,
-    label: 'app',
-    whitelistKey: 'apps',
+    patterns: [
+      /no CustomApplication named (.+?) found/i,
+      /Entity of type 'CustomApplication' named '(.+?)' cannot be found/i,
+      /CustomApplication[:\s]+(.+?) does not exist/i,
+      /In field: application - no CustomApplication named (.+?) found/i,
+    ],
+    label: 'app', whitelistKey: 'apps', cacheKey: 'apps',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'applications', `${n}.app-meta.xml`),
     removeFn: removeApplicationVisibilityFromXml,
     displayTag: '[App]',
   },
   {
-    pattern: /no ApexClass named (.+?) found/,
-    label: 'class',
-    whitelistKey: 'classes',
+    patterns: [
+      /no ApexClass named (.+?) found/i,
+      /Entity of type 'ApexClass' named '(.+?)' cannot be found/i,
+      /ApexClass[:\s]+(.+?) does not exist/i,
+      /In field: apexClass - no ApexClass named (.+?) found/i,
+    ],
+    label: 'class', whitelistKey: 'classes', cacheKey: 'classes',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'classes', `${n}.cls`),
     removeFn: removeClassAccessFromXml,
     displayTag: '[Class]',
   },
   {
-    pattern: /no ApexPage named (.+?) found/,
-    label: 'page',
-    whitelistKey: 'pages',
+    patterns: [
+      /no ApexPage named (.+?) found/i,
+      /Entity of type 'ApexPage' named '(.+?)' cannot be found/i,
+      /ApexPage[:\s]+(.+?) does not exist/i,
+      /In field: apexPage - no ApexPage named (.+?) found/i,
+      /no ApexPage named (.+?) found in your org/i,
+    ],
+    label: 'page', whitelistKey: 'pages', cacheKey: 'pages',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'pages', `${n}.page`),
     removeFn: removePageAccessFromXml,
     displayTag: '[Page]',
   },
   {
-    pattern: /no CustomTab named (.+?) found/,
-    label: 'tab',
-    whitelistKey: 'tabs',
+    patterns: [
+      /no CustomTab named (.+?) found/i,
+      /Entity of type 'CustomTab' named '(.+?)' cannot be found/i,
+      /CustomTab[:\s]+(.+?) does not exist/i,
+      /In field: tab - no CustomTab named (.+?) found/i,
+    ],
+    label: 'tab', whitelistKey: 'tabs', cacheKey: 'tabs',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'tabs', `${n}.tab-meta.xml`),
     removeFn: removeTabSettingFromXml,
     displayTag: '[Tab]',
   },
   {
-    pattern: /no CustomObject named (.+?) found/,
-    label: 'object',
-    whitelistKey: 'objects',
+    patterns: [
+      /no CustomObject named (.+?) found/i,
+      /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
+      /CustomObject[:\s]+(.+?) does not exist/i,
+      /In field: object - no CustomObject named (.+?) found/i,
+    ],
+    label: 'object', whitelistKey: 'objects', cacheKey: 'objects',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`),
     removeFn: removeObjectPermissionFromXml,
     displayTag: '[Object]',
   },
   {
-    pattern: /no Flow named (.+?) found/,
-    label: 'flow',
-    whitelistKey: 'flows',
+    patterns: [
+      /no Flow named (.+?) found/i,
+      /Entity of type 'Flow' named '(.+?)' cannot be found/i,
+      /Flow[:\s]+(.+?) does not exist/i,
+      /In field: flow - no Flow named (.+?) found/i,
+      /no Flow named (.+?) found in your org/i,
+      /no active version.*Flow named (.+?) found/i,
+    ],
+    label: 'flow', whitelistKey: 'flows', cacheKey: 'flows',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'flows', `${n}.flow-meta.xml`),
     removeFn: removeFlowAccessFromXml,
     displayTag: '[Flow]',
   },
 ];
 
-// ── Handle a single CustomField failure ──────────────────────
+// ── Field patterns — same multi-pattern approach ──────────────
+const FIELD_PATTERNS: RegExp[] = [
+  /no CustomField named (.+?) found/i,
+  /Entity of type 'CustomField' named '(.+?)' cannot be found/i,
+  /CustomField[:\s]+(.+?) does not exist/i,
+  /In field: field - no CustomField named (.+?) found/i,
+  /no CustomField named (.+?) found in your org/i,
+];
+
+// ===============================================================
+// HELPER: LOG UNMATCHED ERRORS TO FILE
+// Lets you see the exact SF wording so you can add new patterns.
+// ===============================================================
+
+function logUnmatchedError(repoPath: string, itemName: string, errorMessage: string): void {
+  const timestamp = new Date().toISOString();
+  const line = `[${timestamp}] [${itemName}] ${errorMessage}\n`;
+  try {
+    fs.appendFileSync(UNMATCHED_ERRORS_LOG, line, 'utf8');
+  } catch {
+    // best-effort — don't crash the script over a log file
+  }
+}
+
+// ===============================================================
+// HELPER: PRE-SCRUB — apply all globally known missing items
+// to a file before its deploy loop starts (zero deploy cost).
+// ===============================================================
+
+function applyGlobalMissingCacheToFile(
+  log: (msg: string) => void,
+  xmlContent: string,
+  globalMissing: GlobalMissingCache,
+  itemName: string
+): { xmlContent: string; removedItems: string[] } {
+  let updated = xmlContent;
+  const removedItems: string[] = [];
+
+  const totalCached =
+    globalMissing.fields.size +
+    globalMissing.apps.size +
+    globalMissing.classes.size +
+    globalMissing.pages.size +
+    globalMissing.tabs.size +
+    globalMissing.objects.size +
+    globalMissing.flows.size;
+
+  if (totalCached === 0) return { xmlContent: updated, removedItems };
+
+  log(`   [Pre-scrub] ${totalCached} globally known missing reference(s) — applying without a deploy call...`);
+
+  // Fields
+  for (const field of globalMissing.fields) {
+    const { updated: u, removed } = removeFieldPermissionsFromXml(updated, field);
+    if (removed) {
+      updated = u;
+      removedItems.push(field);
+      log(`   [Pre-scrub] Removed field: ${field}`);
+    }
+  }
+
+  // All registered handler types
+  for (const handler of METADATA_HANDLERS) {
+    const cacheSet = globalMissing[handler.cacheKey];
+    for (const name of cacheSet) {
+      const { updated: u, removed } = handler.removeFn(updated, name);
+      if (removed) {
+        updated = u;
+        removedItems.push(`${handler.displayTag} ${name}`);
+        log(`   [Pre-scrub] Removed ${handler.label}: ${name}`);
+      }
+    }
+  }
+
+  if (removedItems.length > 0) {
+    log(`   [Pre-scrub] Cleaned ${removedItems.length} reference(s) from ${itemName} before first deploy.`);
+  } else {
+    log(`   [Pre-scrub] No cached references found in this file. Proceeding normally.`);
+  }
+
+  return { xmlContent: updated, removedItems };
+}
+
+// ===============================================================
+// HELPER: PROCESS SINGLE FIELD FAILURE
+// ===============================================================
+
 function processFieldFailure(
   log: (msg: string) => void,
   errorMessage: string,
   xmlContent: string,
   whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
   repoPath: string,
   removedFields: string[],
   skippedFields: string[],
   allSkippedFields: string[]
 ): { handled: boolean; xmlContent: string } {
-  const fieldMatch = /no CustomField named (.+?) found/.exec(errorMessage);
-  if (!fieldMatch) return { handled: false, xmlContent };
+  let missingField: string | null = null;
 
-  const missingField = fieldMatch[1].trim();
+  for (const pattern of FIELD_PATTERNS) {
+    const match = pattern.exec(errorMessage);
+    if (match) { missingField = match[1].trim(); break; }
+  }
+
+  if (!missingField) return { handled: false, xmlContent };
+
   const parts = missingField.split('.');
   const fieldRepoPath = parts.length === 2
     ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
@@ -523,28 +673,40 @@ function processFieldFailure(
   if (removed) {
     log(`   Removed fieldPermissions for: ${missingField}`);
     removedFields.push(missingField);
+    // ✅ Cache globally so all subsequent items skip this deploy
+    globalMissing.fields.add(missingField);
     return { handled: true, xmlContent: updated };
   }
   log(`   Field not found in XML: ${missingField} - already removed or not present.`);
   return { handled: true, xmlContent };
 }
 
-// ── Handle a single generic metadata failure via registry ────
+// ===============================================================
+// HELPER: PROCESS SINGLE REGISTERED METADATA FAILURE
+// ===============================================================
+
 function processRegisteredFailure(
   log: (msg: string) => void,
   errorMessage: string,
   xmlContent: string,
   whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
   repoPath: string,
   removedFields: string[],
   skippedFields: string[],
   allSkippedFields: string[]
 ): { handled: boolean; xmlContent: string } {
   for (const handler of METADATA_HANDLERS) {
-    const match = handler.pattern.exec(errorMessage);
-    if (!match) continue;
+    let name: string | null = null;
 
-    const name = match[1].trim();
+    // Try every fallback pattern — first match wins
+    for (const pattern of handler.patterns) {
+      const match = pattern.exec(errorMessage);
+      if (match) { name = match[1].trim(); break; }
+    }
+
+    if (!name) continue;
+
     const repoFilePath = handler.repoPathFn(repoPath, name);
 
     if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
@@ -556,6 +718,8 @@ function processRegisteredFailure(
     if (removed) {
       log(`   Removed ${handler.label} block for: ${name}`);
       removedFields.push(`${handler.displayTag} ${name}`);
+      // ✅ Cache globally so all subsequent items skip this deploy
+      (globalMissing[handler.cacheKey] as Set<string>).add(name);
       return { handled: true, xmlContent: updated };
     }
     log(`   ${handler.label} block not found in XML: ${name} - already removed or not present.`);
@@ -566,8 +730,7 @@ function processRegisteredFailure(
 }
 
 // ===============================================================
-// HELPER: PROCESS FAILURES FOR ONE ITERATION
-// Complexity kept low by delegating to the two helpers above.
+// HELPER: PROCESS ALL FAILURES FOR ONE ITERATION
 // ===============================================================
 
 function processFailures(
@@ -575,23 +738,25 @@ function processFailures(
   failures: ComponentFailure[],
   xmlContent: string,
   whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
   repoPath: string,
+  itemName: string,
   allSkippedFields: string[]
 ): { xmlContent: string; removedFields: string[]; skippedFields: string[] } {
   let updatedXml = xmlContent;
   const removedFields: string[] = [];
   const skippedFields: string[] = [];
+  const unmatchedErrors: string[] = [];
 
-  // DEBUG — log every raw error so we can see exact Salesforce wording
   log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
   failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
 
   for (const failure of failures) {
     const errorMessage = failure.problem;
 
-    // ── CustomField (special-cased — needs Object.Field parsing) ─
+    // ── CustomField ──────────────────────────────────────────
     const fieldResult = processFieldFailure(
-      log, errorMessage, updatedXml, whitelist, repoPath,
+      log, errorMessage, updatedXml, whitelist, globalMissing, repoPath,
       removedFields, skippedFields, allSkippedFields
     );
     if (fieldResult.handled) {
@@ -599,9 +764,9 @@ function processFailures(
       continue;
     }
 
-    // ── All other metadata types — handled via registry ──────────
+    // ── All other metadata types via registry ─────────────────
     const registryResult = processRegisteredFailure(
-      log, errorMessage, updatedXml, whitelist, repoPath,
+      log, errorMessage, updatedXml, whitelist, globalMissing, repoPath,
       removedFields, skippedFields, allSkippedFields
     );
     if (registryResult.handled) {
@@ -609,8 +774,16 @@ function processFailures(
       continue;
     }
 
-    // ── Unhandled error ──────────────────────────────────────────
-    log(`   Skipping unhandled error: ${errorMessage}`);
+    // ── Unmatched — log to file for pattern analysis ──────────
+    unmatchedErrors.push(errorMessage);
+    log(`   [UNMATCHED] ${errorMessage}`);
+  }
+
+  // Persist unmatched errors so you can inspect exact SF wording
+  if (unmatchedErrors.length > 0) {
+    unmatchedErrors.forEach((e) => logUnmatchedError(repoPath, itemName, e));
+    log(`   [WARN] ${unmatchedErrors.length} unmatched error(s) appended to: ${UNMATCHED_ERRORS_LOG}`);
+    log(`   [WARN] Check that file to add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.`);
   }
 
   return { xmlContent: updatedXml, removedFields, skippedFields };
@@ -629,6 +802,7 @@ async function invokeProcessMetadataItem(
     targetOrg: string;
     repoPath: string;
     whitelist: WhitelistMap;
+    globalMissing: GlobalMissingCache;   // ✅ shared across all items
     maxIterations: number;
     maxTotalDeploys: number;
     totalDeploys: TotalDeploys;
@@ -638,7 +812,7 @@ async function invokeProcessMetadataItem(
 ): Promise<SummaryRecord> {
   const {
     metadataType, itemName, filePath, targetOrg, repoPath,
-    whitelist, maxIterations, maxTotalDeploys,
+    whitelist, globalMissing, maxIterations, maxTotalDeploys,
     totalDeploys, timeoutMins, maxRetries,
   } = params;
 
@@ -658,6 +832,36 @@ async function invokeProcessMetadataItem(
     return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
   }
 
+  // ================================================================
+  // PRE-SCRUB PASS — apply all globally confirmed missing references
+  // BEFORE the first deploy call. Zero network cost, saves deploy
+  // slots when earlier items already discovered these failures.
+  // ================================================================
+  {
+    const rawXml = fs.readFileSync(filePath, 'utf8');
+    const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(
+      log, rawXml, globalMissing, itemName
+    );
+
+    if (removedItems.length > 0) {
+      const rootNode = getRootNodeName(scrubbed);
+      saveXmlClean(scrubbed, filePath, rootNode);
+      allRemovedFields.push(...removedItems);
+      itemStatus = 'Fixed & Committed';
+
+      try {
+        execSync(`git add "${filePath}"`, { cwd: repoPath });
+        execSync(`git commit -m "[${itemName}] Pre-scrub: remove globally known missing: ${removedItems.join(', ')}"`, { cwd: repoPath });
+        log(`   [Pre-scrub] Committed pre-scrub changes for: ${itemName}`);
+      } catch {
+        log(`   [Pre-scrub] Nothing to commit or commit failed for: ${itemName}`);
+      }
+    }
+  }
+
+  // ================================================================
+  // MAIN DEPLOY LOOP — only runs for errors not yet in global cache
+  // ================================================================
   let continueLoop = true;
 
   while (continueLoop && iteration < maxIterations) {
@@ -695,7 +899,7 @@ async function invokeProcessMetadataItem(
 
     if (deployResult.result.success === true) {
       log(`[${itemName}] Deploy validation SUCCESSFUL!`);
-      itemStatus = 'Success';
+      itemStatus = 'Fixed & Committed';
       break;
     }
 
@@ -710,7 +914,7 @@ async function invokeProcessMetadataItem(
     const rootNode = getRootNodeName(xmlContent);
 
     const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
-      log, failures, xmlContent, whitelist, repoPath, allSkippedFields
+      log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
     );
 
     allRemovedFields.push(...removedFields);
@@ -786,7 +990,6 @@ export default class DeployAndFix extends SfCommand<void> {
     const { flags } = await this.parse(DeployAndFix);
     const log = (msg: string): void => { this.log(msg); };
 
-    // ================= INTERACTIVE PROMPTS =================
     log('\n======================================================');
     log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
     log('======================================================\n');
@@ -819,7 +1022,6 @@ export default class DeployAndFix extends SfCommand<void> {
     const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
-    // ── Build whitelist map from JSON — one entry per metadata type ──
     const whitelist: WhitelistMap = {
       fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
       apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
@@ -830,9 +1032,13 @@ export default class DeployAndFix extends SfCommand<void> {
       flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
     };
 
+    // ✅ Single shared cache — lives for the entire script run,
+    // grows as each item discovers new missing references, and
+    // is applied to every subsequent item for free.
+    const globalMissing = makeGlobalMissingCache();
+
     const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
 
-    // ================= STARTUP SUMMARY =================
     log('\n======================================================');
     log('STARTING AUTOMATED DEPLOY & FIX LOOP');
     log('======================================================');
@@ -851,6 +1057,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
     log(`Max retries             : ${MAX_RETRIES} per deploy call`);
+    log(`Unmatched errors log    : ${UNMATCHED_ERRORS_LOG}`);
 
     log('\nPermission Sets to process:');
     permSets.forEach((ps) => log(`   - ${ps}`));
@@ -894,6 +1101,7 @@ export default class DeployAndFix extends SfCommand<void> {
         targetOrg,
         repoPath: REPO_PATH,
         whitelist,
+        globalMissing,           // ✅ shared cache passed in
         maxIterations: MAX_ITERATIONS,
         maxTotalDeploys: MAX_TOTAL_DEPLOYS,
         totalDeploys,
@@ -920,6 +1128,7 @@ export default class DeployAndFix extends SfCommand<void> {
           targetOrg,
           repoPath: REPO_PATH,
           whitelist,
+          globalMissing,           // ✅ same cache — profiles benefit from all PS discoveries too
           maxIterations: MAX_ITERATIONS,
           maxTotalDeploys: MAX_TOTAL_DEPLOYS,
           totalDeploys,
@@ -935,6 +1144,26 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\n======================================================');
     log('ALL ITEMS PROCESSED - FINAL SUMMARY');
     log('======================================================');
+
+    // ── Print global cache summary so you know what was discovered ──
+    const totalCached =
+      globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
+      globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
+      globalMissing.flows.size;
+
+    log(`\nGlobal Missing Cache (discovered during this run): ${totalCached} unique missing references`);
+    if (globalMissing.fields.size) log(`  Fields   : ${[...globalMissing.fields].join(', ')}`);
+    if (globalMissing.apps.size) log(`  Apps     : ${[...globalMissing.apps].join(', ')}`);
+    if (globalMissing.classes.size) log(`  Classes  : ${[...globalMissing.classes].join(', ')}`);
+    if (globalMissing.pages.size) log(`  Pages    : ${[...globalMissing.pages].join(', ')}`);
+    if (globalMissing.tabs.size) log(`  Tabs     : ${[...globalMissing.tabs].join(', ')}`);
+    if (globalMissing.objects.size) log(`  Objects  : ${[...globalMissing.objects].join(', ')}`);
+    if (globalMissing.flows.size) log(`  Flows    : ${[...globalMissing.flows].join(', ')}`);
+
+    if (fs.existsSync(UNMATCHED_ERRORS_LOG)) {
+      log(`\n[WARN] Unmatched SF errors were logged to: ${UNMATCHED_ERRORS_LOG}`);
+      log(`[WARN] Review that file and add new regex patterns to METADATA_HANDLERS or FIELD_PATTERNS.`);
+    }
 
     log('\nPERMISSION SETS:');
     summary
@@ -953,7 +1182,7 @@ export default class DeployAndFix extends SfCommand<void> {
     );
     fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
-    log(`Summary CSV saved to : ${csvPath}`);
+    log(`\nSummary CSV saved to : ${csvPath}`);
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
   }
 }
