@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, Salesforce, Inc.
+ * Copyright 2025, Salesforce, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -104,7 +104,12 @@ function formatXml(xml: string): string {
 
     formatted += '    '.repeat(indent) + trimmed + '\n';
 
-    if (!trimmed.startsWith('<?') && !trimmed.startsWith('</') && !trimmed.endsWith('/>') && !trimmed.includes('</')) {
+    if (
+      !trimmed.startsWith('<?') &&
+      !trimmed.startsWith('</') &&
+      !trimmed.endsWith('/>') &&
+      !trimmed.includes('</')
+    ) {
       indent++;
     }
   }
@@ -363,17 +368,12 @@ function runDeployProcess(
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
     const args = [
-      'project',
-      'deploy',
-      'start',
-      '-m',
-      `${metadataType}:${itemName}`,
-      '--target-org',
-      targetOrg,
+      'project', 'deploy', 'start',
+      '-m', `${metadataType}:${itemName}`,
+      '--target-org', targetOrg,
       '--json',
       '--dry-run',
-      '--wait',
-      '2',
+      '--wait', '2',
     ];
 
     const proc = spawn('sf', args, { shell: true });
@@ -434,14 +434,8 @@ function processFailures(
       const parts = missingField.split('.');
       if (parts.length === 2) {
         const fieldFilePath = path.join(
-          repoPath,
-          'force-app',
-          'main',
-          'default',
-          'objects',
-          parts[0],
-          'fields',
-          `${parts[1]}.field-meta.xml`
+          repoPath, 'force-app', 'main', 'default', 'objects',
+          parts[0], 'fields', `${parts[1]}.field-meta.xml`
         );
         if (fs.existsSync(fieldFilePath)) {
           log(`   SKIPPING: field exists in repo but missing from org: ${missingField}`);
@@ -590,17 +584,9 @@ async function invokeProcessMetadataItem(
   }
 ): Promise<SummaryRecord> {
   const {
-    metadataType,
-    itemName,
-    filePath,
-    targetOrg,
-    repoPath,
-    whitelistedFields,
-    maxIterations,
-    maxTotalDeploys,
-    totalDeploys,
-    timeoutMins,
-    maxRetries,
+    metadataType, itemName, filePath, targetOrg, repoPath,
+    whitelistedFields, maxIterations, maxTotalDeploys,
+    totalDeploys, timeoutMins, maxRetries,
   } = params;
 
   const deployErrorsFile = path.join(repoPath, `deploy_errors_${itemName}.json`);
@@ -631,20 +617,13 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    log(
-      `\n--- [${itemName}] Iteration ${iteration} | Total Deploys Used: ${totalDeploys.value} / ${maxTotalDeploys} ---`
-    );
+    log(`\n--- [${itemName}] Iteration ${iteration} | Total Deploys Used: ${totalDeploys.value} / ${maxTotalDeploys} ---`);
     log('Running dry-run deploy...');
 
     // eslint-disable-next-line no-await-in-loop
     const deployResult = await invokeDeployWithRetry(
-      log,
-      metadataType,
-      itemName,
-      targetOrg,
-      deployErrorsFile,
-      timeoutMins,
-      maxRetries
+      log, metadataType, itemName, targetOrg,
+      deployErrorsFile, timeoutMins, maxRetries
     );
 
     if (!deployResult) {
@@ -655,11 +634,7 @@ async function invokeProcessMetadataItem(
 
     // result object still missing after normalisation — truly unknown shape, stop safely
     if (!deployResult.result) {
-      log(
-        `[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(
-          ', '
-        )}`
-      );
+      log(`[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(', ')}`);
       log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
       log(`[${itemName}] Stopping — re-run the script once the org is reachable.`);
       itemStatus = 'Deploy Failed - Unrecognised Response';
@@ -683,11 +658,9 @@ async function invokeProcessMetadataItem(
     const xmlContent = fs.readFileSync(filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
 
-    const {
-      xmlContent: updatedXml,
-      removedFields,
-      skippedFields,
-    } = processFailures(log, failures, xmlContent, whitelistedFields, repoPath, allSkippedFields);
+    const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
+      log, failures, xmlContent, whitelistedFields, repoPath, allSkippedFields
+    );
 
     allRemovedFields.push(...removedFields);
 
@@ -760,9 +733,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
-    const log = (msg: string): void => {
-      this.log(msg);
-    };
+    const log = (msg: string): void => { this.log(msg); };
 
     // ================= INTERACTIVE PROMPTS =================
     log('\n======================================================');
@@ -783,7 +754,9 @@ export default class DeployAndFix extends SfCommand<void> {
     let targetOrg = flags['target-org'] ?? '';
     if (!targetOrg) {
       // eslint-disable-next-line no-await-in-loop
-      targetOrg = await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ');
+      targetOrg = await prompt(
+        'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
+      );
       targetOrg = targetOrg.trim();
     }
     log(`\n   Target Org set to: ${targetOrg}\n`);
@@ -888,28 +861,18 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nPERMISSION SETS:');
     summary
       .filter((r) => r.Type === 'PermissionSet')
-      .forEach((r) =>
-        log(
-          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
-            r.SkippedFields || 'none'
-          }`
-        )
-      );
+      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
 
     log('\nPROFILES:');
     summary
       .filter((r) => r.Type === 'Profile')
-      .forEach((r) =>
-        log(
-          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
-            r.SkippedFields || 'none'
-          }`
-        )
-      );
+      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
-    const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
+    const csvRows = summary.map(
+      (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`
+    );
     fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
     log(`Summary CSV saved to : ${csvPath}`);
