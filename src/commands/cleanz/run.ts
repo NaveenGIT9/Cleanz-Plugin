@@ -429,7 +429,145 @@ function shouldSkip(
 }
 
 // ===============================================================
+// METADATA HANDLER REGISTRY
+// Drives processFailures in a data-driven way — add new types
+// here without touching processFailures at all.
+// ===============================================================
+
+type MetadataHandler = {
+  pattern: RegExp;
+  label: string;
+  whitelistKey: keyof WhitelistMap;
+  repoPathFn: (repoPath: string, name: string) => string;
+  removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
+  displayTag: string;   // prefix shown in removed list e.g. '[App]'
+};
+
+const METADATA_HANDLERS: MetadataHandler[] = [
+  {
+    pattern: /no CustomApplication named (.+?) found/,
+    label: 'app',
+    whitelistKey: 'apps',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'applications', `${n}.app-meta.xml`),
+    removeFn: removeApplicationVisibilityFromXml,
+    displayTag: '[App]',
+  },
+  {
+    pattern: /no ApexClass named (.+?) found/,
+    label: 'class',
+    whitelistKey: 'classes',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'classes', `${n}.cls`),
+    removeFn: removeClassAccessFromXml,
+    displayTag: '[Class]',
+  },
+  {
+    pattern: /no ApexPage named (.+?) found/,
+    label: 'page',
+    whitelistKey: 'pages',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'pages', `${n}.page`),
+    removeFn: removePageAccessFromXml,
+    displayTag: '[Page]',
+  },
+  {
+    pattern: /no CustomTab named (.+?) found/,
+    label: 'tab',
+    whitelistKey: 'tabs',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'tabs', `${n}.tab-meta.xml`),
+    removeFn: removeTabSettingFromXml,
+    displayTag: '[Tab]',
+  },
+  {
+    pattern: /no CustomObject named (.+?) found/,
+    label: 'object',
+    whitelistKey: 'objects',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`),
+    removeFn: removeObjectPermissionFromXml,
+    displayTag: '[Object]',
+  },
+  {
+    pattern: /no Flow named (.+?) found/,
+    label: 'flow',
+    whitelistKey: 'flows',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'flows', `${n}.flow-meta.xml`),
+    removeFn: removeFlowAccessFromXml,
+    displayTag: '[Flow]',
+  },
+];
+
+// ── Handle a single CustomField failure ──────────────────────
+function processFieldFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  repoPath: string,
+  removedFields: string[],
+  skippedFields: string[],
+  allSkippedFields: string[]
+): { handled: boolean; xmlContent: string } {
+  const fieldMatch = /no CustomField named (.+?) found/.exec(errorMessage);
+  if (!fieldMatch) return { handled: false, xmlContent };
+
+  const missingField = fieldMatch[1].trim();
+  const parts = missingField.split('.');
+  const fieldRepoPath = parts.length === 2
+    ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
+    : '';
+
+  if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
+    return { handled: true, xmlContent };
+  }
+
+  log(`   Missing field: ${missingField}`);
+  const { updated, removed } = removeFieldPermissionsFromXml(xmlContent, missingField);
+  if (removed) {
+    log(`   Removed fieldPermissions for: ${missingField}`);
+    removedFields.push(missingField);
+    return { handled: true, xmlContent: updated };
+  }
+  log(`   Field not found in XML: ${missingField} - already removed or not present.`);
+  return { handled: true, xmlContent };
+}
+
+// ── Handle a single generic metadata failure via registry ────
+function processRegisteredFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  repoPath: string,
+  removedFields: string[],
+  skippedFields: string[],
+  allSkippedFields: string[]
+): { handled: boolean; xmlContent: string } {
+  for (const handler of METADATA_HANDLERS) {
+    const match = handler.pattern.exec(errorMessage);
+    if (!match) continue;
+
+    const name = match[1].trim();
+    const repoFilePath = handler.repoPathFn(repoPath, name);
+
+    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
+      return { handled: true, xmlContent };
+    }
+
+    log(`   Missing ${handler.label}: ${name}`);
+    const { updated, removed } = handler.removeFn(xmlContent, name);
+    if (removed) {
+      log(`   Removed ${handler.label} block for: ${name}`);
+      removedFields.push(`${handler.displayTag} ${name}`);
+      return { handled: true, xmlContent: updated };
+    }
+    log(`   ${handler.label} block not found in XML: ${name} - already removed or not present.`);
+    return { handled: true, xmlContent };
+  }
+
+  return { handled: false, xmlContent };
+}
+
+// ===============================================================
 // HELPER: PROCESS FAILURES FOR ONE ITERATION
+// Complexity kept low by delegating to the two helpers above.
 // ===============================================================
 
 function processFailures(
@@ -447,160 +585,23 @@ function processFailures(
   for (const failure of failures) {
     const errorMessage = failure.problem;
 
-    // ── Missing CustomField ──────────────────────────────────────
-    const fieldMatch = /no CustomField named (.+?) found/.exec(errorMessage);
-    if (fieldMatch) {
-      const missingField = fieldMatch[1].trim();
-      const parts = missingField.split('.');
-      const fieldRepoPath = parts.length === 2
-        ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
-        : '';
-
-      if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing field: ${missingField}`);
-      const { updated, removed } = removeFieldPermissionsFromXml(updatedXml, missingField);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed fieldPermissions for: ${missingField}`);
-        removedFields.push(missingField);
-      } else {
-        log(`   Field not found in XML: ${missingField} - already removed or not present.`);
-      }
+    // ── CustomField (special-cased — needs Object.Field parsing) ─
+    const fieldResult = processFieldFailure(
+      log, errorMessage, updatedXml, whitelist, repoPath,
+      removedFields, skippedFields, allSkippedFields
+    );
+    if (fieldResult.handled) {
+      updatedXml = fieldResult.xmlContent;
       continue;
     }
 
-    // ── Missing CustomApplication (applicationVisibilities) ──────
-    const appMatch = /no CustomApplication named (.+?) found/.exec(errorMessage);
-    if (appMatch) {
-      const name = appMatch[1].trim();
-      const appRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'applications', `${name}.app-meta.xml`);
-
-      if (shouldSkip(log, 'app', name, whitelist.apps, appRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing application: ${name}`);
-      const { updated, removed } = removeApplicationVisibilityFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed applicationVisibilities for: ${name}`);
-        removedFields.push(`[App] ${name}`);
-      } else {
-        log(`   applicationVisibilities not found in XML: ${name} - already removed or not present.`);
-      }
-      continue;
-    }
-
-    // ── Missing ApexClass (classAccesses) ────────────────────────
-    const classMatch = /no ApexClass named (.+?) found/.exec(errorMessage);
-    if (classMatch) {
-      const name = classMatch[1].trim();
-      const classRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'classes', `${name}.cls`);
-
-      if (shouldSkip(log, 'class', name, whitelist.classes, classRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing ApexClass: ${name}`);
-      const { updated, removed } = removeClassAccessFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed classAccesses for: ${name}`);
-        removedFields.push(`[Class] ${name}`);
-      } else {
-        log(`   classAccesses not found in XML: ${name} - already removed or not present.`);
-      }
-      continue;
-    }
-
-    // ── Missing ApexPage (pageAccesses) ──────────────────────────
-    const pageMatch = /no ApexPage named (.+?) found/.exec(errorMessage);
-    if (pageMatch) {
-      const name = pageMatch[1].trim();
-      const pageRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'pages', `${name}.page`);
-
-      if (shouldSkip(log, 'page', name, whitelist.pages, pageRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing ApexPage: ${name}`);
-      const { updated, removed } = removePageAccessFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed pageAccesses for: ${name}`);
-        removedFields.push(`[Page] ${name}`);
-      } else {
-        log(`   pageAccesses not found in XML: ${name} - already removed or not present.`);
-      }
-      continue;
-    }
-
-    // ── Missing CustomTab (tabSettings) ──────────────────────────
-    const tabMatch = /no CustomTab named (.+?) found/.exec(errorMessage);
-    if (tabMatch) {
-      const name = tabMatch[1].trim();
-      const tabRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'tabs', `${name}.tab-meta.xml`);
-
-      if (shouldSkip(log, 'tab', name, whitelist.tabs, tabRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing CustomTab: ${name}`);
-      const { updated, removed } = removeTabSettingFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed tabSettings for: ${name}`);
-        removedFields.push(`[Tab] ${name}`);
-      } else {
-        log(`   tabSettings not found in XML: ${name} - already removed or not present.`);
-      }
-      continue;
-    }
-
-    // ── Missing CustomObject (objectPermissions) ──────────────────
-    const objectMatch = /no CustomObject named (.+?) found/.exec(errorMessage);
-    if (objectMatch) {
-      const name = objectMatch[1].trim();
-      const objectRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'objects', name, `${name}.object-meta.xml`);
-
-      if (shouldSkip(log, 'object', name, whitelist.objects, objectRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing CustomObject: ${name}`);
-      const { updated, removed } = removeObjectPermissionFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed objectPermissions for: ${name}`);
-        removedFields.push(`[Object] ${name}`);
-      } else {
-        log(`   objectPermissions not found in XML: ${name} - already removed or not present.`);
-      }
-      continue;
-    }
-
-    // ── Missing Flow (flowAccesses) ───────────────────────────────
-    const flowMatch = /no Flow named (.+?) found/.exec(errorMessage);
-    if (flowMatch) {
-      const name = flowMatch[1].trim();
-      const flowRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'flows', `${name}.flow-meta.xml`);
-
-      if (shouldSkip(log, 'flow', name, whitelist.flows, flowRepoPath, skippedFields, allSkippedFields)) {
-        continue;
-      }
-
-      log(`   Missing Flow: ${name}`);
-      const { updated, removed } = removeFlowAccessFromXml(updatedXml, name);
-      if (removed) {
-        updatedXml = updated;
-        log(`   Removed flowAccesses for: ${name}`);
-        removedFields.push(`[Flow] ${name}`);
-      } else {
-        log(`   flowAccesses not found in XML: ${name} - already removed or not present.`);
-      }
+    // ── All other metadata types — handled via registry ──────────
+    const registryResult = processRegisteredFailure(
+      log, errorMessage, updatedXml, whitelist, repoPath,
+      removedFields, skippedFields, allSkippedFields
+    );
+    if (registryResult.handled) {
+      updatedXml = registryResult.xmlContent;
       continue;
     }
 
