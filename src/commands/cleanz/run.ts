@@ -1,5 +1,5 @@
 /*
- * Copyright 2025, Salesforce, Inc.
+ * Copyright 2026, Salesforce, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
