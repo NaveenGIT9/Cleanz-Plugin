@@ -966,6 +966,9 @@ async function invokeProcessMetadataItem(
 
 // ===============================================================
 // SF PLUGIN COMMAND
+// run() is intentionally thin — each logical phase is delegated
+// to a private helper so cyclomatic complexity stays well under
+// the enforced limit of 20.
 // ===============================================================
 
 export default class DeployAndFix extends SfCommand<void> {
@@ -986,15 +989,17 @@ export default class DeployAndFix extends SfCommand<void> {
     }),
   };
 
-  public async run(): Promise<void> {
-    const { flags } = await this.parse(DeployAndFix);
-    const log = (msg: string): void => { this.log(msg); };
-
+  // ── Phase 1: interactive prompts ─────────────────────────────
+  private async resolveInputs(
+    log: (msg: string) => void,
+    jsonPathFlag: string,
+    targetOrgFlag: string
+  ): Promise<{ promotionJsonPath: string; targetOrg: string }> {
     log('\n======================================================');
     log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
     log('======================================================\n');
 
-    let promotionJsonPath = flags['json-path'] ?? '';
+    let promotionJsonPath = jsonPathFlag;
     while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
       if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
       // eslint-disable-next-line no-await-in-loop
@@ -1005,7 +1010,7 @@ export default class DeployAndFix extends SfCommand<void> {
     }
     log('   JSON file found.\n');
 
-    let targetOrg = flags['target-org'] ?? '';
+    let targetOrg = targetOrgFlag;
     if (!targetOrg) {
       // eslint-disable-next-line no-await-in-loop
       targetOrg = await prompt(
@@ -1014,30 +1019,41 @@ export default class DeployAndFix extends SfCommand<void> {
       targetOrg = targetOrg.trim();
     }
     log(`\n   Target Org set to: ${targetOrg}\n`);
+    return { promotionJsonPath, targetOrg };
+  }
 
-    // ================= LOAD & PARSE JSON =================
-    log('Loading promotion JSON...');
-    const promotionData = JSON.parse(fs.readFileSync(promotionJsonPath, 'utf8')) as PromotionItem[];
-
-    const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
-    const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
-
-    const whitelist: WhitelistMap = {
-      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
-      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
-      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass').map((i) => i.n))].sort(),
-      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
-      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
-      objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
-      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
+  // ── Phase 2: parse JSON → lists + whitelist ───────────────────
+  private parsePromotionJson(jsonPath: string): {
+    permSets: string[];
+    profiles: string[];
+    whitelist: WhitelistMap;
+  } {
+    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
+    const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
+    return {
+      permSets: uniq('PermissionSet'),
+      profiles: uniq('Profile'),
+      whitelist: {
+        fields: uniq('CustomField'),
+        apps: uniq('CustomApplication'),
+        classes: uniq('ApexClass'),
+        pages: uniq('ApexPage'),
+        tabs: uniq('CustomTab'),
+        objects: uniq('CustomObject'),
+        flows: uniq('Flow'),
+      },
     };
+  }
 
-    // ✅ Single shared cache — lives for the entire script run,
-    // grows as each item discovers new missing references, and
-    // is applied to every subsequent item for free.
-    const globalMissing = makeGlobalMissingCache();
-
-    const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
+  // ── Phase 3: startup banner + confirmation prompt ─────────────
+  private async printBannerAndConfirm(
+    log: (msg: string) => void,
+    targetOrg: string,
+    permSets: string[],
+    profiles: string[],
+    whitelist: WhitelistMap
+  ): Promise<boolean> {
+    const totalWhitelisted = Object.values(whitelist).reduce((s, a) => s + a.length, 0);
 
     log('\n======================================================');
     log('STARTING AUTOMATED DEPLOY & FIX LOOP');
@@ -1078,74 +1094,83 @@ export default class DeployAndFix extends SfCommand<void> {
     const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
     if (confirm.trim().toLowerCase() === 'exit') {
       log('\nScript cancelled by user.');
-      return;
+      return false;
     }
     log('\nStarting script...');
     log('\n======================================================');
+    return true;
+  }
 
+  // ── Phase 4: process all items (perm sets then profiles) ──────
+  private async processAllItems(
+    log: (msg: string) => void,
+    permSets: string[],
+    profiles: string[],
+    targetOrg: string,
+    whitelist: WhitelistMap,
+    globalMissing: GlobalMissingCache
+  ): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
     const summary: SummaryRecord[] = [];
     const totalDeploys: TotalDeploys = { value: 0 };
 
-    // ================= PROCESS PERMISSION SETS =================
+    const commonParams = {
+      targetOrg,
+      repoPath: REPO_PATH,
+      whitelist,
+      globalMissing,
+      maxIterations: MAX_ITERATIONS,
+      maxTotalDeploys: MAX_TOTAL_DEPLOYS,
+      totalDeploys,
+      timeoutMins: DEPLOY_TIMEOUT_MINS,
+      maxRetries: MAX_RETRIES,
+    };
+
     log('\n######################################################');
     log(`  PROCESSING PERMISSION SETS (${permSets.length})`);
     log('######################################################');
 
     for (const psName of permSets) {
-      const psFilePath = path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`);
       // eslint-disable-next-line no-await-in-loop
-      const result = await invokeProcessMetadataItem(log, {
+      summary.push(await invokeProcessMetadataItem(log, {
+        ...commonParams,
         metadataType: 'PermissionSet',
         itemName: psName,
-        filePath: psFilePath,
-        targetOrg,
-        repoPath: REPO_PATH,
-        whitelist,
-        globalMissing,           // ✅ shared cache passed in
-        maxIterations: MAX_ITERATIONS,
-        maxTotalDeploys: MAX_TOTAL_DEPLOYS,
-        totalDeploys,
-        timeoutMins: DEPLOY_TIMEOUT_MINS,
-        maxRetries: MAX_RETRIES,
-      });
-      summary.push(result);
+        filePath: path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`),
+      }));
       if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
     }
 
-    // ================= PROCESS PROFILES =================
     if (totalDeploys.value <= MAX_TOTAL_DEPLOYS) {
       log('\n######################################################');
       log(`  PROCESSING PROFILES (${profiles.length})`);
       log('######################################################');
 
       for (const profileName of profiles) {
-        const profileFilePath = path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`);
         // eslint-disable-next-line no-await-in-loop
-        const result = await invokeProcessMetadataItem(log, {
+        summary.push(await invokeProcessMetadataItem(log, {
+          ...commonParams,
           metadataType: 'Profile',
           itemName: profileName,
-          filePath: profileFilePath,
-          targetOrg,
-          repoPath: REPO_PATH,
-          whitelist,
-          globalMissing,           // ✅ same cache — profiles benefit from all PS discoveries too
-          maxIterations: MAX_ITERATIONS,
-          maxTotalDeploys: MAX_TOTAL_DEPLOYS,
-          totalDeploys,
-          timeoutMins: DEPLOY_TIMEOUT_MINS,
-          maxRetries: MAX_RETRIES,
-        });
-        summary.push(result);
+          filePath: path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`),
+        }));
         if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
       }
     }
 
-    // ================= FINAL SUMMARY =================
+    return { summary, totalDeploys };
+  }
+
+  // ── Phase 5: print final summary + write CSV ──────────────────
+  private printFinalSummary(
+    log: (msg: string) => void,
+    summary: SummaryRecord[],
+    totalDeploys: TotalDeploys,
+    globalMissing: GlobalMissingCache
+  ): void {
     log('\n======================================================');
     log('ALL ITEMS PROCESSED - FINAL SUMMARY');
     log('======================================================');
 
-    // ── Print global cache summary so you know what was discovered ──
     const totalCached =
       globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
       globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
@@ -1165,15 +1190,14 @@ export default class DeployAndFix extends SfCommand<void> {
       log(`[WARN] Review that file and add new regex patterns to METADATA_HANDLERS or FIELD_PATTERNS.`);
     }
 
+    const row = (r: SummaryRecord): string =>
+      `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`;
+
     log('\nPERMISSION SETS:');
-    summary
-      .filter((r) => r.Type === 'PermissionSet')
-      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
+    summary.filter((r) => r.Type === 'PermissionSet').forEach((r) => log(row(r)));
 
     log('\nPROFILES:');
-    summary
-      .filter((r) => r.Type === 'Profile')
-      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
+    summary.filter((r) => r.Type === 'Profile').forEach((r) => log(row(r)));
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
@@ -1184,5 +1208,35 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log(`\nSummary CSV saved to : ${csvPath}`);
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
+  }
+
+  // ── Orchestrator — complexity kept minimal by delegating phases ─
+  public async run(): Promise<void> {
+    const { flags } = await this.parse(DeployAndFix);
+    const log = (msg: string): void => { this.log(msg); };
+
+    // Phase 1 — resolve inputs
+    const { promotionJsonPath, targetOrg } = await this.resolveInputs(
+      log, flags['json-path'] ?? '', flags['target-org'] ?? ''
+    );
+
+    // Phase 2 — parse JSON
+    const { permSets, profiles, whitelist } = this.parsePromotionJson(promotionJsonPath);
+
+    // Phase 3 — banner + confirmation
+    const confirmed = await this.printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
+    if (!confirmed) return;
+
+    // ✅ Single shared cache — grows across all items so each
+    // subsequent file is pre-scrubbed for free before its first deploy.
+    const globalMissing = makeGlobalMissingCache();
+
+    // Phase 4 — process all items
+    const { summary, totalDeploys } = await this.processAllItems(
+      log, permSets, profiles, targetOrg, whitelist, globalMissing
+    );
+
+    // Phase 5 — final summary
+    this.printFinalSummary(log, summary, totalDeploys, globalMissing);
   }
 }
