@@ -629,7 +629,7 @@ function applyGlobalMissingCacheToFile(
   if (removedItems.length > 0) {
     log(`   [Pre-scrub] Cleaned ${removedItems.length} reference(s) from ${itemName} before first deploy.`);
   } else {
-    log(`   [Pre-scrub] No cached references found in this file. Proceeding normally.`);
+    log('   [Pre-scrub] No cached references found in this file. Proceeding normally.');
   }
 
   return { xmlContent: updated, removedItems };
@@ -719,7 +719,7 @@ function processRegisteredFailure(
       log(`   Removed ${handler.label} block for: ${name}`);
       removedFields.push(`${handler.displayTag} ${name}`);
       // ✅ Cache globally so all subsequent items skip this deploy
-      (globalMissing[handler.cacheKey] as Set<string>).add(name);
+      (globalMissing[handler.cacheKey]).add(name);
       return { handled: true, xmlContent: updated };
     }
     log(`   ${handler.label} block not found in XML: ${name} - already removed or not present.`);
@@ -783,7 +783,7 @@ function processFailures(
   if (unmatchedErrors.length > 0) {
     unmatchedErrors.forEach((e) => logUnmatchedError(repoPath, itemName, e));
     log(`   [WARN] ${unmatchedErrors.length} unmatched error(s) appended to: ${UNMATCHED_ERRORS_LOG}`);
-    log(`   [WARN] Check that file to add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.`);
+    log('   [WARN] Check that file to add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
   }
 
   return { xmlContent: updatedXml, removedFields, skippedFields };
@@ -965,10 +965,238 @@ async function invokeProcessMetadataItem(
 }
 
 // ===============================================================
+// MODULE-LEVEL PHASE HELPERS
+// Kept outside the class so ESLint's class-methods-use-this rule
+// is satisfied — none of these need 'this', they are pure logic.
+// ===============================================================
+
+// ── Phase 1: interactive prompts ─────────────────────────────
+async function resolveInputs(
+  log: (msg: string) => void,
+  jsonPathFlag: string,
+  targetOrgFlag: string
+): Promise<{ promotionJsonPath: string; targetOrg: string }> {
+  log('\n======================================================');
+  log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
+  log('======================================================\n');
+
+  let promotionJsonPath = jsonPathFlag;
+  while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
+    if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
+    // eslint-disable-next-line no-await-in-loop
+    promotionJsonPath = await prompt(
+      'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
+    );
+    promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
+  }
+  log('   JSON file found.\n');
+
+  let targetOrg = targetOrgFlag;
+  if (!targetOrg) {
+    // eslint-disable-next-line no-await-in-loop
+    targetOrg = await prompt(
+      'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
+    );
+    targetOrg = targetOrg.trim();
+  }
+  log(`\n   Target Org set to: ${targetOrg}\n`);
+  return { promotionJsonPath, targetOrg };
+}
+
+// ── Phase 2: parse JSON → lists + whitelist ───────────────────
+function parsePromotionJson(jsonPath: string): {
+  permSets: string[];
+  profiles: string[];
+  whitelist: WhitelistMap;
+} {
+  const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
+  const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
+  return {
+    permSets: uniq('PermissionSet'),
+    profiles: uniq('Profile'),
+    whitelist: {
+      fields: uniq('CustomField'),
+      apps: uniq('CustomApplication'),
+      classes: uniq('ApexClass'),
+      pages: uniq('ApexPage'),
+      tabs: uniq('CustomTab'),
+      objects: uniq('CustomObject'),
+      flows: uniq('Flow'),
+    },
+  };
+}
+
+// ── Phase 3: startup banner + confirmation prompt ─────────────
+async function printBannerAndConfirm(
+  log: (msg: string) => void,
+  targetOrg: string,
+  permSets: string[],
+  profiles: string[],
+  whitelist: WhitelistMap
+): Promise<boolean> {
+  const totalWhitelisted = Object.values(whitelist).reduce((s, a) => s + a.length, 0);
+
+  log('\n======================================================');
+  log('STARTING AUTOMATED DEPLOY & FIX LOOP');
+  log('======================================================');
+  log(`Target Org              : ${targetOrg}`);
+  log(`Permission Sets         : ${permSets.length} found in JSON`);
+  log(`Profiles                : ${profiles.length} found in JSON`);
+  log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
+  log(`  - CustomFields        : ${whitelist.fields.length}`);
+  log(`  - CustomApplications  : ${whitelist.apps.length}`);
+  log(`  - ApexClasses         : ${whitelist.classes.length}`);
+  log(`  - ApexPages           : ${whitelist.pages.length}`);
+  log(`  - CustomTabs          : ${whitelist.tabs.length}`);
+  log(`  - CustomObjects       : ${whitelist.objects.length}`);
+  log(`  - Flows               : ${whitelist.flows.length}`);
+  log(`Max per item            : ${MAX_ITERATIONS} iterations`);
+  log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
+  log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
+  log(`Max retries             : ${MAX_RETRIES} per deploy call`);
+  log(`Unmatched errors log    : ${UNMATCHED_ERRORS_LOG}`);
+
+  log('\nPermission Sets to process:');
+  permSets.forEach((ps) => log(`   - ${ps}`));
+  log('\nProfiles to process:');
+  profiles.forEach((p) => log(`   - ${p}`));
+
+  log('\nWhitelisted items (will never be removed):');
+  log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
+  log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
+  log('  Classes  : ' + (whitelist.classes.join(', ') || 'none'));
+  log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
+  log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
+  log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
+  log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
+
+  log('');
+  const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
+  if (confirm.trim().toLowerCase() === 'exit') {
+    log('\nScript cancelled by user.');
+    return false;
+  }
+  log('\nStarting script...');
+  log('\n======================================================');
+  return true;
+}
+
+// ── Phase 4: process all items (perm sets then profiles) ──────
+async function processAllItems(
+  log: (msg: string) => void,
+  permSets: string[],
+  profiles: string[],
+  targetOrg: string,
+  whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache
+): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
+  const summary: SummaryRecord[] = [];
+  const totalDeploys: TotalDeploys = { value: 0 };
+
+  const commonParams = {
+    targetOrg,
+    repoPath: REPO_PATH,
+    whitelist,
+    globalMissing,
+    maxIterations: MAX_ITERATIONS,
+    maxTotalDeploys: MAX_TOTAL_DEPLOYS,
+    totalDeploys,
+    timeoutMins: DEPLOY_TIMEOUT_MINS,
+    maxRetries: MAX_RETRIES,
+  };
+
+  log('\n######################################################');
+  log(`  PROCESSING PERMISSION SETS (${permSets.length})`);
+  log('######################################################');
+
+  for (const psName of permSets) {
+    // eslint-disable-next-line no-await-in-loop
+    summary.push(await invokeProcessMetadataItem(log, {
+      ...commonParams,
+      metadataType: 'PermissionSet',
+      itemName: psName,
+      filePath: path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`),
+    }));
+    if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
+  }
+
+  if (totalDeploys.value <= MAX_TOTAL_DEPLOYS) {
+    log('\n######################################################');
+    log(`  PROCESSING PROFILES (${profiles.length})`);
+    log('######################################################');
+
+    for (const profileName of profiles) {
+      // eslint-disable-next-line no-await-in-loop
+      summary.push(await invokeProcessMetadataItem(log, {
+        ...commonParams,
+        metadataType: 'Profile',
+        itemName: profileName,
+        filePath: path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`),
+      }));
+      if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
+    }
+  }
+
+  return { summary, totalDeploys };
+}
+
+// ── Phase 5: print final summary + write CSV ──────────────────
+function printFinalSummary(
+  log: (msg: string) => void,
+  summary: SummaryRecord[],
+  totalDeploys: TotalDeploys,
+  globalMissing: GlobalMissingCache
+): void {
+  log('\n======================================================');
+  log('ALL ITEMS PROCESSED - FINAL SUMMARY');
+  log('======================================================');
+
+  const totalCached =
+    globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
+    globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
+    globalMissing.flows.size;
+
+  log(`\nGlobal Missing Cache (discovered during this run): ${totalCached} unique missing references`);
+  if (globalMissing.fields.size) log(`  Fields   : ${[...globalMissing.fields].join(', ')}`);
+  if (globalMissing.apps.size) log(`  Apps     : ${[...globalMissing.apps].join(', ')}`);
+  if (globalMissing.classes.size) log(`  Classes  : ${[...globalMissing.classes].join(', ')}`);
+  if (globalMissing.pages.size) log(`  Pages    : ${[...globalMissing.pages].join(', ')}`);
+  if (globalMissing.tabs.size) log(`  Tabs     : ${[...globalMissing.tabs].join(', ')}`);
+  if (globalMissing.objects.size) log(`  Objects  : ${[...globalMissing.objects].join(', ')}`);
+  if (globalMissing.flows.size) log(`  Flows    : ${[...globalMissing.flows].join(', ')}`);
+
+  if (fs.existsSync(UNMATCHED_ERRORS_LOG)) {
+    log(`\n[WARN] Unmatched SF errors were logged to: ${UNMATCHED_ERRORS_LOG}`);
+    log('[WARN] Review that file and add new regex patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
+  }
+
+  const row = (r: SummaryRecord): string =>
+    `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`;
+
+  log('\nPERMISSION SETS:');
+  summary.filter((r) => r.Type === 'PermissionSet').forEach((r) => log(row(r)));
+
+  log('\nPROFILES:');
+  summary.filter((r) => r.Type === 'Profile').forEach((r) => log(row(r)));
+
+  const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
+  const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
+  const csvRows = summary.map(
+    (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`
+  );
+  fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
+
+  log(`\nSummary CSV saved to : ${csvPath}`);
+  log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
+}
+
+// ===============================================================
 // SF PLUGIN COMMAND
-// run() is intentionally thin — each logical phase is delegated
-// to a private helper so cyclomatic complexity stays well under
-// the enforced limit of 20.
+// The class itself is intentionally thin — run() delegates every
+// phase to the module-level functions above so that:
+//   (a) cyclomatic complexity stays well under the limit of 20
+//   (b) class-methods-use-this is fully satisfied (only run()
+//       is on the class, and it uses this.parse / this.log)
 // ===============================================================
 
 export default class DeployAndFix extends SfCommand<void> {
@@ -989,254 +1217,32 @@ export default class DeployAndFix extends SfCommand<void> {
     }),
   };
 
-  // ── Phase 1: interactive prompts ─────────────────────────────
-  private async resolveInputs(
-    log: (msg: string) => void,
-    jsonPathFlag: string,
-    targetOrgFlag: string
-  ): Promise<{ promotionJsonPath: string; targetOrg: string }> {
-    log('\n======================================================');
-    log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
-    log('======================================================\n');
-
-    let promotionJsonPath = jsonPathFlag;
-    while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
-      if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
-      // eslint-disable-next-line no-await-in-loop
-      promotionJsonPath = await prompt(
-        'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
-      );
-      promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
-    }
-    log('   JSON file found.\n');
-
-    let targetOrg = targetOrgFlag;
-    if (!targetOrg) {
-      // eslint-disable-next-line no-await-in-loop
-      targetOrg = await prompt(
-        'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
-      );
-      targetOrg = targetOrg.trim();
-    }
-    log(`\n   Target Org set to: ${targetOrg}\n`);
-    return { promotionJsonPath, targetOrg };
-  }
-
-  // ── Phase 2: parse JSON → lists + whitelist ───────────────────
-  private parsePromotionJson(jsonPath: string): {
-    permSets: string[];
-    profiles: string[];
-    whitelist: WhitelistMap;
-  } {
-    const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
-    const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
-    return {
-      permSets: uniq('PermissionSet'),
-      profiles: uniq('Profile'),
-      whitelist: {
-        fields: uniq('CustomField'),
-        apps: uniq('CustomApplication'),
-        classes: uniq('ApexClass'),
-        pages: uniq('ApexPage'),
-        tabs: uniq('CustomTab'),
-        objects: uniq('CustomObject'),
-        flows: uniq('Flow'),
-      },
-    };
-  }
-
-  // ── Phase 3: startup banner + confirmation prompt ─────────────
-  private async printBannerAndConfirm(
-    log: (msg: string) => void,
-    targetOrg: string,
-    permSets: string[],
-    profiles: string[],
-    whitelist: WhitelistMap
-  ): Promise<boolean> {
-    const totalWhitelisted = Object.values(whitelist).reduce((s, a) => s + a.length, 0);
-
-    log('\n======================================================');
-    log('STARTING AUTOMATED DEPLOY & FIX LOOP');
-    log('======================================================');
-    log(`Target Org              : ${targetOrg}`);
-    log(`Permission Sets         : ${permSets.length} found in JSON`);
-    log(`Profiles                : ${profiles.length} found in JSON`);
-    log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
-    log(`  - CustomFields        : ${whitelist.fields.length}`);
-    log(`  - CustomApplications  : ${whitelist.apps.length}`);
-    log(`  - ApexClasses         : ${whitelist.classes.length}`);
-    log(`  - ApexPages           : ${whitelist.pages.length}`);
-    log(`  - CustomTabs          : ${whitelist.tabs.length}`);
-    log(`  - CustomObjects       : ${whitelist.objects.length}`);
-    log(`  - Flows               : ${whitelist.flows.length}`);
-    log(`Max per item            : ${MAX_ITERATIONS} iterations`);
-    log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
-    log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
-    log(`Max retries             : ${MAX_RETRIES} per deploy call`);
-    log(`Unmatched errors log    : ${UNMATCHED_ERRORS_LOG}`);
-
-    log('\nPermission Sets to process:');
-    permSets.forEach((ps) => log(`   - ${ps}`));
-    log('\nProfiles to process:');
-    profiles.forEach((p) => log(`   - ${p}`));
-
-    log('\nWhitelisted items (will never be removed):');
-    log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
-    log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
-    log('  Classes  : ' + (whitelist.classes.join(', ') || 'none'));
-    log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
-    log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
-    log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
-    log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
-
-    log('');
-    // eslint-disable-next-line no-await-in-loop
-    const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
-    if (confirm.trim().toLowerCase() === 'exit') {
-      log('\nScript cancelled by user.');
-      return false;
-    }
-    log('\nStarting script...');
-    log('\n======================================================');
-    return true;
-  }
-
-  // ── Phase 4: process all items (perm sets then profiles) ──────
-  private async processAllItems(
-    log: (msg: string) => void,
-    permSets: string[],
-    profiles: string[],
-    targetOrg: string,
-    whitelist: WhitelistMap,
-    globalMissing: GlobalMissingCache
-  ): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
-    const summary: SummaryRecord[] = [];
-    const totalDeploys: TotalDeploys = { value: 0 };
-
-    const commonParams = {
-      targetOrg,
-      repoPath: REPO_PATH,
-      whitelist,
-      globalMissing,
-      maxIterations: MAX_ITERATIONS,
-      maxTotalDeploys: MAX_TOTAL_DEPLOYS,
-      totalDeploys,
-      timeoutMins: DEPLOY_TIMEOUT_MINS,
-      maxRetries: MAX_RETRIES,
-    };
-
-    log('\n######################################################');
-    log(`  PROCESSING PERMISSION SETS (${permSets.length})`);
-    log('######################################################');
-
-    for (const psName of permSets) {
-      // eslint-disable-next-line no-await-in-loop
-      summary.push(await invokeProcessMetadataItem(log, {
-        ...commonParams,
-        metadataType: 'PermissionSet',
-        itemName: psName,
-        filePath: path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`),
-      }));
-      if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
-    }
-
-    if (totalDeploys.value <= MAX_TOTAL_DEPLOYS) {
-      log('\n######################################################');
-      log(`  PROCESSING PROFILES (${profiles.length})`);
-      log('######################################################');
-
-      for (const profileName of profiles) {
-        // eslint-disable-next-line no-await-in-loop
-        summary.push(await invokeProcessMetadataItem(log, {
-          ...commonParams,
-          metadataType: 'Profile',
-          itemName: profileName,
-          filePath: path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`),
-        }));
-        if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
-      }
-    }
-
-    return { summary, totalDeploys };
-  }
-
-  // ── Phase 5: print final summary + write CSV ──────────────────
-  private printFinalSummary(
-    log: (msg: string) => void,
-    summary: SummaryRecord[],
-    totalDeploys: TotalDeploys,
-    globalMissing: GlobalMissingCache
-  ): void {
-    log('\n======================================================');
-    log('ALL ITEMS PROCESSED - FINAL SUMMARY');
-    log('======================================================');
-
-    const totalCached =
-      globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
-      globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
-      globalMissing.flows.size;
-
-    log(`\nGlobal Missing Cache (discovered during this run): ${totalCached} unique missing references`);
-    if (globalMissing.fields.size) log(`  Fields   : ${[...globalMissing.fields].join(', ')}`);
-    if (globalMissing.apps.size) log(`  Apps     : ${[...globalMissing.apps].join(', ')}`);
-    if (globalMissing.classes.size) log(`  Classes  : ${[...globalMissing.classes].join(', ')}`);
-    if (globalMissing.pages.size) log(`  Pages    : ${[...globalMissing.pages].join(', ')}`);
-    if (globalMissing.tabs.size) log(`  Tabs     : ${[...globalMissing.tabs].join(', ')}`);
-    if (globalMissing.objects.size) log(`  Objects  : ${[...globalMissing.objects].join(', ')}`);
-    if (globalMissing.flows.size) log(`  Flows    : ${[...globalMissing.flows].join(', ')}`);
-
-    if (fs.existsSync(UNMATCHED_ERRORS_LOG)) {
-      log(`\n[WARN] Unmatched SF errors were logged to: ${UNMATCHED_ERRORS_LOG}`);
-      log(`[WARN] Review that file and add new regex patterns to METADATA_HANDLERS or FIELD_PATTERNS.`);
-    }
-
-    const row = (r: SummaryRecord): string =>
-      `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`;
-
-    log('\nPERMISSION SETS:');
-    summary.filter((r) => r.Type === 'PermissionSet').forEach((r) => log(row(r)));
-
-    log('\nPROFILES:');
-    summary.filter((r) => r.Type === 'Profile').forEach((r) => log(row(r)));
-
-    const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
-    const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
-    const csvRows = summary.map(
-      (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`
-    );
-    fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
-
-    log(`\nSummary CSV saved to : ${csvPath}`);
-    log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
-  }
-
-  // ── Orchestrator — complexity kept minimal by delegating phases ─
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
     const log = (msg: string): void => { this.log(msg); };
 
     // Phase 1 — resolve inputs
-    const { promotionJsonPath, targetOrg } = await this.resolveInputs(
+    const { promotionJsonPath, targetOrg } = await resolveInputs(
       log, flags['json-path'] ?? '', flags['target-org'] ?? ''
     );
 
     // Phase 2 — parse JSON
-    const { permSets, profiles, whitelist } = this.parsePromotionJson(promotionJsonPath);
+    const { permSets, profiles, whitelist } = parsePromotionJson(promotionJsonPath);
 
     // Phase 3 — banner + confirmation
-    const confirmed = await this.printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
+    const confirmed = await printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
     if (!confirmed) return;
 
-    // ✅ Single shared cache — grows across all items so each
+    // Single shared cache — grows across all items so each
     // subsequent file is pre-scrubbed for free before its first deploy.
     const globalMissing = makeGlobalMissingCache();
 
     // Phase 4 — process all items
-    const { summary, totalDeploys } = await this.processAllItems(
+    const { summary, totalDeploys } = await processAllItems(
       log, permSets, profiles, targetOrg, whitelist, globalMissing
     );
 
     // Phase 5 — final summary
-    this.printFinalSummary(log, summary, totalDeploys, globalMissing);
+    printFinalSummary(log, summary, totalDeploys, globalMissing);
   }
 }
