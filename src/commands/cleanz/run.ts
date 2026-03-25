@@ -582,6 +582,10 @@ function processFailures(
   const removedFields: string[] = [];
   const skippedFields: string[] = [];
 
+  // DEBUG — log every raw error so we can see exact Salesforce wording
+  log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
+  failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
+
   for (const failure of failures) {
     const errorMessage = failure.problem;
 
