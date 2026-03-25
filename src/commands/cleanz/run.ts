@@ -1,3 +1,4 @@
+WHITESLISTING ALL PACKAGE COMPONENTS
 /*
  * Copyright 2026, Salesforce, Inc.
  *
@@ -60,6 +61,17 @@ type SummaryRecord = {
 
 type TotalDeploys = { value: number };
 
+// ── Whitelist map — one entry per metadata type ───────────────
+type WhitelistMap = {
+  fields: string[];
+  apps: string[];
+  classes: string[];
+  pages: string[];
+  tabs: string[];
+  objects: string[];
+  flows: string[];
+};
+
 // ===============================================================
 // CONSTANTS / CONFIG
 // ===============================================================
@@ -120,7 +132,6 @@ function formatXml(xml: string): string {
 
 // ===============================================================
 // HELPER: SAVE XML CLEANLY — pure string-based, no xmldom
-// (Equivalent to Save-XmlClean in PowerShell)
 // ===============================================================
 
 function saveXmlClean(xmlContent: string, filePath: string, metadataType: string): void {
@@ -143,7 +154,6 @@ function saveXmlClean(xmlContent: string, filePath: string, metadataType: string
 
 // ===============================================================
 // HELPER: REMOVE fieldPermissions BLOCK — pure regex, no xmldom
-// (Replaces xmldom DOM manipulation)
 // ===============================================================
 
 function removeFieldPermissionsFromXml(
@@ -151,8 +161,6 @@ function removeFieldPermissionsFromXml(
   missingField: string
 ): { updated: string; removed: boolean } {
   const escapedField = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  // Match only the single <fieldPermissions> block whose <field> equals missingField exactly.
-  // Use (?:(?!<fieldPermissions>)[\s\S])*? so the match cannot bleed into the next block.
   const innerPattern = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
   const blockRegex = new RegExp(
     `[ \\t]*<fieldPermissions>${innerPattern}<field>[ \\t]*${escapedField}[ \\t]*</field>${innerPattern}</fieldPermissions>[ \\t]*\\r?\\n?`,
@@ -170,9 +178,6 @@ function getRootNodeName(xmlContent: string): string {
 
 // ===============================================================
 // GENERIC BLOCK REMOVER — reusable for any single-key XML block
-// blockTag    : e.g. 'classAccesses'
-// keyTag      : the child tag whose text must match, e.g. 'apexClass'
-// missingName : the value to match against
 // ===============================================================
 
 function removeXmlBlock(
@@ -193,7 +198,7 @@ function removeXmlBlock(
   return { updated, removed };
 }
 
-// ── Typed wrappers (self-documenting call sites) ──────────────
+// ── Typed wrappers ────────────────────────────────────────────
 
 function removeApplicationVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'applicationVisibilities', 'application', name);
@@ -221,10 +226,8 @@ function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: s
 
 // ===============================================================
 // HELPER: RUN DEPLOY WITH TIMEOUT & RETRY
-// (Equivalent to Invoke-DeployWithRetry in PowerShell)
 // ===============================================================
 
-// Transient SF CLI error patterns that should be silently retried with backoff
 const TRANSIENT_ERROR_PATTERNS = [
   /rate limit/i,
   /request limit/i,
@@ -254,7 +257,6 @@ function isTransientError(raw: string): boolean {
 }
 
 function getBackoffMs(attempt: number): number {
-  // Exponential backoff: 15s, 30s, 60s, 120s — capped at 2 min
   return Math.min(15_000 * Math.pow(2, attempt - 1), 120_000);
 }
 
@@ -267,7 +269,6 @@ async function invokeDeployWithRetry(
   timeoutMins: number,
   maxRetries: number
 ): Promise<DeployResult | null> {
-  // Hard cap: keep retrying transient errors up to this many total attempts
   const MAX_TOTAL_ATTEMPTS = maxRetries + 10;
   let attempt = 0;
   let hardAttempt = 0;
@@ -308,13 +309,12 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    // Check for transient errors BEFORE trying to parse — catches non-JSON error dumps too
     if (isTransientError(raw)) {
       const backoff = getBackoffMs(attempt);
       log(`   Transient error detected — waiting ${backoff / 1000}s before retry...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(backoff);
-      attempt = 0; // reset attempt counter so backoff resets after a transient burst
+      attempt = 0;
       continue;
     }
 
@@ -328,7 +328,6 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    // Check parsed result for transient error messages
     const errText = `${result.message ?? ''} ${result.name ?? ''}`;
     if (!result.result && isTransientError(errText)) {
       const backoff = getBackoffMs(attempt);
@@ -339,11 +338,7 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    // Normalise alternate SF CLI response shapes into the expected shape.
-    // Some SF CLI versions wrap the deploy result differently.
     if (!result.result && result.status !== undefined) {
-      // Shape: { status: 0, result: undefined } — SF CLI returned top-level fields only.
-      // Treat status 0 as success, anything else as a failure with no component details.
       log(`   Normalising SF CLI response (status=${result.status}).`);
       result.result = {
         success: result.status === 0,
@@ -351,7 +346,6 @@ async function invokeDeployWithRetry(
       };
     }
 
-    // Valid response — return it
     log('   Deploy response received.');
     return result;
   }
@@ -401,15 +395,49 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ===============================================================
+// HELPER: WHITELIST + REPO CHECK — reusable across all types
+// Returns true if the item should be SKIPPED (not removed)
+// ===============================================================
+
+function shouldSkip(
+  log: (msg: string) => void,
+  label: string,              // e.g. 'field', 'app', 'class'
+  name: string,
+  whitelistEntries: string[],
+  repoFilePath: string,
+  skippedFields: string[],
+  allSkippedFields: string[]
+): boolean {
+  // 1. JSON whitelist check
+  if (whitelistEntries.includes(name)) {
+    log(`   SKIPPING whitelisted ${label} (in JSON): ${name}`);
+    skippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    allSkippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    return true;
+  }
+
+  // 2. Repo existence check — committed but not yet deployed
+  if (fs.existsSync(repoFilePath)) {
+    log(`   SKIPPING ${label} exists in repo but missing from org: ${name}`);
+    log(`   WARNING: Deploy the ${label} first, then re-run this script.`);
+    log(`   Found at: ${repoFilePath}`);
+    skippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    allSkippedFields.push(`[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`);
+    return true;
+  }
+
+  return false;
+}
+
+// ===============================================================
 // HELPER: PROCESS FAILURES FOR ONE ITERATION
-// Extracted to reduce complexity of the main loop function
 // ===============================================================
 
 function processFailures(
   log: (msg: string) => void,
   failures: ComponentFailure[],
   xmlContent: string,
-  whitelistedFields: string[],
+  whitelist: WhitelistMap,
   repoPath: string,
   allSkippedFields: string[]
 ): { xmlContent: string; removedFields: string[]; skippedFields: string[] } {
@@ -424,28 +452,13 @@ function processFailures(
     const fieldMatch = /no CustomField named (.+?) found/.exec(errorMessage);
     if (fieldMatch) {
       const missingField = fieldMatch[1].trim();
-
-      if (whitelistedFields.includes(missingField)) {
-        log(`   SKIPPING whitelisted field (in JSON): ${missingField}`);
-        skippedFields.push(missingField);
-        allSkippedFields.push(missingField);
-        continue;
-      }
-
       const parts = missingField.split('.');
-      if (parts.length === 2) {
-        const fieldFilePath = path.join(
-          repoPath, 'force-app', 'main', 'default', 'objects',
-          parts[0], 'fields', `${parts[1]}.field-meta.xml`
-        );
-        if (fs.existsSync(fieldFilePath)) {
-          log(`   SKIPPING: field exists in repo but missing from org: ${missingField}`);
-          log('   WARNING: Deploy the field first, then re-run this script.');
-          log(`   Found at: ${fieldFilePath}`);
-          skippedFields.push(missingField);
-          allSkippedFields.push(missingField);
-          continue;
-        }
+      const fieldRepoPath = parts.length === 2
+        ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
+        : '';
+
+      if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
+        continue;
       }
 
       log(`   Missing field: ${missingField}`);
@@ -464,6 +477,12 @@ function processFailures(
     const appMatch = /no CustomApplication named (.+?) found/.exec(errorMessage);
     if (appMatch) {
       const name = appMatch[1].trim();
+      const appRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'applications', `${name}.app-meta.xml`);
+
+      if (shouldSkip(log, 'app', name, whitelist.apps, appRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing application: ${name}`);
       const { updated, removed } = removeApplicationVisibilityFromXml(updatedXml, name);
       if (removed) {
@@ -480,6 +499,12 @@ function processFailures(
     const classMatch = /no ApexClass named (.+?) found/.exec(errorMessage);
     if (classMatch) {
       const name = classMatch[1].trim();
+      const classRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'classes', `${name}.cls`);
+
+      if (shouldSkip(log, 'class', name, whitelist.classes, classRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing ApexClass: ${name}`);
       const { updated, removed } = removeClassAccessFromXml(updatedXml, name);
       if (removed) {
@@ -496,6 +521,12 @@ function processFailures(
     const pageMatch = /no ApexPage named (.+?) found/.exec(errorMessage);
     if (pageMatch) {
       const name = pageMatch[1].trim();
+      const pageRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'pages', `${name}.page`);
+
+      if (shouldSkip(log, 'page', name, whitelist.pages, pageRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing ApexPage: ${name}`);
       const { updated, removed } = removePageAccessFromXml(updatedXml, name);
       if (removed) {
@@ -512,6 +543,12 @@ function processFailures(
     const tabMatch = /no CustomTab named (.+?) found/.exec(errorMessage);
     if (tabMatch) {
       const name = tabMatch[1].trim();
+      const tabRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'tabs', `${name}.tab-meta.xml`);
+
+      if (shouldSkip(log, 'tab', name, whitelist.tabs, tabRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing CustomTab: ${name}`);
       const { updated, removed } = removeTabSettingFromXml(updatedXml, name);
       if (removed) {
@@ -528,6 +565,12 @@ function processFailures(
     const objectMatch = /no CustomObject named (.+?) found/.exec(errorMessage);
     if (objectMatch) {
       const name = objectMatch[1].trim();
+      const objectRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'objects', name, `${name}.object-meta.xml`);
+
+      if (shouldSkip(log, 'object', name, whitelist.objects, objectRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing CustomObject: ${name}`);
       const { updated, removed } = removeObjectPermissionFromXml(updatedXml, name);
       if (removed) {
@@ -544,6 +587,12 @@ function processFailures(
     const flowMatch = /no Flow named (.+?) found/.exec(errorMessage);
     if (flowMatch) {
       const name = flowMatch[1].trim();
+      const flowRepoPath = path.join(repoPath, 'force-app', 'main', 'default', 'flows', `${name}.flow-meta.xml`);
+
+      if (shouldSkip(log, 'flow', name, whitelist.flows, flowRepoPath, skippedFields, allSkippedFields)) {
+        continue;
+      }
+
       log(`   Missing Flow: ${name}`);
       const { updated, removed } = removeFlowAccessFromXml(updatedXml, name);
       if (removed) {
@@ -565,7 +614,6 @@ function processFailures(
 
 // ===============================================================
 // HELPER: PROCESS SINGLE METADATA ITEM
-// (Equivalent to Invoke-ProcessMetadataItem in PowerShell)
 // ===============================================================
 
 async function invokeProcessMetadataItem(
@@ -576,7 +624,7 @@ async function invokeProcessMetadataItem(
     filePath: string;
     targetOrg: string;
     repoPath: string;
-    whitelistedFields: string[];
+    whitelist: WhitelistMap;
     maxIterations: number;
     maxTotalDeploys: number;
     totalDeploys: TotalDeploys;
@@ -586,7 +634,7 @@ async function invokeProcessMetadataItem(
 ): Promise<SummaryRecord> {
   const {
     metadataType, itemName, filePath, targetOrg, repoPath,
-    whitelistedFields, maxIterations, maxTotalDeploys,
+    whitelist, maxIterations, maxTotalDeploys,
     totalDeploys, timeoutMins, maxRetries,
   } = params;
 
@@ -633,7 +681,6 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    // result object still missing after normalisation — truly unknown shape, stop safely
     if (!deployResult.result) {
       log(`[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(', ')}`);
       log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
@@ -650,7 +697,6 @@ async function invokeProcessMetadataItem(
 
     const failures = deployResult.result.details?.componentFailures;
     if (!failures || failures.length === 0) {
-      // success is false but no failures listed — treat as success (warnings only)
       log(`[${itemName}] No component failures found. Moving on.`);
       itemStatus = 'Success';
       break;
@@ -660,17 +706,17 @@ async function invokeProcessMetadataItem(
     const rootNode = getRootNodeName(xmlContent);
 
     const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
-      log, failures, xmlContent, whitelistedFields, repoPath, allSkippedFields
+      log, failures, xmlContent, whitelist, repoPath, allSkippedFields
     );
 
     allRemovedFields.push(...removedFields);
 
     if (removedFields.length === 0) {
       if (skippedFields.length > 0) {
-        log(`[${itemName}] Only whitelisted/repo fields remain. Manual deploy needed.`);
-        itemStatus = 'Whitelisted Fields Only - Manual Deploy Needed';
+        log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
+        itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
       } else {
-        log(`[${itemName}] No fields removed this iteration. Moving on.`);
+        log(`[${itemName}] No items removed this iteration. Moving on.`);
         itemStatus = 'Partial / Manual Check Needed';
       }
       continueLoop = false;
@@ -680,7 +726,7 @@ async function invokeProcessMetadataItem(
     saveXmlClean(updatedXml, filePath, rootNode);
     log(`Saved updated XML for: ${itemName}`);
 
-    const commitMessage = `[${itemName}] Auto-remove missing fields: ${removedFields.join(', ')}`;
+    const commitMessage = `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`;
     log(`Committing changes for ${itemName}...`);
 
     try {
@@ -765,29 +811,56 @@ export default class DeployAndFix extends SfCommand<void> {
     // ================= LOAD & PARSE JSON =================
     log('Loading promotion JSON...');
     const promotionData = JSON.parse(fs.readFileSync(promotionJsonPath, 'utf8')) as PromotionItem[];
+
     const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
-    const whitelistedFields = [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort();
+
+    // ── Build whitelist map from JSON — one entry per metadata type ──
+    const whitelist: WhitelistMap = {
+      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
+      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
+      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass').map((i) => i.n))].sort(),
+      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
+      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
+      objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
+      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
+    };
+
+    const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
 
     // ================= STARTUP SUMMARY =================
     log('\n======================================================');
     log('STARTING AUTOMATED DEPLOY & FIX LOOP');
     log('======================================================');
-    log(`Target Org         : ${targetOrg}`);
-    log(`Permission Sets    : ${permSets.length} found in JSON`);
-    log(`Profiles           : ${profiles.length} found in JSON`);
-    log(`Whitelisted Fields : ${whitelistedFields.length} found in JSON (will never be removed)`);
-    log(`Max per item       : ${MAX_ITERATIONS} iterations`);
-    log(`Global deploy cap  : ${MAX_TOTAL_DEPLOYS} total deploys`);
-    log(`Deploy timeout     : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
-    log(`Max retries        : ${MAX_RETRIES} per deploy call`);
+    log(`Target Org              : ${targetOrg}`);
+    log(`Permission Sets         : ${permSets.length} found in JSON`);
+    log(`Profiles                : ${profiles.length} found in JSON`);
+    log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
+    log(`  - CustomFields        : ${whitelist.fields.length}`);
+    log(`  - CustomApplications  : ${whitelist.apps.length}`);
+    log(`  - ApexClasses         : ${whitelist.classes.length}`);
+    log(`  - ApexPages           : ${whitelist.pages.length}`);
+    log(`  - CustomTabs          : ${whitelist.tabs.length}`);
+    log(`  - CustomObjects       : ${whitelist.objects.length}`);
+    log(`  - Flows               : ${whitelist.flows.length}`);
+    log(`Max per item            : ${MAX_ITERATIONS} iterations`);
+    log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
+    log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
+    log(`Max retries             : ${MAX_RETRIES} per deploy call`);
 
     log('\nPermission Sets to process:');
     permSets.forEach((ps) => log(`   - ${ps}`));
     log('\nProfiles to process:');
     profiles.forEach((p) => log(`   - ${p}`));
-    log('\nWhitelisted Fields (will never be removed):');
-    whitelistedFields.forEach((f) => log(`   - ${f}`));
+
+    log('\nWhitelisted items (will never be removed):');
+    log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
+    log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
+    log('  Classes  : ' + (whitelist.classes.join(', ') || 'none'));
+    log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
+    log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
+    log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
+    log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
 
     log('');
     // eslint-disable-next-line no-await-in-loop
@@ -816,7 +889,7 @@ export default class DeployAndFix extends SfCommand<void> {
         filePath: psFilePath,
         targetOrg,
         repoPath: REPO_PATH,
-        whitelistedFields,
+        whitelist,
         maxIterations: MAX_ITERATIONS,
         maxTotalDeploys: MAX_TOTAL_DEPLOYS,
         totalDeploys,
@@ -842,7 +915,7 @@ export default class DeployAndFix extends SfCommand<void> {
           filePath: profileFilePath,
           targetOrg,
           repoPath: REPO_PATH,
-          whitelistedFields,
+          whitelist,
           maxIterations: MAX_ITERATIONS,
           maxTotalDeploys: MAX_TOTAL_DEPLOYS,
           totalDeploys,
