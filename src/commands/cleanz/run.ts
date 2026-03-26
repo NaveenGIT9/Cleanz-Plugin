@@ -703,6 +703,11 @@ async function invokeProcessMetadataItem(
   }
 
   let continueLoop = true;
+  // Tracks consecutive deploys that returned success=false with zero component failures.
+  // This happens when --wait 2 expires before the org finishes validating (still InProgress).
+  // We retry up to this limit before giving up.
+  const MAX_EMPTY_RETRIES = 5;
+  let consecutiveEmptyRetries = 0;
 
   while (continueLoop && iteration < maxIterations) {
     iteration++;
@@ -744,11 +749,23 @@ async function invokeProcessMetadataItem(
     }
 
     const failures = deployResult.result.details?.componentFailures;
+
+    // success=false + zero failures means SF CLI's --wait 2 expired before the org
+    // finished validating (deploy still InProgress). Retry to get the real result.
     if (!failures || failures.length === 0) {
-      log(`[${itemName}] No component failures found. Moving on.`);
-      itemStatus = allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
-      break;
+      consecutiveEmptyRetries++;
+      log(`[${itemName}] success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running in org. Re-validating...`);
+      if (consecutiveEmptyRetries >= MAX_EMPTY_RETRIES) {
+        log(`[${itemName}] Giving up after ${MAX_EMPTY_RETRIES} retries with no component failures. Manual check needed.`);
+        itemStatus = 'Partial / Manual Check Needed';
+        break;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(5000);
+      continue;
     }
+
+    consecutiveEmptyRetries = 0; // reset when real failures arrive
 
     // ── FAILURES FOUND ─────────────────────────────────────────────
     const xmlContent = fs.readFileSync(filePath, 'utf8');
