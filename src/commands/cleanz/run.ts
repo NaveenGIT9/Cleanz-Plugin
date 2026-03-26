@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -26,7 +27,6 @@ const messages = Messages.loadMessages('@salesforce/plugin-cleanz', 'cleanz.run'
 // ===============================================================
 // TYPES
 // ===============================================================
-
 type PromotionItem = {
   t: string;
   n: string;
@@ -36,14 +36,12 @@ type DeployResult = {
   status?: number;
   name?: string;
   message?: string;
-  // Standard nested shape
   result?: {
     success?: boolean;
     details?: {
       componentFailures?: ComponentFailure[];
     };
   };
-  // Non-standard: failures at top level (some SF CLI versions)
   componentFailures?: ComponentFailure | ComponentFailure[];
   details?: {
     componentFailures?: ComponentFailure | ComponentFailure[];
@@ -75,8 +73,6 @@ type WhitelistMap = {
   flows: string[];
 };
 
-// Populated ONLY from actual deploy validation errors this run.
-// Used to pre-scrub subsequent items without burning a deploy call.
 type GlobalMissingCache = {
   fields: Set<string>;
   apps: Set<string>;
@@ -97,7 +93,6 @@ function makeGlobalMissingCache(): GlobalMissingCache {
 // ===============================================================
 // CONSTANTS / CONFIG
 // ===============================================================
-
 const REPO_PATH = 'D:\\RubrikRepoVDI\\rbk-sfdc-release';
 const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsets');
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
@@ -110,7 +105,6 @@ const UNMATCHED_ERRORS_LOG = path.join(REPO_PATH, 'unmatched_errors.log');
 // ===============================================================
 // HELPERS
 // ===============================================================
-
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
@@ -121,7 +115,6 @@ function prompt(question: string): Promise<string> {
 // ===============================================================
 // XML FORMATTING & SAVING
 // ===============================================================
-
 function formatXml(xml: string): string {
   let formatted = '';
   let indent = 0;
@@ -157,12 +150,11 @@ function getRootNodeName(xmlContent: string): string {
 // ===============================================================
 // XML BLOCK REMOVERS
 // ===============================================================
-
 function removeFieldPermissionsFromXml(xmlContent: string, missingField: string): { updated: string; removed: boolean } {
   const norm = xmlContent.replace(/\r\n/g, '\n');
   const ef = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = '(?:(?!<\\/?fieldPermissions>)[\\s\\S])*?';
-  const re = new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*${ef}[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g');
+  const re = new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*${ef}[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\r?\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
@@ -172,7 +164,7 @@ function removeXmlBlock(xmlContent: string, blockTag: string, keyTag: string, na
   const en = name.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const et = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = `(?:(?!<\\/?${et}>)[\\s\\S])*?`;
-  const re = new RegExp(`[ \\t]*<${et}>${inner}<${keyTag}>[ \\t]*${en}[ \\t]*</${keyTag}>${inner}</${et}>[ \\t]*\\r?\\n?`, 'g');
+  const re = new RegExp(`[ \\t]*<${et}>${inner}<${keyTag}>[ \\t]*${en}[ \\t]*</${keyTag}>${inner}</${et}>[ \\t]*\r?\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
@@ -187,7 +179,6 @@ const removeFlowAccessFromXml = (xml: string, n: string): { updated: string; rem
 // ===============================================================
 // DEPLOY INFRASTRUCTURE
 // ===============================================================
-
 const TRANSIENT_ERROR_PATTERNS = [
   /rate limit/i, /request limit/i, /too many requests/i,
   /ECONNRESET/i, /ECONNREFUSED/i, /ETIMEDOUT/i, /ENOTFOUND/i,
@@ -214,35 +205,47 @@ function isPollingTimeout(result: DeployResult): boolean {
   return s === 'Pending' || s === 'InProgress' || s === 'Canceling';
 }
 
+// ===============================================================
+// FIXED: normaliseDeployResult - ESLint no-unsafe-call resolved
+// ===============================================================
 function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): DeployResult {
   if (!result.result && result.status !== undefined) {
     log(`   Normalising SF CLI response (status=${result.status}).`);
 
-    // SF CLI v2 sometimes returns failures at the TOP LEVEL under various keys.
-    // Try to extract component failures from every known location.
     const raw = result as Record<string, unknown>;
 
-    // Location 1: result.componentFailures (direct, not nested under details)
-    const directFailures = raw['componentFailures'];
-    // Location 2: result.details.componentFailures (standard nested shape)
+    // Extract from known locations with explicit types
+    const directFailures = raw['componentFailures'] as ComponentFailure | ComponentFailure[] | undefined;
     const detailsObj = raw['details'] as Record<string, unknown> | undefined;
-    const detailsFailures = detailsObj?.['componentFailures'];
-    // Location 3: result.messages[] — some SF CLI versions put errors here
-    const cliMessages = raw['messages'];
+    const detailsFailures = detailsObj?.['componentFailures'] as ComponentFailure | ComponentFailure[] | undefined;
+    const cliMessages = raw['messages'] as Array<Record<string, unknown>> | undefined;
 
+    // ✅ FIX: Type-safe conversion with explicit return type
     const toArray = (v: unknown): ComponentFailure[] => {
       if (!v) return [];
-      if (Array.isArray(v)) return v as ComponentFailure[];
-      return [v as ComponentFailure];
+      if (Array.isArray(v)) {
+        return v.filter((item): item is ComponentFailure =>
+          typeof item === 'object' && item !== null && 'problem' in item
+        ).map((item) => ({ problem: String((item as Record<string, unknown>)['problem']) }));
+      }
+      if (typeof v === 'object' && v !== null && 'problem' in v) {
+        return [{ problem: String((v as Record<string, unknown>)['problem']) }];
+      }
+      return [];
     };
 
+    // ✅ FIX: Convert messages separately with explicit typing
+    const messageFailures: ComponentFailure[] = (cliMessages ?? []).map(
+      (m: Record<string, unknown>): ComponentFailure => ({
+        problem: String(m['problem'] ?? m['message'] ?? m['text'] ?? JSON.stringify(m)),
+      })
+    );
+
+    // ✅ FIX: Build failures array without chaining .map() on toArray() result
     const failures: ComponentFailure[] = [
       ...toArray(directFailures),
       ...toArray(detailsFailures),
-      // Convert messages[] to ComponentFailure shape if present
-      ...toArray(cliMessages).map((m: Record<string, unknown>) => ({
-        problem: String(m['problem'] ?? m['message'] ?? m['text'] ?? JSON.stringify(m)),
-      })),
+      ...messageFailures,
     ];
 
     // Deduplicate by problem string
@@ -268,6 +271,9 @@ function normaliseDeployResult(result: DeployResult, log: (msg: string) => void)
   return result;
 }
 
+// ===============================================================
+// DEPLOY WITH RETRY
+// ===============================================================
 async function invokeDeployWithRetry(
   log: (msg: string) => void,
   metadataType: string,
@@ -365,6 +371,9 @@ async function invokeDeployWithRetry(
   return null;
 }
 
+// ===============================================================
+// DEPLOY PROCESS
+// ===============================================================
 function runDeployProcess(
   metadataType: string,
   itemName: string,
@@ -373,15 +382,13 @@ function runDeployProcess(
   timeoutMins: number
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
-    // Write a temp package.xml — avoids shell quoting issues with spaces in names
-    // when using -m "Type:Name With Spaces" which gets mis-parsed by the shell.
     const manifestContent = `<?xml version="1.0" encoding="UTF-8"?>
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
-    <types>
-        <members>${itemName}</members>
-        <name>${metadataType}</name>
-    </types>
-    <version>59.0</version>
+<types>
+<members>${itemName}</members>
+<name>${metadataType}</name>
+</types>
+<version>59.0</version>
 </Package>`;
     const manifestPath = outputFile + '.package.xml';
     fs.writeFileSync(manifestPath, manifestContent, 'utf8');
@@ -394,17 +401,17 @@ function runDeployProcess(
       '--wait', String(timeoutMins * 2),
     ];
 
-    // shell: false so args are passed directly without shell re-splitting on spaces
     const proc = spawn('sf', args, { shell: false });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
+
     proc.stdout.pipe(outputStream);
     proc.stderr.resume();
 
     const timer = setTimeout(() => { proc.kill(); resolve('timeout'); }, timeoutMins * 60 * 1000);
+
     proc.on('close', () => {
       clearTimeout(timer);
       outputStream.end();
-      // Clean up temp manifest
       try { fs.unlinkSync(manifestPath); } catch { /* best-effort */ }
       resolve('ok');
     });
@@ -418,7 +425,6 @@ function sleep(ms: number): Promise<void> {
 // ===============================================================
 // METADATA HANDLER REGISTRY
 // ===============================================================
-
 type MetadataHandler = {
   patterns: RegExp[];
   label: string;
@@ -481,9 +487,6 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /In field: object - no CustomObject named (.+?) found/i,
     ],
     label: 'object', whitelistKey: 'objects', cacheKey: 'objects',
-    // Standard SF objects never have an object-meta.xml in repo — returning ''
-    // means fs.existsSync('') = false so they are always removed correctly.
-    // Only custom objects (__c, __mdt etc.) need the repo check.
     repoPathFn: (r: string, n: string): string => {
       const isCustom = /__(c|mdt|e|b|x|ka|kav|hd|history)$/i.test(n);
       return isCustom ? path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`) : '';
@@ -517,7 +520,6 @@ const FIELD_PATTERNS: RegExp[] = [
 // ===============================================================
 // UNMATCHED ERROR LOG
 // ===============================================================
-
 function logUnmatchedError(itemName: string, errorMessage: string): void {
   const line = `[${new Date().toISOString()}] [${itemName}] ${errorMessage}\n`;
   try { fs.appendFileSync(UNMATCHED_ERRORS_LOG, line, 'utf8'); } catch { /* best-effort */ }
@@ -526,7 +528,6 @@ function logUnmatchedError(itemName: string, errorMessage: string): void {
 // ===============================================================
 // WHITELIST + REPO CHECK
 // ===============================================================
-
 function shouldSkip(
   log: (msg: string) => void,
   label: string,
@@ -556,9 +557,8 @@ function shouldSkip(
 }
 
 // ===============================================================
-// PROCESS FAILURES — one per deploy iteration
+// PROCESS FAILURES
 // ===============================================================
-
 function processFailures(
   log: (msg: string) => void,
   failures: ComponentFailure[],
@@ -578,7 +578,6 @@ function processFailures(
     const err = failure.problem;
     let handled = false;
 
-    // ── CustomField ───────────────────────────────────────────────
     for (const p of FIELD_PATTERNS) {
       const m = p.exec(err);
       if (!m) continue;
@@ -591,6 +590,7 @@ function processFailures(
       if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
         handled = true; break;
       }
+
       log(`   Missing field: ${missingField}`);
       const { updated, removed } = removeFieldPermissionsFromXml(updatedXml, missingField);
       if (removed) {
@@ -605,7 +605,6 @@ function processFailures(
     }
     if (handled) continue;
 
-    // ── Registered handlers (app, class, page, tab, object, flow) ──
     for (const handler of METADATA_HANDLERS) {
       let name: string | null = null;
       for (const p of handler.patterns) {
@@ -618,6 +617,7 @@ function processFailures(
       if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
         handled = true; break;
       }
+
       log(`   Missing ${handler.label}: ${name}`);
       const { updated, removed } = handler.removeFn(updatedXml, name);
       if (removed) {
@@ -632,7 +632,6 @@ function processFailures(
     }
     if (handled) continue;
 
-    // ── Unmatched ─────────────────────────────────────────────────
     unmatchedErrors.push(err);
     log(`   [UNMATCHED] ${err}`);
   }
@@ -647,11 +646,8 @@ function processFailures(
 }
 
 // ===============================================================
-// PRE-SCRUB — apply globally known-missing refs BEFORE first deploy
-// Only uses refs discovered from real deploy errors earlier this run.
-// Zero deploy cost — applied directly to XML.
+// PRE-SCRUB
 // ===============================================================
-
 function applyGlobalMissingCacheToFile(
   log: (msg: string) => void,
   xmlContent: string,
@@ -660,8 +656,8 @@ function applyGlobalMissingCacheToFile(
 ): { xmlContent: string; removedItems: string[] } {
   let updated = xmlContent;
   const removedItems: string[] = [];
-
   const totalCached = Object.values(globalMissing).reduce((s, set) => s + set.size, 0);
+
   if (totalCached === 0) return { xmlContent: updated, removedItems };
 
   log(`   [Pre-scrub] ${totalCached} globally known missing reference(s) — applying without a deploy call...`);
@@ -687,14 +683,12 @@ function applyGlobalMissingCacheToFile(
   } else {
     log('   [Pre-scrub] No cached references matched this file — proceeding to deploy.');
   }
-
   return { xmlContent: updated, removedItems };
 }
 
 // ===============================================================
 // GIT COMMIT
 // ===============================================================
-
 function commitChange(
   log: (msg: string) => void,
   filePath: string,
@@ -713,20 +707,7 @@ function commitChange(
 
 // ===============================================================
 // PROCESS A SINGLE METADATA ITEM
-//
-// Flow per item:
-//   1. Pre-scrub: apply globally known-missing refs from cache (FREE)
-//      → single commit if anything removed
-//   2. Deploy loop (up to MAX_ITERATIONS):
-//        a. Dry-run deploy
-//        b. SUCCESS → done ✓
-//        c. FAILURES → process each, remove from XML, update global cache
-//           → save XML, git commit
-//           → LOOP AGAIN (re-validate) ← this is the key fix
-//        d. success=false + empty failures → LOOP AGAIN (may be transient state)
-//        e. After MAX_EMPTY_RETRY_LIMIT consecutive empty-failure responses → stop
 // ===============================================================
-
 async function invokeProcessMetadataItem(
   log: (msg: string) => void,
   params: {
@@ -755,9 +736,6 @@ async function invokeProcessMetadataItem(
   let itemStatus = 'No Change';
   const allRemovedFields: string[] = [];
   const allSkippedFields: string[] = [];
-
-  // How many consecutive iterations with success=false + 0 failures before we give up.
-  // This handles the Profiles case where SF returns a weird transient false+empty response.
   const MAX_EMPTY_FAILURE_RETRIES = 3;
   let consecutiveEmptyFailures = 0;
 
@@ -771,7 +749,6 @@ async function invokeProcessMetadataItem(
     return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
   }
 
-  // ── STEP 1: Pre-scrub from global cache (no deploy cost) ──────────
   {
     const rawXml = fs.readFileSync(filePath, 'utf8');
     const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(log, rawXml, globalMissing, itemName);
@@ -785,7 +762,6 @@ async function invokeProcessMetadataItem(
     }
   }
 
-  // ── STEP 2: Deploy loop — keep going until SUCCESS or ceiling ─────
   while (iteration < maxIterations) {
     iteration++;
     totalDeploys.value++;
@@ -817,23 +793,18 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    // componentFailures can be a plain object when SF returns a single failure
     const rawFailures = deployResult.result.details?.componentFailures;
     const failures: ComponentFailure[] = !rawFailures ? [] : Array.isArray(rawFailures) ? rawFailures : [rawFailures as ComponentFailure];
 
     log(`   [Result] success=${String(deployResult.result.success)} | failures=${failures.length}`);
     failures.forEach((f, i) => log(`   [Result] Failure ${i + 1}: ${f.problem}`));
 
-    // ── SUCCESS ────────────────────────────────────────────────────
     if (deployResult.result.success === true && failures.length === 0) {
       log(`[${itemName}] Deploy validation SUCCESSFUL!`);
       itemStatus = allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
       break;
     }
 
-    // ── success=false but NO component failures ────────────────────
-    // SF sometimes returns this transiently (normalisation artefact, deploy queue, etc.)
-    // Retry up to MAX_EMPTY_FAILURE_RETRIES times, then stop.
     if (failures.length === 0) {
       consecutiveEmptyFailures++;
       log(`[${itemName}] success=false but 0 componentFailures (attempt ${consecutiveEmptyFailures}/${MAX_EMPTY_FAILURE_RETRIES}).`);
@@ -842,16 +813,13 @@ async function invokeProcessMetadataItem(
         itemStatus = 'Partial / Manual Check Needed';
         break;
       }
-      // Brief pause then loop again — burn a deploy call to re-validate
       log(`[${itemName}] Re-validating after short pause...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(5000);
       continue;
     }
 
-    // ── FAILURES FOUND → fix, commit, loop again ───────────────────
-    consecutiveEmptyFailures = 0; // reset on real failure
-
+    consecutiveEmptyFailures = 0;
     const xmlContent = fs.readFileSync(filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
 
@@ -860,10 +828,8 @@ async function invokeProcessMetadataItem(
     );
 
     allRemovedFields.push(...removedFields);
-    // skippedFields are already pushed to allSkippedFields inside processFailures via shouldSkip
 
     if (removedFields.length === 0) {
-      // Nothing removed — either all whitelisted/repo-present, or unmatched errors
       if (skippedFields.length > 0) {
         log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
         itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
@@ -874,14 +840,12 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    // Save and commit — then LOOP to re-validate (this is the critical fix)
     saveXmlClean(updatedXml, filePath, rootNode);
     log(`Saved updated XML for: ${itemName}`);
     commitChange(log, filePath, repoPath,
       `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`,
       itemName);
     itemStatus = 'Fixed & Committed';
-    // ↑ Do NOT break here — continue the loop to re-validate until SUCCESS
 
     if (iteration >= maxIterations) {
       log(`[${itemName}] Reached max iterations. Check remaining errors manually.`);
@@ -903,7 +867,6 @@ async function invokeProcessMetadataItem(
 // ===============================================================
 // MODULE-LEVEL PHASE HELPERS
 // ===============================================================
-
 async function resolveInputs(
   log: (msg: string) => void,
   jsonPathFlag: string,
@@ -918,7 +881,7 @@ async function resolveInputs(
     if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
     // eslint-disable-next-line no-await-in-loop
     promotionJsonPath = await prompt(
-      'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
+      'Enter full path to your Copado Promotion JSON\n(e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
     );
     promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
   }
@@ -928,17 +891,19 @@ async function resolveInputs(
   if (!targetOrg) {
     // eslint-disable-next-line no-await-in-loop
     targetOrg = await prompt(
-      'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
+      'Enter target org username or alias\n(e.g. RBKQA or user@rubrik.com.qa)\n> '
     );
     targetOrg = targetOrg.trim();
   }
-  log(`\n   Target Org set to: ${targetOrg}\n`);
+  log(`\nTarget Org set to: ${targetOrg}\n`);
+
   return { promotionJsonPath, targetOrg };
 }
 
 function parsePromotionJson(jsonPath: string): { permSets: string[]; profiles: string[]; whitelist: WhitelistMap } {
   const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
   const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
+
   return {
     permSets: uniq('PermissionSet'),
     profiles: uniq('Profile'),
@@ -983,6 +948,7 @@ async function printBannerAndConfirm(
   permSets.forEach((ps) => log(`   - ${ps}`));
   log('\nProfiles to process:');
   profiles.forEach((p) => log(`   - ${p}`));
+
   log('\nWhitelisted items (will never be removed):');
   log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
   log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
@@ -991,8 +957,8 @@ async function printBannerAndConfirm(
   log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
   log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
   log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
-
   log('');
+
   const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
   if (confirm.trim().toLowerCase() === 'exit') { log('\nScript cancelled by user.'); return false; }
   log('\nStarting script...');
@@ -1010,6 +976,7 @@ async function processAllItems(
 ): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
   const summary: SummaryRecord[] = [];
   const totalDeploys: TotalDeploys = { value: 0 };
+
   const common = {
     targetOrg, repoPath: REPO_PATH, whitelist, globalMissing,
     maxIterations: MAX_ITERATIONS, maxTotalDeploys: MAX_TOTAL_DEPLOYS,
@@ -1092,7 +1059,6 @@ function printFinalSummary(
 // ===============================================================
 // SF PLUGIN COMMAND
 // ===============================================================
-
 export default class DeployAndFix extends SfCommand<void> {
   public static readonly summary = messages.getMessage('summary');
   public static readonly description = messages.getMessage('description');
@@ -1118,6 +1084,7 @@ export default class DeployAndFix extends SfCommand<void> {
     const { promotionJsonPath, targetOrg } = await resolveInputs(
       log, flags['json-path'] ?? '', flags['target-org'] ?? ''
     );
+
     const { permSets, profiles, whitelist } = parsePromotionJson(promotionJsonPath);
     const confirmed = await printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
     if (!confirmed) return;
@@ -1126,6 +1093,7 @@ export default class DeployAndFix extends SfCommand<void> {
     const { summary, totalDeploys } = await processAllItems(
       log, permSets, profiles, targetOrg, whitelist, globalMissing
     );
+
     printFinalSummary(log, summary, totalDeploys, globalMissing);
   }
 }
