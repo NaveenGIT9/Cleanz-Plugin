@@ -36,12 +36,19 @@ type DeployResult = {
   status?: number;
   name?: string;
   message?: string;
+  // Standard nested shape
   result?: {
     success?: boolean;
     details?: {
       componentFailures?: ComponentFailure[];
     };
   };
+  // Non-standard: failures at top level (some SF CLI versions)
+  componentFailures?: ComponentFailure | ComponentFailure[];
+  details?: {
+    componentFailures?: ComponentFailure | ComponentFailure[];
+  };
+  messages?: Array<Record<string, unknown>>;
 };
 
 type ComponentFailure = {
@@ -208,7 +215,56 @@ function isPollingTimeout(result: DeployResult): boolean {
 function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): DeployResult {
   if (!result.result && result.status !== undefined) {
     log(`   Normalising SF CLI response (status=${result.status}).`);
-    return { ...result, result: { success: result.status === 0, details: { componentFailures: [] } } };
+
+    // Dump the full raw response so we can see where the real failures live
+    log(`   [RAW RESPONSE DUMP]: ${JSON.stringify(result).substring(0, 3000)}`);
+
+    // SF CLI v2 sometimes returns failures at the TOP LEVEL under various keys.
+    // Try to extract component failures from every known location.
+    const raw = result as Record<string, unknown>;
+
+    // Location 1: result.componentFailures (direct, not nested under details)
+    const directFailures = raw['componentFailures'];
+    // Location 2: result.details.componentFailures (standard nested shape)
+    const detailsObj = raw['details'] as Record<string, unknown> | undefined;
+    const detailsFailures = detailsObj?.['componentFailures'];
+    // Location 3: result.messages[] — some SF CLI versions put errors here
+    const cliMessages = raw['messages'];
+
+    const toArray = (v: unknown): ComponentFailure[] => {
+      if (!v) return [];
+      if (Array.isArray(v)) return v as ComponentFailure[];
+      return [v as ComponentFailure];
+    };
+
+    const failures: ComponentFailure[] = [
+      ...toArray(directFailures),
+      ...toArray(detailsFailures),
+      // Convert messages[] to ComponentFailure shape if present
+      ...toArray(cliMessages).map((m: Record<string, unknown>) => ({
+        problem: String(m['problem'] ?? m['message'] ?? m['text'] ?? JSON.stringify(m)),
+      })),
+    ];
+
+    // Deduplicate by problem string
+    const seen = new Set<string>();
+    const dedupedFailures = failures.filter((f) => {
+      if (seen.has(f.problem)) return false;
+      seen.add(f.problem);
+      return true;
+    });
+
+    if (dedupedFailures.length > 0) {
+      log(`   Extracted ${dedupedFailures.length} failure(s) from non-standard response shape.`);
+    }
+
+    return {
+      ...result,
+      result: {
+        success: result.status === 0,
+        details: { componentFailures: dedupedFailures },
+      },
+    };
   }
   return result;
 }
