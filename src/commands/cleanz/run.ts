@@ -60,13 +60,13 @@ type SummaryRecord = {
 type TotalDeploys = { value: number };
 
 type WhitelistMap = {
-  fields:  string[];
-  apps:    string[];
+  fields: string[];
+  apps: string[];
   classes: string[];
-  pages:   string[];
-  tabs:    string[];
+  pages: string[];
+  tabs: string[];
   objects: string[];
-  flows:   string[];
+  flows: string[];
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -94,7 +94,7 @@ const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permi
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
-const DEPLOY_TIMEOUT_MINS = 3;
+const DEPLOY_TIMEOUT_MINS = 12;
 const MAX_RETRIES = 3;
 
 // ===============================================================
@@ -344,7 +344,7 @@ function runDeployProcess(
       '--target-org', targetOrg,
       '--json',
       '--dry-run',
-      '--wait', '2',
+      '--wait', '10',
     ];
 
     const proc = spawn('sf', args, { shell: true });
@@ -402,12 +402,12 @@ function shouldSkip(
 // ===============================================================
 
 type MetadataHandler = {
-  patterns:     RegExp[];  // multiple patterns — SF can phrase the same error differently
-  label:        string;
-  refType:      RefType;
+  patterns: RegExp[];  // multiple patterns — SF can phrase the same error differently
+  label: string;
+  refType: RefType;
   whitelistKey: keyof WhitelistMap;
-  removeFn:     (xml: string, name: string) => { updated: string; removed: boolean };
-  displayTag:   string;
+  removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
+  displayTag: string;
 };
 
 const METADATA_HANDLERS: MetadataHandler[] = [
@@ -886,13 +886,13 @@ export default class DeployAndFix extends SfCommand<void> {
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
     const whitelist: WhitelistMap = {
-      fields:  [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
-      apps:    [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
+      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
+      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
       classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass').map((i) => i.n))].sort(),
-      pages:   [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
-      tabs:    [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
+      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
+      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
       objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
-      flows:   [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
+      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
