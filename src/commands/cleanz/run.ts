@@ -315,7 +315,9 @@ async function invokeDeployWithRetry(
     }
 
     if (!result.result && result.status !== undefined) {
-      log(`   Normalising SF CLI response (status=${result.status}).`);
+      const errName = result.name ?? 'none';
+      const errMsg = (result.message ?? '').substring(0, 150);
+      log(`   SF CLI status=${result.status} | name=${errName} | message=${errMsg}`);
       result.result = {
         success: result.status === 0,
         details: { componentFailures: [] },
@@ -338,14 +340,21 @@ function runDeployProcess(
   timeoutMins: number
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
+    // shell: true is required on Windows to resolve sf.cmd from PATH.
+    // The -m value is wrapped in quotes so cmd.exe treats "Profile:Name With Spaces"
+    // as a single argument (cmd.exe case-2 stripping: outer quotes removed, inner preserved).
+    const metaArg = `"${metadataType}:${itemName}"`;
     const args = [
       'project', 'deploy', 'start',
-      '-m', `${metadataType}:${itemName}`,
+      '-m', metaArg,
       '--target-org', targetOrg,
       '--json',
       '--dry-run',
       '--wait', '10',
     ];
+    // Log the exact shell command for debugging
+    const dbgCmd = `sf ${['project', 'deploy', 'start', '-m', metaArg, '--target-org', targetOrg, '--json', '--dry-run', '--wait', '10'].join(' ')}`;
+    fs.appendFileSync(outputFile + '.cmd.txt', dbgCmd + '\n', 'utf8');
 
     const proc = spawn('sf', args, { shell: true });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
