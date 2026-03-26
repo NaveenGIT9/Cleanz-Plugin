@@ -70,7 +70,7 @@ type WhitelistMap = {
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
-type RefType = 'field' | 'app' | 'class' | 'page' | 'tab' | 'object' | 'flow';
+type RefType = 'field' | 'app' | 'class' | 'page' | 'tab' | 'object' | 'flow' | 'namespace';
 
 type RemovedRef = {
   type: RefType;
@@ -241,6 +241,100 @@ function removeObjectPermissionFromXml(xmlContent: string, name: string): { upda
 }
 function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'flowAccesses', 'flow', name);
+}
+
+// ===============================================================
+// NAMESPACE BULK REMOVAL
+// When a managed package is not installed in the org, every single
+// component it owns (fields, objects, classes, tabs, flows, apps, pages)
+// will fail deployment. Instead of iterating one-by-one, we detect the
+// namespace prefix, confirm the package is absent, and strip all its refs
+// in one pass — then sweep the same removal across every other file.
+// ===============================================================
+
+// Cache: "orgAlias:Namespace" → installed (true/false)
+const namespaceCache = new Map<string, boolean>();
+
+function extractNamespaceFromError(errorMessage: string): string | null {
+  // Matches "Namespace__" prefix inside names like:
+  //   "Account.UniqueEntry__Field__c"  → "UniqueEntry"
+  //   "UniqueEntry__Object__c"         → "UniqueEntry"
+  const m = /named\s+(?:\w+\.)?([A-Za-z][A-Za-z0-9]*)__\w/.exec(errorMessage);
+  return m?.[1] ?? null;
+}
+
+async function checkNamespaceInstalled(
+  log: (msg: string) => void,
+  targetOrg: string,
+  namespace: string
+): Promise<boolean> {
+  const key = `${targetOrg}:${namespace}`;
+  if (namespaceCache.has(key)) return namespaceCache.get(key)!;
+
+  log(`   [NS Check] Checking if package "${namespace}" is installed in org...`);
+  const query = `"SELECT Id FROM InstalledSubscriberPackage WHERE SubscriberPackage.NamespacePrefix = '${namespace}'"`;
+  const count = await new Promise<number>((resolve) => {
+    const args = ['data', 'query', '--query', query, '--use-tooling-api', '--target-org', targetOrg, '--json'];
+    const proc = spawn('sf', args, { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => { proc.kill(); resolve(-1); }, 30_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as { result?: { totalSize?: number } };
+        resolve(json?.result?.totalSize ?? -1);
+      } catch { resolve(-1); } // query error → treat as installed (safe default)
+    });
+  });
+
+  // count=-1 means query failed: treat as installed so we don't accidentally remove things.
+  const installed = count !== 0;
+  namespaceCache.set(key, installed);
+  log(`   [NS Check] ${namespace}: ${installed ? 'installed — skipping bulk removal' : 'NOT installed — bulk-removing all refs'}`);
+  return installed;
+}
+
+function removeBlocksWithNamespace(
+  xml: string, blockTag: string, keyTag: string, namespace: string
+): string {
+  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const bt = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = `(?:(?!<${bt}>)[\\s\\S])*?`;
+  return xml.replace(
+    new RegExp(`[ \\t]*<${bt}>${inner}<${keyTag}>${ns}__[^<]*</${keyTag}>${inner}</${bt}>[ \\t]*\\r?\\n?`, 'g'),
+    ''
+  );
+}
+
+function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updated: string; removed: boolean } {
+  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  let xml = xmlContent;
+
+  // fieldPermissions: field = "SomeObject.Namespace__Field__c"
+  {
+    const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+    xml = xml.replace(
+      new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[^<]*\\.${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g'), ''
+    );
+    // fieldPermissions: field = "Namespace__Object__c.AnyField"
+    xml = xml.replace(
+      new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g'), ''
+    );
+  }
+
+  xml = removeBlocksWithNamespace(xml, 'objectPermissions',      'object',      namespace);
+  xml = removeBlocksWithNamespace(xml, 'classAccesses',          'apexClass',   namespace);
+  xml = removeBlocksWithNamespace(xml, 'pageAccesses',           'apexPage',    namespace);
+  xml = removeBlocksWithNamespace(xml, 'tabSettings',            'tab',         namespace);
+  xml = removeBlocksWithNamespace(xml, 'tabVisibilities',        'tab',         namespace);
+  xml = removeBlocksWithNamespace(xml, 'flowAccesses',           'flow',        namespace);
+  xml = removeBlocksWithNamespace(xml, 'applicationVisibilities','application', namespace);
+
+  return { updated: xml, removed: xml !== xmlContent };
 }
 
 // ===============================================================
@@ -431,7 +525,7 @@ function sleep(ms: number): Promise<void> {
 function queryDeployQueueCount(targetOrg: string): Promise<number> {
   return new Promise((resolve) => {
     // Single quotes inside the SOQL are fine inside cmd.exe-quoted args.
-    const query = `"SELECT Id FROM DeployRequest WHERE Status IN ('Pending','InProgress')"`;
+    const query = '"SELECT Id FROM DeployRequest WHERE Status IN (\'Pending\',\'InProgress\')"';
     const args = [
       'data', 'query',
       '--query', query,
@@ -739,7 +833,9 @@ function sweepOtherFiles(
 
     for (const ref of refs) {
       let result: { updated: string; removed: boolean };
-      if (ref.type === 'field') {
+      if (ref.type === 'namespace') {
+        result = bulkRemoveNamespaceRefs(xml, ref.name);
+      } else if (ref.type === 'field') {
         result = removeFieldPermissionsFromXml(xml, ref.name);
       } else {
         const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
@@ -775,6 +871,50 @@ function sweepOtherFiles(
   } catch {
     log('   [Sweep] Commit failed or nothing new to stage.');
   }
+}
+
+// ===============================================================
+// NAMESPACE PRE-CHECK
+// Extracted to keep invokeProcessMetadataItem under the complexity limit.
+// ===============================================================
+
+async function applyNamespacePreCheck(
+  log: (msg: string) => void,
+  failures: ComponentFailure[],
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  targetOrg: string,
+  itemName: string
+): Promise<{ xml: string; refs: RemovedRef[] }> {
+  const checked = new Set<string>();
+  let xml = xmlContent;
+  const refs: RemovedRef[] = [];
+
+  for (const failure of failures) {
+    const ns = extractNamespaceFromError(failure.problem);
+    if (!ns || checked.has(ns)) continue;
+    checked.add(ns);
+
+    const hasWhitelisted = Object.values(whitelist).flat()
+      .some((v) => v.startsWith(`${ns}__`) || v.includes(`.${ns}__`));
+    if (hasWhitelisted) {
+      log(`   [NS Check] ${ns}: some components are whitelisted — skipping bulk removal`);
+      continue;
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    const installed = await checkNamespaceInstalled(log, targetOrg, ns);
+    if (!installed) {
+      const { updated, removed } = bulkRemoveNamespaceRefs(xml, ns);
+      if (removed) {
+        xml = updated;
+        refs.push({ type: 'namespace', name: ns, label: `[NS:${ns}] bulk-removed` });
+        log(`   [NS Bulk] Removed ALL ${ns}__ refs from ${itemName} in one pass`);
+      }
+    }
+  }
+
+  return { xml, refs };
 }
 
 // ===============================================================
@@ -889,9 +1029,17 @@ async function invokeProcessMetadataItem(
     const xmlContent = fs.readFileSync(filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
 
-    const { xmlContent: updatedXml, removedRefs, skippedFields } = processFailures(
-      log, failures, xmlContent, whitelist, allSkippedFields
+    // ── NAMESPACE PRE-CHECK ─────────────────────────────────────────
+    // eslint-disable-next-line no-await-in-loop
+    const { xml: nsCleanedXml, refs: nsRemovedRefs } = await applyNamespacePreCheck(
+      log, failures, xmlContent, whitelist, targetOrg, itemName
     );
+
+    const { xmlContent: updatedXml, removedRefs: perFailureRefs, skippedFields } = processFailures(
+      log, failures, nsCleanedXml, whitelist, allSkippedFields
+    );
+
+    const removedRefs = [...nsRemovedRefs, ...perFailureRefs];
 
     allRemovedFields.push(...removedRefs.map((r) => r.label));
 
