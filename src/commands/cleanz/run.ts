@@ -188,7 +188,7 @@ function removeFieldPermissionsFromXml(
   // Normalise line endings before regex matching
   const normalised = xmlContent.replace(/\r\n/g, '\n');
   const escapedField = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const innerPattern = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+  const innerPattern = '(?:(?!<\\/?fieldPermissions>)[\\s\\S])*?';
   const blockRegex = new RegExp(
     `[ \\t]*<fieldPermissions>${innerPattern}<field>[ \\t]*${escapedField}[ \\t]*</field>${innerPattern}</fieldPermissions>[ \\t]*\\r?\\n?`,
     'g'
@@ -217,7 +217,7 @@ function removeXmlBlock(
   const normalised = xmlContent.replace(/\r\n/g, '\n');
   const escapedName = missingName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const escapedBlock = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const innerPattern = `(?:(?!<${escapedBlock}>)[\\s\\S])*?`;
+  const innerPattern = `(?:(?!<\\/?${escapedBlock}>)[\\s\\S])*?`;
   const blockRegex = new RegExp(
     `[ \\t]*<${escapedBlock}>${innerPattern}<${keyTag}>[ \\t]*${escapedName}[ \\t]*</${keyTag}>${innerPattern}</${escapedBlock}>[ \\t]*\\r?\\n?`,
     'g'
@@ -544,6 +544,10 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /In field: flow - no Flow named (.+?) found/i,
       /no Flow named (.+?) found in your org/i,
       /no active version.*Flow named (.+?) found/i,
+      // Profile-specific — SF reports FlowDefinition instead of Flow
+      /no FlowDefinition named (.+?) found/i,
+      /In field: flow - no FlowDefinition named (.+?) found/i,
+      /Entity of type 'FlowDefinition' named '(.+?)' cannot be found/i,
     ],
     label: 'flow', whitelistKey: 'flows', cacheKey: 'flows',
     repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'flows', `${n}.flow-meta.xml`),
@@ -648,7 +652,8 @@ function processFieldFailure(
   repoPath: string,
   removedFields: string[],
   skippedFields: string[],
-  allSkippedFields: string[]
+  allSkippedFields: string[],
+  removalFailures: string[]
 ): { handled: boolean; xmlContent: string } {
   let missingField: string | null = null;
 
@@ -673,11 +678,14 @@ function processFieldFailure(
   if (removed) {
     log(`   Removed fieldPermissions for: ${missingField}`);
     removedFields.push(missingField);
-    // ✅ Cache globally so all subsequent items skip this deploy
     globalMissing.fields.add(missingField);
     return { handled: true, xmlContent: updated };
   }
-  log(`   Field not found in XML: ${missingField} - already removed or not present.`);
+
+  // Pattern matched but block was NOT found in XML — log loudly so it is never silent
+  const msg = `[Field] ${missingField} — SF reported missing but block NOT found in XML. Raw: ${errorMessage}`;
+  log(`   [REMOVAL-FAILED] ${msg}`);
+  removalFailures.push(msg);
   return { handled: true, xmlContent };
 }
 
@@ -694,7 +702,8 @@ function processRegisteredFailure(
   repoPath: string,
   removedFields: string[],
   skippedFields: string[],
-  allSkippedFields: string[]
+  allSkippedFields: string[],
+  removalFailures: string[]
 ): { handled: boolean; xmlContent: string } {
   for (const handler of METADATA_HANDLERS) {
     let name: string | null = null;
@@ -718,11 +727,14 @@ function processRegisteredFailure(
     if (removed) {
       log(`   Removed ${handler.label} block for: ${name}`);
       removedFields.push(`${handler.displayTag} ${name}`);
-      // ✅ Cache globally so all subsequent items skip this deploy
       (globalMissing[handler.cacheKey]).add(name);
       return { handled: true, xmlContent: updated };
     }
-    log(`   ${handler.label} block not found in XML: ${name} - already removed or not present.`);
+
+    // Pattern matched but block was NOT found in XML — log loudly so it is never silent
+    const msg = `[${handler.displayTag}] ${name} — SF reported missing but block NOT found in XML. Raw: ${errorMessage}`;
+    log(`   [REMOVAL-FAILED] ${msg}`);
+    removalFailures.push(msg);
     return { handled: true, xmlContent };
   }
 
@@ -742,11 +754,12 @@ function processFailures(
   repoPath: string,
   itemName: string,
   allSkippedFields: string[]
-): { xmlContent: string; removedFields: string[]; skippedFields: string[] } {
+): { xmlContent: string; removedFields: string[]; skippedFields: string[]; removalFailures: string[] } {
   let updatedXml = xmlContent;
   const removedFields: string[] = [];
   const skippedFields: string[] = [];
   const unmatchedErrors: string[] = [];
+  const removalFailures: string[] = [];
 
   log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
   failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
@@ -757,7 +770,7 @@ function processFailures(
     // ── CustomField ──────────────────────────────────────────
     const fieldResult = processFieldFailure(
       log, errorMessage, updatedXml, whitelist, globalMissing, repoPath,
-      removedFields, skippedFields, allSkippedFields
+      removedFields, skippedFields, allSkippedFields, removalFailures
     );
     if (fieldResult.handled) {
       updatedXml = fieldResult.xmlContent;
@@ -767,7 +780,7 @@ function processFailures(
     // ── All other metadata types via registry ─────────────────
     const registryResult = processRegisteredFailure(
       log, errorMessage, updatedXml, whitelist, globalMissing, repoPath,
-      removedFields, skippedFields, allSkippedFields
+      removedFields, skippedFields, allSkippedFields, removalFailures
     );
     if (registryResult.handled) {
       updatedXml = registryResult.xmlContent;
@@ -786,7 +799,17 @@ function processFailures(
     log('   [WARN] Check that file to add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
   }
 
-  return { xmlContent: updatedXml, removedFields, skippedFields };
+  // Persist removal failures — pattern matched but XML block not found
+  if (removalFailures.length > 0) {
+    const timestamp = new Date().toISOString();
+    const lines = removalFailures.map((e) => `[${timestamp}] [${itemName}] ${e}`).join('\n') + '\n';
+    try { fs.appendFileSync(UNMATCHED_ERRORS_LOG, lines, 'utf8'); } catch { /* best-effort */ }
+    log(`   [WARN] ${removalFailures.length} removal failure(s) logged to: ${UNMATCHED_ERRORS_LOG}`);
+    log('   [WARN] These were recognised by pattern but the XML block could not be found.');
+    log('   [WARN] Check the log — likely a regex boundary issue or unexpected XML structure.');
+  }
+
+  return { xmlContent: updatedXml, removedFields, skippedFields, removalFailures };
 }
 
 // ===============================================================
@@ -913,14 +936,20 @@ async function invokeProcessMetadataItem(
     const xmlContent = fs.readFileSync(filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
 
-    const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
+    const { xmlContent: updatedXml, removedFields, skippedFields, removalFailures } = processFailures(
       log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
     );
 
     allRemovedFields.push(...removedFields);
 
     if (removedFields.length === 0) {
-      if (skippedFields.length > 0) {
+      if (removalFailures.length > 0) {
+        // Errors were recognised but blocks could not be removed from XML —
+        // surface this loudly so it is never silently ignored.
+        log(`[${itemName}] ${removalFailures.length} removal failure(s) — SF reported errors but blocks not found in XML:`);
+        removalFailures.forEach((f) => log(`   ${f}`));
+        itemStatus = 'Removal Failed - Check Logs';
+      } else if (skippedFields.length > 0) {
         log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
         itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
       } else {
