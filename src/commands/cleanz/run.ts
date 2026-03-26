@@ -113,7 +113,7 @@ const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 12;
 const MAX_RETRIES = 3;
-const MAX_QUEUE_WAIT_MINS = 90; // wait up to 90 min for active Copado deployments to finish
+const MAX_QUEUE_WAIT_MINS = 60; // wait up to 60 min for active Copado deployments to finish
 
 // ===============================================================
 // HELPERS
