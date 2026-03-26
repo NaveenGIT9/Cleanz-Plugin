@@ -328,7 +328,7 @@ async function invokeDeployWithRetry(
   return null;
 }
 // ===============================================================
-// ✅ FIXED: runDeployProcess - Use --metadata flag instead of --manifest
+// ✅ FIXED: runDeployProcess - Windows shell:true + log parameter
 // ===============================================================
 function runDeployProcess(
   log: (msg: string) => void,
@@ -343,13 +343,13 @@ function runDeployProcess(
     // This avoids CLI parsing issues and is more reliable for single-item deploys
     const args = [
       'project', 'deploy', 'start',
-      '--metadata', `${metadataType}:${itemName}`,  // ← Changed from --manifest
+      '--metadata', `${metadataType}:${itemName}`,
       '--target-org', targetOrg,
       '--json', '--dry-run', '--ignore-warnings',
-      '--wait', String(timeoutMins),  // ← Fixed: match timeoutMins (was *2)
+      '--wait', String(timeoutMins),
     ];
-    // ✅ FIX: Add cwd so CLI finds sfdx-project.json
-    const proc = spawn('sf', args, { shell: false, cwd: REPO_PATH });
+    // ✅ CRITICAL FIX: shell: true allows Windows to find sf.cmd
+    const proc = spawn('sf', args, { shell: true, cwd: REPO_PATH });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
     proc.stdout.pipe(outputStream);
     proc.stderr.resume();  // Prevent backpressure
@@ -365,7 +365,7 @@ function runDeployProcess(
       // ✅ FIX: Small delay to ensure stream is fully flushed before reading
       setTimeout(() => resolve('ok'), 500);
     });
-    // ✅ FIX: Handle spawn errors (e.g., sf not in PATH) - Use log instead of console.error
+    // ✅ FIX: Handle spawn errors - Use log instead of console.error
     proc.on('error', (err) => {
       clearTimeout(timer);
       outputStream.end();
