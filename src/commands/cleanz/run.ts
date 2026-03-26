@@ -46,10 +46,13 @@ type DeployResult = {
 };
 
 type ComponentFailure = {
-  problem: string;
+  problem?: string; // older SF CLI versions
+  error?: string; // newer SF CLI versions use "error" instead of "problem"
   fullName?: string; // component name e.g. "Rubrik Field Sales User - Old"
-  fileName?: string; // relative path e.g. "force-app/.../Rubrik Field Sales User - Old.profile-meta.xml"
+  fileName?: string; // relative path (older CLI)
+  filePath?: string; // absolute path (newer CLI)
   componentType?: string;
+  type?: string; // newer CLI uses "type" instead of "componentType"
 };
 
 type SummaryRecord = {
@@ -960,10 +963,10 @@ function processFailures(
   const skippedFields: string[] = [];
 
   log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
-  failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
+  failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
 
   for (const failure of failures) {
-    const err = failure.problem;
+    const err = failure.problem ?? failure.error ?? '';
 
     // ── CustomField ───────────────────────────────────────────────
     const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
@@ -1072,7 +1075,7 @@ async function applyNamespacePreCheck(
   const refs: RemovedRef[] = [];
 
   for (const failure of failures) {
-    const ns = extractNamespaceFromError(failure.problem);
+    const ns = extractNamespaceFromError(failure.problem ?? failure.error ?? '');
     if (!ns || checked.has(ns)) continue;
     checked.add(ns);
 
@@ -1142,7 +1145,8 @@ function routeFailuresToItems(failures: ComponentFailure[], activeItems: BatchIt
   for (const failure of failures) {
     let matched: BatchItem | undefined;
     if (failure.fullName) matched = itemByName.get(failure.fullName.toLowerCase());
-    if (!matched && failure.fileName) matched = itemByFile.get(path.basename(failure.fileName).toLowerCase());
+    const fp = failure.fileName ?? failure.filePath;
+    if (!matched && fp) matched = itemByFile.get(path.basename(fp).toLowerCase());
     if (matched) failuresByItem.get(matched.itemName)?.push(failure);
   }
   return failuresByItem;
@@ -1191,7 +1195,7 @@ async function processItemsInIteration(
     if (itemFailures.length === 0) continue;
 
     log(`\n   [${item.itemName}] ${itemFailures.length} failure(s):`);
-    itemFailures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
+    itemFailures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
 
     const xmlContent = fs.readFileSync(item.filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
