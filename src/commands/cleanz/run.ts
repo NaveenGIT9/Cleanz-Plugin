@@ -252,8 +252,11 @@ function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: s
 // in one pass — then sweep the same removal across every other file.
 // ===============================================================
 
-// Cache: "orgAlias:Namespace" → installed (true/false)
-const namespaceCache = new Map<string, boolean>();
+// Caches for namespace queries (keyed by org alias or "org:namespace")
+const namespaceCache = new Map<string, boolean>();          // "org:namespace" → installed?
+const installedNsCache = new Map<string, Set<string>>();    // org → Set of all installed namespace prefixes
+const nsFieldsCache  = new Map<string, Set<string>>();      // "org:namespace" → "Object.Field__c" that exist
+const nsObjectsCache = new Map<string, Set<string>>();      // "org:namespace" → "Object__c" that exist
 
 function extractNamespaceFromError(errorMessage: string): string | null {
   // Matches "Namespace__" prefix inside names like:
@@ -261,6 +264,52 @@ function extractNamespaceFromError(errorMessage: string): string | null {
   //   "UniqueEntry__Object__c"         → "UniqueEntry"
   const m = /named\s+(?:\w+\.)?([A-Za-z][A-Za-z0-9]*)__\w/.exec(errorMessage);
   return m?.[1] ?? null;
+}
+
+// Shared Tooling API query helper — returns records array or [] on failure.
+function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string): Promise<T[]> {
+  return new Promise<T[]>((resolve) => {
+    const args = ['data', 'query', '--query', quotedQuery, '--use-tooling-api', '--target-org', targetOrg, '--json'];
+    const proc = spawn('sf', args, { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => { proc.kill(); resolve([]); }, 30_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as { result?: { records?: T[] } };
+        resolve(json?.result?.records ?? []);
+      } catch { resolve([]); }
+    });
+  });
+}
+
+// Loads ALL installed package namespace prefixes for an org in one query and caches the Set.
+// NamespacePrefix cannot be used in a WHERE clause on InstalledSubscriberPackage (Tooling API
+// restriction), so we pull the full list once and do client-side lookups for every namespace.
+async function loadInstalledNamespaces(
+  log: (msg: string) => void,
+  targetOrg: string
+): Promise<Set<string>> {
+  if (installedNsCache.has(targetOrg)) return installedNsCache.get(targetOrg)!;
+
+  log('   [NS Check] Loading installed package namespaces from org (one-time)...');
+  type PkgRec = { SubscriberPackage: { NamespacePrefix: string } };
+  const records = await toolingQuery<PkgRec>(
+    targetOrg,
+    '"SELECT SubscriberPackage.NamespacePrefix FROM InstalledSubscriberPackage"'
+  );
+  const set = new Set(
+    records
+      .map((r) => r.SubscriberPackage?.NamespacePrefix)
+      .filter((ns): ns is string => !!ns && ns !== 'null')
+  );
+  installedNsCache.set(targetOrg, set);
+  log(`   [NS Check] ${set.size} namespace(s) installed in org`);
+  return set;
 }
 
 async function checkNamespaceInstalled(
@@ -271,31 +320,87 @@ async function checkNamespaceInstalled(
   const key = `${targetOrg}:${namespace}`;
   if (namespaceCache.has(key)) return namespaceCache.get(key)!;
 
-  log(`   [NS Check] Checking if package "${namespace}" is installed in org...`);
-  const query = `"SELECT Id FROM InstalledSubscriberPackage WHERE SubscriberPackage.NamespacePrefix = '${namespace}'"`;
-  const count = await new Promise<number>((resolve) => {
-    const args = ['data', 'query', '--query', query, '--use-tooling-api', '--target-org', targetOrg, '--json'];
-    const proc = spawn('sf', args, { shell: true });
-    const chunks: string[] = [];
-    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
-    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => { proc.kill(); resolve(-1); }, 30_000);
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const raw = chunks.join('');
-        const start = raw.indexOf('{');
-        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as { result?: { totalSize?: number } };
-        resolve(json?.result?.totalSize ?? -1);
-      } catch { resolve(-1); } // query error → treat as installed (safe default)
-    });
-  });
-
-  // count=-1 means query failed: treat as installed so we don't accidentally remove things.
-  const installed = count !== 0;
+  const installedNs = await loadInstalledNamespaces(log, targetOrg);
+  const installed = installedNs.has(namespace);
   namespaceCache.set(key, installed);
-  log(`   [NS Check] ${namespace}: ${installed ? 'installed — skipping bulk removal' : 'NOT installed — bulk-removing all refs'}`);
+  log(`   [NS Check] ${namespace}: ${installed ? 'installed' : 'NOT installed — bulk-removing all refs'}`);
   return installed;
+}
+
+// Fetch all field FQNs ("Object.Namespace__Field__c") that exist in the org for this namespace.
+// Used when the package IS installed but may be on an older version lacking some fields.
+async function fetchNsExistingFields(
+  log: (msg: string) => void,
+  targetOrg: string,
+  namespace: string
+): Promise<Set<string>> {
+  const key = `${targetOrg}:${namespace}`;
+  if (nsFieldsCache.has(key)) return nsFieldsCache.get(key)!;
+
+  log(`   [NS Check] Querying org for all ${namespace}__ fields that exist...`);
+  type FieldRec = { QualifiedApiName: string; EntityDefinition: { QualifiedApiName: string } };
+  const query = `"SELECT QualifiedApiName, EntityDefinition.QualifiedApiName FROM FieldDefinition WHERE NamespacePrefix = '${namespace}'"`;
+  const records = await toolingQuery<FieldRec>(targetOrg, query);
+  const set = new Set(records.map((r) => `${r.EntityDefinition?.QualifiedApiName}.${r.QualifiedApiName}`));
+  nsFieldsCache.set(key, set);
+  log(`   [NS Check] ${namespace}: ${set.size} field(s) exist in this org`);
+  return set;
+}
+
+// Fetch all object API names ("Namespace__Object__c") that exist in the org for this namespace.
+async function fetchNsExistingObjects(
+  log: (msg: string) => void,
+  targetOrg: string,
+  namespace: string
+): Promise<Set<string>> {
+  const key = `${targetOrg}:${namespace}`;
+  if (nsObjectsCache.has(key)) return nsObjectsCache.get(key)!;
+
+  log(`   [NS Check] Querying org for all ${namespace}__ objects that exist...`);
+  type ObjRec = { QualifiedApiName: string };
+  const query = `"SELECT QualifiedApiName FROM EntityDefinition WHERE NamespacePrefix = '${namespace}'"`;
+  const records = await toolingQuery<ObjRec>(targetOrg, query);
+  const set = new Set(records.map((r) => r.QualifiedApiName));
+  nsObjectsCache.set(key, set);
+  log(`   [NS Check] ${namespace}: ${set.size} object(s) exist in this org`);
+  return set;
+}
+
+// Remove fieldPermissions for namespace fields NOT present in the org (smart diff).
+function removeNsFieldsNotInOrg(
+  xmlContent: string,
+  namespace: string,
+  existingFields: Set<string>  // Set of "Object.Namespace__Field__c"
+): { updated: string; removed: boolean } {
+  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+  // Capture the full "Object.Namespace__Field__c" value inside <field>...</field>
+  const regex = new RegExp(
+    `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*(\\w+\\.${ns}__[\\w]+)[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const updated = xmlContent.replace(regex, (match: string, fqn: string) =>
+    existingFields.has(fqn.trim()) ? match : ''
+  );
+  return { updated, removed: updated !== xmlContent };
+}
+
+// Remove objectPermissions for namespace objects NOT present in the org (smart diff).
+function removeNsObjectsNotInOrg(
+  xmlContent: string,
+  namespace: string,
+  existingObjects: Set<string>
+): { updated: string; removed: boolean } {
+  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+  const regex = new RegExp(
+    `[ \\t]*<objectPermissions>${inner}<object>[ \\t]*(${ns}__[\\w]+)[ \\t]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const updated = xmlContent.replace(regex, (match: string, objName: string) =>
+    existingObjects.has(objName.trim()) ? match : ''
+  );
+  return { updated, removed: updated !== xmlContent };
 }
 
 function removeBlocksWithNamespace(
@@ -326,13 +431,13 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
     );
   }
 
-  xml = removeBlocksWithNamespace(xml, 'objectPermissions',      'object',      namespace);
-  xml = removeBlocksWithNamespace(xml, 'classAccesses',          'apexClass',   namespace);
-  xml = removeBlocksWithNamespace(xml, 'pageAccesses',           'apexPage',    namespace);
-  xml = removeBlocksWithNamespace(xml, 'tabSettings',            'tab',         namespace);
-  xml = removeBlocksWithNamespace(xml, 'tabVisibilities',        'tab',         namespace);
-  xml = removeBlocksWithNamespace(xml, 'flowAccesses',           'flow',        namespace);
-  xml = removeBlocksWithNamespace(xml, 'applicationVisibilities','application', namespace);
+  xml = removeBlocksWithNamespace(xml, 'objectPermissions', 'object', namespace);
+  xml = removeBlocksWithNamespace(xml, 'classAccesses', 'apexClass', namespace);
+  xml = removeBlocksWithNamespace(xml, 'pageAccesses', 'apexPage', namespace);
+  xml = removeBlocksWithNamespace(xml, 'tabSettings', 'tab', namespace);
+  xml = removeBlocksWithNamespace(xml, 'tabVisibilities', 'tab', namespace);
+  xml = removeBlocksWithNamespace(xml, 'flowAccesses', 'flow', namespace);
+  xml = removeBlocksWithNamespace(xml, 'applicationVisibilities', 'application', namespace);
 
   return { updated: xml, removed: xml !== xmlContent };
 }
@@ -905,11 +1010,27 @@ async function applyNamespacePreCheck(
     // eslint-disable-next-line no-await-in-loop
     const installed = await checkNamespaceInstalled(log, targetOrg, ns);
     if (!installed) {
+      // Package absent — strip every reference to this namespace in one pass.
       const { updated, removed } = bulkRemoveNamespaceRefs(xml, ns);
       if (removed) {
         xml = updated;
         refs.push({ type: 'namespace', name: ns, label: `[NS:${ns}] bulk-removed` });
         log(`   [NS Bulk] Removed ALL ${ns}__ refs from ${itemName} in one pass`);
+      }
+    } else {
+      // Package installed but may be an older version — query the org for what actually
+      // exists and remove only the refs that are missing (smart diff).
+      // eslint-disable-next-line no-await-in-loop
+      const existingFields = await fetchNsExistingFields(log, targetOrg, ns);
+      // eslint-disable-next-line no-await-in-loop
+      const existingObjects = await fetchNsExistingObjects(log, targetOrg, ns);
+      const fieldResult = removeNsFieldsNotInOrg(xml, ns, existingFields);
+      if (fieldResult.removed) xml = fieldResult.updated;
+      const objResult = removeNsObjectsNotInOrg(xml, ns, existingObjects);
+      if (objResult.removed) xml = objResult.updated;
+      if (fieldResult.removed || objResult.removed) {
+        refs.push({ type: 'namespace', name: ns, label: `[NS:${ns}] smart-removed missing` });
+        log(`   [NS Smart] Removed missing ${ns}__ fields/objects from ${itemName} (package installed, version diff)`);
       }
     }
   }
