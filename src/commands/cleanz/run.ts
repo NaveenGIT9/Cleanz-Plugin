@@ -206,8 +206,32 @@ function removePageAccessFromXml(xmlContent: string, name: string): { updated: s
 function removeTabSettingFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'tabSettings', 'tab', name);
 }
+function removeAllFieldPermissionsForObject(
+  xmlContent: string,
+  objectName: string
+): { updated: string; removed: boolean } {
+  const escapedObject = objectName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const innerPattern = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+  // Matches any <fieldPermissions> block whose <field> starts with "ObjectName."
+  const blockRegex = new RegExp(
+    `[ \\t]*<fieldPermissions>${innerPattern}<field>[ \\t]*${escapedObject}\\.[^<]+[ \\t]*</field>${innerPattern}</fieldPermissions>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const updated = xmlContent.replace(blockRegex, '');
+  return { updated, removed: updated !== xmlContent };
+}
+
 function removeObjectPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
-  return removeXmlBlock(xmlContent, 'objectPermissions', 'object', name);
+  // Remove the objectPermissions block itself
+  const objectResult = removeXmlBlock(xmlContent, 'objectPermissions', 'object', name);
+  // Also remove all fieldPermissions for fields on this object (Object.Field__c).
+  // Salesforce will reject even fieldPermissions for fields on a missing object,
+  // so we must strip both in one pass to avoid the same error on the next iteration.
+  const fieldResult = removeAllFieldPermissionsForObject(objectResult.updated, name);
+  return {
+    updated: fieldResult.updated,
+    removed: objectResult.removed || fieldResult.removed,
+  };
 }
 function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'flowAccesses', 'flow', name);
