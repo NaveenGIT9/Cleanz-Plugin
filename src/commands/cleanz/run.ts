@@ -67,10 +67,11 @@ type WhitelistMap = {
   tabs: string[];
   objects: string[];
   flows: string[];
+  layouts: string[];
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
-type RefType = 'field' | 'app' | 'class' | 'page' | 'tab' | 'object' | 'flow' | 'namespace';
+type RefType = 'field' | 'app' | 'class' | 'page' | 'tab' | 'object' | 'flow' | 'layout' | 'namespace';
 
 type RemovedRef = {
   type: RefType;
@@ -241,6 +242,12 @@ function removeObjectPermissionFromXml(xmlContent: string, name: string): { upda
 }
 function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'flowAccesses', 'flow', name);
+}
+function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
+  // Profiles store layout refs in <layoutAssignments> blocks keyed by <layout>.
+  // A block may also contain a <recordType> child — removeXmlBlock handles this correctly
+  // because its inner pattern is non-greedy and stops at the next block opener.
+  return removeXmlBlock(xmlContent, 'layoutAssignments', 'layout', name);
 }
 
 // ===============================================================
@@ -785,6 +792,15 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     label: 'flow', refType: 'flow', whitelistKey: 'flows',
     removeFn: removeFlowAccessFromXml, displayTag: '[Flow]',
   },
+  {
+    patterns: [
+      /no Layout named (.+?) found/i,
+      /Entity of type 'Layout' named '(.+?)' cannot be found/i,
+      /In field: layout - no Layout named (.+?) found/i,
+    ],
+    label: 'layout', refType: 'layout', whitelistKey: 'layouts',
+    removeFn: removeLayoutAssignmentFromXml, displayTag: '[Layout]',
+  },
 ];
 
 // ===============================================================
@@ -1214,6 +1230,39 @@ async function invokeProcessMetadataItem(
 }
 
 // ===============================================================
+// INPUT RESOLUTION
+// Extracted to keep the run() method under the complexity limit.
+// ===============================================================
+
+async function resolveInputs(
+  log: (msg: string) => void,
+  jsonPathFlag: string,
+  targetOrgFlag: string
+): Promise<{ promotionJsonPath: string; targetOrg: string }> {
+  let promotionJsonPath = jsonPathFlag;
+  while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
+    if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
+    // eslint-disable-next-line no-await-in-loop
+    promotionJsonPath = await prompt(
+      'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
+    );
+    promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
+  }
+  log('   JSON file found.\n');
+
+  let targetOrg = targetOrgFlag;
+  if (!targetOrg) {
+    // eslint-disable-next-line no-await-in-loop
+    targetOrg = await prompt(
+      'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
+    );
+    targetOrg = targetOrg.trim();
+  }
+  log(`\n   Target Org set to: ${targetOrg}\n`);
+  return { promotionJsonPath, targetOrg };
+}
+
+// ===============================================================
 // SF PLUGIN COMMAND
 // ===============================================================
 
@@ -1244,26 +1293,8 @@ export default class DeployAndFix extends SfCommand<void> {
     log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
     log('======================================================\n');
 
-    let promotionJsonPath = flags['json-path'] ?? '';
-    while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
-      if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
-      // eslint-disable-next-line no-await-in-loop
-      promotionJsonPath = await prompt(
-        'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
-      );
-      promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
-    }
-    log('   JSON file found.\n');
-
-    let targetOrg = flags['target-org'] ?? '';
-    if (!targetOrg) {
-      // eslint-disable-next-line no-await-in-loop
-      targetOrg = await prompt(
-        'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
-      );
-      targetOrg = targetOrg.trim();
-    }
-    log(`\n   Target Org set to: ${targetOrg}\n`);
+    // eslint-disable-next-line no-await-in-loop
+    const { promotionJsonPath, targetOrg } = await resolveInputs(log, flags['json-path'] ?? '', flags['target-org'] ?? '');
 
     // ================= LOAD & PARSE JSON =================
     log('Loading promotion JSON...');
@@ -1280,6 +1311,7 @@ export default class DeployAndFix extends SfCommand<void> {
       tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
       objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
       flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
+      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout').map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
@@ -1305,6 +1337,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`  - CustomTabs          : ${whitelist.tabs.length}`);
     log(`  - CustomObjects       : ${whitelist.objects.length}`);
     log(`  - Flows               : ${whitelist.flows.length}`);
+    log(`  - Layouts             : ${whitelist.layouts.length}`);
     log(`Max per item            : ${MAX_ITERATIONS} iterations`);
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
@@ -1323,6 +1356,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
     log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
     log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
+    log('  Layouts  : ' + (whitelist.layouts.join(', ') || 'none'));
 
     log('');
     // eslint-disable-next-line no-await-in-loop
