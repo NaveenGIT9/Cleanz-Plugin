@@ -60,13 +60,13 @@ type SummaryRecord = {
 type TotalDeploys = { value: number };
 
 type WhitelistMap = {
-  fields: string[];
-  apps: string[];
+  fields:  string[];
+  apps:    string[];
   classes: string[];
-  pages: string[];
-  tabs: string[];
+  pages:   string[];
+  tabs:    string[];
   objects: string[];
-  flows: string[];
+  flows:   string[];
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -371,7 +371,11 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ===============================================================
-// WHITELIST + REPO CHECK
+// WHITELIST CHECK
+// Only the JSON package is the source of truth — repo presence is
+// NOT checked. A field/class/etc. may exist in the repo but not be
+// in the target org and not be in this JSON; in that case it must
+// be removed from the permset/profile.
 // ===============================================================
 
 function shouldSkip(
@@ -379,7 +383,6 @@ function shouldSkip(
   label: string,
   name: string,
   whitelistEntries: string[],
-  repoFilePath: string,
   skippedFields: string[],
   allSkippedFields: string[]
 ): boolean {
@@ -390,86 +393,80 @@ function shouldSkip(
     allSkippedFields.push(entry);
     return true;
   }
-  if (repoFilePath && fs.existsSync(repoFilePath)) {
-    log(`   SKIPPING ${label} exists in repo but missing from org: ${name}`);
-    log(`   WARNING: Deploy the ${label} first, then re-run this script.`);
-    log(`   Found at: ${repoFilePath}`);
-    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
-    skippedFields.push(entry);
-    allSkippedFields.push(entry);
-    return true;
-  }
   return false;
 }
 
 // ===============================================================
 // METADATA HANDLER REGISTRY
+// repoPathFn removed — whitelist is JSON-only now.
 // ===============================================================
 
 type MetadataHandler = {
-  pattern: RegExp;
-  label: string;
-  refType: RefType;
+  patterns:     RegExp[];  // multiple patterns — SF can phrase the same error differently
+  label:        string;
+  refType:      RefType;
   whitelistKey: keyof WhitelistMap;
-  repoPathFn: (repoPath: string, name: string) => string;
-  removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
-  displayTag: string;
+  removeFn:     (xml: string, name: string) => { updated: string; removed: boolean };
+  displayTag:   string;
 };
 
 const METADATA_HANDLERS: MetadataHandler[] = [
   {
-    pattern: /no CustomApplication named (.+?) found/,
-    label: 'app',
-    refType: 'app',
-    whitelistKey: 'apps',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'applications', `${n}.app-meta.xml`),
-    removeFn: removeApplicationVisibilityFromXml,
-    displayTag: '[App]',
+    patterns: [
+      /no CustomApplication named (.+?) found/i,
+      /Entity of type 'CustomApplication' named '(.+?)' cannot be found/i,
+      /In field: application - no CustomApplication named (.+?) found/i,
+    ],
+    label: 'app', refType: 'app', whitelistKey: 'apps',
+    removeFn: removeApplicationVisibilityFromXml, displayTag: '[App]',
   },
   {
-    pattern: /no ApexClass named (.+?) found/,
-    label: 'class',
-    refType: 'class',
-    whitelistKey: 'classes',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'classes', `${n}.cls`),
-    removeFn: removeClassAccessFromXml,
-    displayTag: '[Class]',
+    patterns: [
+      /no ApexClass named (.+?) found/i,
+      /Entity of type 'ApexClass' named '(.+?)' cannot be found/i,
+      /In field: apexClass - no ApexClass named (.+?) found/i,
+    ],
+    label: 'class', refType: 'class', whitelistKey: 'classes',
+    removeFn: removeClassAccessFromXml, displayTag: '[Class]',
   },
   {
-    pattern: /no ApexPage named (.+?) found/,
-    label: 'page',
-    refType: 'page',
-    whitelistKey: 'pages',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'pages', `${n}.page`),
-    removeFn: removePageAccessFromXml,
-    displayTag: '[Page]',
+    patterns: [
+      /no ApexPage named (.+?) found/i,
+      /Entity of type 'ApexPage' named '(.+?)' cannot be found/i,
+      /In field: apexPage - no ApexPage named (.+?) found/i,
+    ],
+    label: 'page', refType: 'page', whitelistKey: 'pages',
+    removeFn: removePageAccessFromXml, displayTag: '[Page]',
   },
   {
-    pattern: /no CustomTab named (.+?) found/,
-    label: 'tab',
-    refType: 'tab',
-    whitelistKey: 'tabs',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'tabs', `${n}.tab-meta.xml`),
-    removeFn: removeTabSettingFromXml,
-    displayTag: '[Tab]',
+    patterns: [
+      /no CustomTab named (.+?) found/i,
+      /Entity of type 'CustomTab' named '(.+?)' cannot be found/i,
+      /In field: tab - no CustomTab named (.+?) found/i,
+    ],
+    label: 'tab', refType: 'tab', whitelistKey: 'tabs',
+    removeFn: removeTabSettingFromXml, displayTag: '[Tab]',
   },
   {
-    pattern: /no CustomObject named (.+?) found/,
-    label: 'object',
-    refType: 'object',
-    whitelistKey: 'objects',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`),
-    removeFn: removeObjectPermissionFromXml,
-    displayTag: '[Object]',
+    patterns: [
+      /no CustomObject named (.+?) found/i,
+      /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
+      /In field: object - no CustomObject named (.+?) found/i,
+    ],
+    label: 'object', refType: 'object', whitelistKey: 'objects',
+    removeFn: removeObjectPermissionFromXml, displayTag: '[Object]',
   },
   {
-    pattern: /no Flow named (.+?) found/,
-    label: 'flow',
-    refType: 'flow',
-    whitelistKey: 'flows',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'flows', `${n}.flow-meta.xml`),
-    removeFn: removeFlowAccessFromXml,
-    displayTag: '[Flow]',
+    patterns: [
+      /no Flow named (.+?) found/i,
+      /Entity of type 'Flow' named '(.+?)' cannot be found/i,
+      /In field: flow - no Flow named (.+?) found/i,
+      /no FlowDefinition named (.+?) found/i,
+      /Entity of type 'FlowDefinition' named '(.+?)' cannot be found/i,
+      /In field: flow - no FlowDefinition named (.+?) found/i,
+    ],
+    label: 'flow', refType: 'flow', whitelistKey: 'flows',
+    removeFn: removeFlowAccessFromXml, displayTag: '[Flow]',
   },
 ];
 
@@ -483,20 +480,22 @@ function processFieldFailure(
   errorMessage: string,
   xmlContent: string,
   whitelist: WhitelistMap,
-  repoPath: string,
   skippedFields: string[],
   allSkippedFields: string[]
 ): FailureResult {
-  const fieldMatch = /no CustomField named (.+?) found/.exec(errorMessage);
-  if (!fieldMatch) return { handled: false, xmlContent };
+  const fieldPatterns = [
+    /no CustomField named (.+?) found/i,
+    /Entity of type 'CustomField' named '(.+?)' cannot be found/i,
+    /In field: field - no CustomField named (.+?) found/i,
+  ];
+  let missingField: string | null = null;
+  for (const p of fieldPatterns) {
+    const m = p.exec(errorMessage);
+    if (m) { missingField = m[1].trim(); break; }
+  }
+  if (!missingField) return { handled: false, xmlContent };
 
-  const missingField = fieldMatch[1].trim();
-  const parts = missingField.split('.');
-  const fieldRepoPath = parts.length === 2
-    ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
-    : '';
-
-  if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
+  if (shouldSkip(log, 'field', missingField, whitelist.fields, skippedFields, allSkippedFields)) {
     return { handled: true, xmlContent };
   }
 
@@ -519,18 +518,18 @@ function processRegisteredFailure(
   errorMessage: string,
   xmlContent: string,
   whitelist: WhitelistMap,
-  repoPath: string,
   skippedFields: string[],
   allSkippedFields: string[]
 ): FailureResult {
   for (const handler of METADATA_HANDLERS) {
-    const match = handler.pattern.exec(errorMessage);
-    if (!match) continue;
+    let name: string | null = null;
+    for (const pattern of handler.patterns) {
+      const m = pattern.exec(errorMessage);
+      if (m) { name = m[1].trim(); break; }
+    }
+    if (!name) continue;
 
-    const name = match[1].trim();
-    const repoFilePath = handler.repoPathFn(repoPath, name);
-
-    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
+    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
       return { handled: true, xmlContent };
     }
 
@@ -560,7 +559,6 @@ function processFailures(
   failures: ComponentFailure[],
   xmlContent: string,
   whitelist: WhitelistMap,
-  repoPath: string,
   allSkippedFields: string[]
 ): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[] } {
   let updatedXml = xmlContent;
@@ -574,7 +572,7 @@ function processFailures(
     const err = failure.problem;
 
     // ── CustomField ───────────────────────────────────────────────
-    const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, repoPath, skippedFields, allSkippedFields);
+    const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
     if (fieldResult.handled) {
       updatedXml = fieldResult.xmlContent;
       if (fieldResult.removedRef) removedRefs.push(fieldResult.removedRef);
@@ -582,7 +580,7 @@ function processFailures(
     }
 
     // ── Registered handlers (app / class / page / tab / object / flow) ──
-    const regResult = processRegisteredFailure(log, err, updatedXml, whitelist, repoPath, skippedFields, allSkippedFields);
+    const regResult = processRegisteredFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
     if (regResult.handled) {
       updatedXml = regResult.xmlContent;
       if (regResult.removedRef) removedRefs.push(regResult.removedRef);
@@ -679,7 +677,7 @@ async function invokeProcessMetadataItem(
     totalDeploys: TotalDeploys;
     timeoutMins: number;
     maxRetries: number;
-    allFilePaths: string[]; // all permset + profile paths in the JSON batch
+    allFilePaths: string[];
   }
 ): Promise<SummaryRecord> {
   const {
@@ -757,14 +755,14 @@ async function invokeProcessMetadataItem(
     const rootNode = getRootNodeName(xmlContent);
 
     const { xmlContent: updatedXml, removedRefs, skippedFields } = processFailures(
-      log, failures, xmlContent, whitelist, repoPath, allSkippedFields
+      log, failures, xmlContent, whitelist, allSkippedFields
     );
 
     allRemovedFields.push(...removedRefs.map((r) => r.label));
 
     if (removedRefs.length === 0) {
       if (skippedFields.length > 0) {
-        log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
+        log(`[${itemName}] Only whitelisted items remain. Manual deploy needed.`);
         itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
       } else {
         log(`[${itemName}] No items removed this iteration. Moving on.`);
@@ -871,13 +869,13 @@ export default class DeployAndFix extends SfCommand<void> {
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
     const whitelist: WhitelistMap = {
-      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
-      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
+      fields:  [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
+      apps:    [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
       classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass').map((i) => i.n))].sort(),
-      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
-      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
+      pages:   [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
+      tabs:    [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
       objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
-      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
+      flows:   [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
