@@ -1421,6 +1421,10 @@ export default class DeployAndFix extends SfCommand<void> {
     // eslint-disable-next-line no-await-in-loop
     await loadInstalledNamespaces(targetOrg);
 
+    // Record the current HEAD so we can squash all script commits into one at the end.
+    const startingCommit = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
+    log(`   Starting commit: ${startingCommit.substring(0, 8)}`);
+
     const totalDeploys: TotalDeploys = { value: 0 };
 
     // Build one BatchItem per permset + profile — all deployed together each iteration.
@@ -1480,5 +1484,22 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log(`Summary CSV saved to : ${csvPath}`);
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
+
+    // ================= SQUASH ALL SCRIPT COMMITS =================
+    // Collapse every commit made by this script into a single clean commit.
+    try {
+      const currentHead = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
+      if (currentHead === startingCommit) {
+        log('\nNo commits were made — nothing to squash.');
+      } else {
+        execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
+        const allRemoved = summary.flatMap((r) => r.RemovedFields ? r.RemovedFields.split('; ') : []);
+        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${summary.filter((r) => r.Status !== 'No Change' && r.Status !== 'File Not Found').length} file(s)`;
+        execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
+        log(`\nSquashed all script commits into one: "${squashMsg}"`);
+      }
+    } catch (e) {
+      log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
+    }
   }
 }
