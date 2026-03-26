@@ -289,6 +289,52 @@ function getBackoffMs(attempt: number): number {
   return Math.min(15_000 * Math.pow(2, attempt - 1), 120_000);
 }
 
+// ── Helpers extracted to keep invokeDeployWithRetry under complexity limit ───
+
+function readDeployOutput(outputFile: string): string | null {
+  try {
+    let raw = fs.readFileSync(outputFile, 'utf8');
+    // Take the LAST '{' block — SF CLI sometimes emits an intermediate
+    // progress JSON first (success:true) before the real result JSON.
+    const jsonStart = raw.lastIndexOf('{');
+    if (jsonStart > 0) raw = raw.substring(jsonStart);
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function parseDeployJson(raw: string): DeployResult | null {
+  try {
+    return JSON.parse(raw) as DeployResult;
+  } catch {
+    return null;
+  }
+}
+
+function isPollingTimeout(result: DeployResult): boolean {
+  const deployStatus = (result.result as Record<string, unknown> | undefined)?.status;
+  if (deployStatus === 'Pending' || deployStatus === 'InProgress' || deployStatus === 'Canceling') {
+    return true;
+  }
+  // Fallback: success=true with no details means SF CLI timed out polling
+  return (
+    result.result?.success === true &&
+    !result.result?.details &&
+    result.status === 0
+  );
+}
+
+function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): void {
+  if (!result.result && result.status !== undefined) {
+    log(`   Normalising SF CLI response (status=${result.status}).`);
+    result.result = {
+      success: result.status === 0,
+      details: { componentFailures: [] },
+    };
+  }
+}
+
 async function invokeDeployWithRetry(
   log: (msg: string) => void,
   metadataType: string,
@@ -326,12 +372,8 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    let raw = '';
-    try {
-      raw = fs.readFileSync(outputFile, 'utf8');
-      const jsonStart = raw.indexOf('{');
-      if (jsonStart > 0) raw = raw.substring(jsonStart);
-    } catch {
+    const raw = readDeployOutput(outputFile);
+    if (!raw) {
       log('   Could not read deploy output — retrying...');
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
@@ -347,10 +389,8 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    let result: DeployResult;
-    try {
-      result = JSON.parse(raw) as DeployResult;
-    } catch {
+    const result = parseDeployJson(raw);
+    if (!result) {
       log(`   Invalid JSON on attempt ${attempt} — retrying...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
@@ -367,14 +407,16 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    if (!result.result && result.status !== undefined) {
-      log(`   Normalising SF CLI response (status=${result.status}).`);
-      result.result = {
-        success: result.status === 0,
-        details: { componentFailures: [] },
-      };
+    if (isPollingTimeout(result)) {
+      const backoff = getBackoffMs(attempt);
+      log(`   Deploy returned Pending/InProgress (polling timeout) — waiting ${backoff / 1000}s before retry...`);
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(backoff);
+      attempt = 0;
+      continue;
     }
 
+    normaliseDeployResult(result, log);
     log('   Deploy response received.');
     return result;
   }
@@ -397,14 +439,25 @@ function runDeployProcess(
       '--target-org', targetOrg,
       '--json',
       '--dry-run',
-      '--wait', '2',
+      '--ignore-warnings',          // prevent warning lines mixing into JSON output
+      '--wait', String(timeoutMins * 2), // wait = 2x the process timeout so SF always finishes before we kill it
     ];
 
     const proc = spawn('sf', args, { shell: true });
-    const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
 
+    // ── CRITICAL: only capture stdout ───────────────────────────
+    // stderr carries warning lines (» Warning: ...) that are NOT
+    // part of the JSON result. Piping both to the same file causes
+    // two problems:
+    //   1. Warning text can interleave mid-JSON and break JSON.parse
+    //   2. SF CLI emits an intermediate progress JSON to stdout first
+    //      (success:true, no failures) before the real result JSON.
+    //      If the file is read before the second write flushes, the
+    //      script sees "success" and exits without removing anything.
+    // Fix: stdout only → file, stderr → /dev/null (discarded).
+    const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
     proc.stdout.pipe(outputStream);
-    proc.stderr.pipe(outputStream);
+    proc.stderr.resume(); // drain stderr so it doesn't block the process
 
     const timer = setTimeout(() => {
       proc.kill();
@@ -640,6 +693,129 @@ function applyGlobalMissingCacheToFile(
 }
 
 // ===============================================================
+// HELPER: STATIC PRE-SCAN
+// Salesforce silently ignores certain missing references in Profile
+// dry-runs (flowAccesses, objectPermissions, etc.) and returns
+// success:true without any componentFailures — meaning the deploy
+// loop never gets a chance to react.  This scan checks every
+// reference in the XML directly against the repo filesystem and
+// removes anything that is genuinely absent (not whitelisted, not
+// in repo) — with ZERO deploy calls.
+// Runs for BOTH Profiles and PermissionSets so nothing is missed.
+// ===============================================================
+
+type StaticScanRule = {
+  blockTag: string;
+  keyTag: string;
+  repoPathFn: (repoPath: string, name: string) => string;
+  removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
+  displayTag: string;
+  cacheKey: keyof GlobalMissingCache;
+  whitelistKey: keyof WhitelistMap;
+};
+
+const STATIC_SCAN_RULES: StaticScanRule[] = [
+  {
+    blockTag: 'flowAccesses', keyTag: 'flow',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'flows', `${n}.flow-meta.xml`),
+    removeFn: removeFlowAccessFromXml,
+    displayTag: '[Flow]', cacheKey: 'flows', whitelistKey: 'flows',
+  },
+  {
+    blockTag: 'objectPermissions', keyTag: 'object',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`),
+    removeFn: removeObjectPermissionFromXml,
+    displayTag: '[Object]', cacheKey: 'objects', whitelistKey: 'objects',
+  },
+  {
+    blockTag: 'pageAccesses', keyTag: 'apexPage',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'pages', `${n}.page`),
+    removeFn: removePageAccessFromXml,
+    displayTag: '[Page]', cacheKey: 'pages', whitelistKey: 'pages',
+  },
+  {
+    blockTag: 'classAccesses', keyTag: 'apexClass',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'classes', `${n}.cls`),
+    removeFn: removeClassAccessFromXml,
+    displayTag: '[Class]', cacheKey: 'classes', whitelistKey: 'classes',
+  },
+  {
+    blockTag: 'applicationVisibilities', keyTag: 'application',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'applications', `${n}.app-meta.xml`),
+    removeFn: removeApplicationVisibilityFromXml,
+    displayTag: '[App]', cacheKey: 'apps', whitelistKey: 'apps',
+  },
+  {
+    blockTag: 'tabSettings', keyTag: 'tab',
+    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'tabs', `${n}.tab-meta.xml`),
+    removeFn: removeTabSettingFromXml,
+    displayTag: '[Tab]', cacheKey: 'tabs', whitelistKey: 'tabs',
+  },
+];
+
+function extractBlockValues(xmlContent: string, blockTag: string, keyTag: string): string[] {
+  const results: string[] = [];
+  const escapedBlock = blockTag.replace(/[$()*+.?[\\]^{|}]/g, '\\$&');
+  const blockRegex = new RegExp(`<${escapedBlock}>[\\s\\S]*?</${escapedBlock}>`, 'g');
+  const keyRegex = new RegExp(`<${keyTag}>([^<]+)</${keyTag}>`);
+  const matches = xmlContent.match(blockRegex) ?? [];
+  for (const block of matches) {
+    const keyMatch = keyRegex.exec(block);
+    if (keyMatch) results.push(keyMatch[1].trim());
+  }
+  return results;
+}
+
+function staticPreScan(
+  log: (msg: string) => void,
+  xmlContent: string,
+  itemName: string,
+  repoPath: string,
+  whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache
+): { xmlContent: string; removedItems: string[] } {
+  let updated = xmlContent;
+  const removedItems: string[] = [];
+
+  for (const rule of STATIC_SCAN_RULES) {
+    const refs = extractBlockValues(updated, rule.blockTag, rule.keyTag);
+    if (refs.length === 0) continue;
+
+    log(`   [StaticScan] Checking ${refs.length} <${rule.blockTag}> reference(s)...`);
+
+    for (const name of refs) {
+      // 1. Skip if whitelisted — part of this promotion, will be deployed
+      if ((whitelist[rule.whitelistKey]).includes(name)) {
+        log(`   [StaticScan] SKIP whitelisted ${rule.displayTag}: ${name}`);
+        continue;
+      }
+
+      // 2. Skip if exists in repo — committed but not yet deployed to org
+      const repoFile = rule.repoPathFn(repoPath, name);
+      if (fs.existsSync(repoFile)) {
+        log(`   [StaticScan] SKIP in repo (not yet deployed): ${rule.displayTag} ${name}`);
+        continue;
+      }
+
+      // 3. Genuinely missing — remove from XML
+      log(`   [StaticScan] MISSING ${rule.displayTag}: ${name} — removing...`);
+      const { updated: u, removed } = rule.removeFn(updated, name);
+      if (removed) {
+        updated = u;
+        removedItems.push(`${rule.displayTag} ${name}`);
+        // Populate global cache so subsequent items get pre-scrubbed for free
+        (globalMissing[rule.cacheKey]).add(name);
+        log(`   [StaticScan] Removed ${rule.displayTag}: ${name}`);
+      } else {
+        log(`   [StaticScan] [WARN] Block for ${rule.displayTag} ${name} not found in XML — may already be removed.`);
+      }
+    }
+  }
+
+  return { xmlContent: updated, removedItems };
+}
+
+// ===============================================================
 // HELPER: PROCESS SINGLE FIELD FAILURE
 // ===============================================================
 
@@ -816,6 +992,62 @@ function processFailures(
 // HELPER: PROCESS SINGLE METADATA ITEM
 // ===============================================================
 
+// ── Pre-scrub and static-scan extracted to keep invokeProcessMetadataItem ────
+// ── under the complexity limit. ───────────────────────────────────────────────
+
+function commitFileChange(log: (msg: string) => void, filePath: string, repoPath: string, message: string, tag: string): void {
+  try {
+    execSync(`git add "${filePath}"`, { cwd: repoPath });
+    execSync(`git commit -m "${message}"`, { cwd: repoPath });
+    log(`   [${tag}] Committed changes.`);
+  } catch {
+    log(`   [${tag}] Nothing to commit or commit failed.`);
+  }
+}
+
+function runPreScrubPass(
+  log: (msg: string) => void,
+  filePath: string,
+  itemName: string,
+  repoPath: string,
+  globalMissing: GlobalMissingCache,
+  allRemovedFields: string[],
+  currentStatus: string
+): string {
+  const rawXml = fs.readFileSync(filePath, 'utf8');
+  const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(log, rawXml, globalMissing, itemName);
+  if (removedItems.length === 0) return currentStatus;
+
+  saveXmlClean(scrubbed, filePath, getRootNodeName(scrubbed));
+  allRemovedFields.push(...removedItems);
+  commitFileChange(log, filePath, repoPath,
+    `[${itemName}] Pre-scrub: remove globally known missing: ${removedItems.join(', ')}`, 'Pre-scrub');
+  return 'Fixed & Committed';
+}
+
+function runStaticScanPass(
+  log: (msg: string) => void,
+  filePath: string,
+  itemName: string,
+  repoPath: string,
+  whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
+  allRemovedFields: string[],
+  currentStatus: string
+): string {
+  const rawXml = fs.readFileSync(filePath, 'utf8');
+  const { xmlContent: scanned, removedItems } = staticPreScan(log, rawXml, itemName, repoPath, whitelist, globalMissing);
+  if (removedItems.length === 0) {
+    log(`   [StaticScan] No missing references found for: ${itemName}`);
+    return currentStatus;
+  }
+  saveXmlClean(scanned, filePath, getRootNodeName(scanned));
+  allRemovedFields.push(...removedItems);
+  commitFileChange(log, filePath, repoPath,
+    `[${itemName}] Static-scan: remove missing refs: ${removedItems.join(', ')}`, 'StaticScan');
+  return 'Fixed & Committed';
+}
+
 async function invokeProcessMetadataItem(
   log: (msg: string) => void,
   params: {
@@ -855,32 +1087,9 @@ async function invokeProcessMetadataItem(
     return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
   }
 
-  // ================================================================
-  // PRE-SCRUB PASS — apply all globally confirmed missing references
-  // BEFORE the first deploy call. Zero network cost, saves deploy
-  // slots when earlier items already discovered these failures.
-  // ================================================================
-  {
-    const rawXml = fs.readFileSync(filePath, 'utf8');
-    const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(
-      log, rawXml, globalMissing, itemName
-    );
-
-    if (removedItems.length > 0) {
-      const rootNode = getRootNodeName(scrubbed);
-      saveXmlClean(scrubbed, filePath, rootNode);
-      allRemovedFields.push(...removedItems);
-      itemStatus = 'Fixed & Committed';
-
-      try {
-        execSync(`git add "${filePath}"`, { cwd: repoPath });
-        execSync(`git commit -m "[${itemName}] Pre-scrub: remove globally known missing: ${removedItems.join(', ')}"`, { cwd: repoPath });
-        log(`   [Pre-scrub] Committed pre-scrub changes for: ${itemName}`);
-      } catch {
-        log(`   [Pre-scrub] Nothing to commit or commit failed for: ${itemName}`);
-      }
-    }
-  }
+  // Pre-scrub + static scan delegated to helpers to keep complexity low
+  itemStatus = runPreScrubPass(log, filePath, itemName, repoPath, globalMissing, allRemovedFields, itemStatus);
+  itemStatus = runStaticScanPass(log, filePath, itemName, repoPath, whitelist, globalMissing, allRemovedFields, itemStatus);
 
   // ================================================================
   // MAIN DEPLOY LOOP — only runs for errors not yet in global cache
