@@ -113,6 +113,7 @@ const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 12;
 const MAX_RETRIES = 3;
+const MAX_QUEUE_WAIT_MINS = 90; // wait up to 90 min for active Copado deployments to finish
 
 // ===============================================================
 // HELPERS
@@ -533,7 +534,7 @@ async function invokeDeployWithRetry(
 
     // Wait for the org's deployment queue to clear before submitting.
     // eslint-disable-next-line no-await-in-loop
-    await waitForQueueToClear(log, targetOrg);
+    await waitForQueueToClear(log, targetOrg, MAX_QUEUE_WAIT_MINS);
 
     // eslint-disable-next-line no-await-in-loop
     const procResult = await runDeployProcess(items, targetOrg, outputFile, timeoutMins);
