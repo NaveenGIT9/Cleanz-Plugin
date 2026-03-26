@@ -102,7 +102,7 @@ const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permi
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
-const DEPLOY_TIMEOUT_MINS = 3;
+const DEPLOY_TIMEOUT_MINS = 15;
 const MAX_RETRIES = 3;
 const UNMATCHED_ERRORS_LOG = path.join(REPO_PATH, 'unmatched_errors.log');
 
