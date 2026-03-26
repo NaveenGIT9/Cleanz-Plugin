@@ -240,30 +240,33 @@ function getBackoffMs(attempt: number): number {
   return Math.min(15_000 * Math.pow(2, attempt - 1), 120_000);
 }
 
-function readDeployOutput(outputFile: string): string | null {
+function readDeployOutput(outputFile: string): { raw: string; trimmed: string } | null {
   try {
-    let raw = fs.readFileSync(outputFile, 'utf8');
-    // Take the LAST '{' — SF CLI sometimes emits a progress JSON before the real result
-    const jsonStart = raw.lastIndexOf('{');
-    if (jsonStart > 0) raw = raw.substring(jsonStart);
-    return raw;
+    const raw = fs.readFileSync(outputFile, 'utf8');
+    // SF CLI with --json always starts with '{' — find the FIRST one.
+    // Using lastIndexOf was wrong: it sliced into the middle of a valid JSON
+    // (e.g. the opening brace of a nested componentFailures object).
+    const jsonStart = raw.indexOf('{');
+    if (jsonStart < 0) return null;
+    return { raw, trimmed: raw.substring(jsonStart) };
   } catch {
     return null;
   }
 }
 
-function parseDeployJson(raw: string): DeployResult | null {
+function parseDeployJson(trimmed: string): DeployResult | null {
   try {
-    return JSON.parse(raw) as DeployResult;
+    return JSON.parse(trimmed) as DeployResult;
   } catch {
     return null;
   }
 }
 
 function isPollingTimeout(result: DeployResult): boolean {
+  // Only treat as a polling timeout when SF explicitly says the deploy is still running.
+  // Do NOT retry on success:true + no details — that is the normal --dry-run success shape.
   const s = (result.result as Record<string, unknown> | undefined)?.status;
-  if (s === 'Pending' || s === 'InProgress' || s === 'Canceling') return true;
-  return result.result?.success === true && !result.result?.details && result.status === 0;
+  return s === 'Pending' || s === 'InProgress' || s === 'Canceling';
 }
 
 function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): DeployResult {
@@ -311,13 +314,15 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    const raw = readDeployOutput(outputFile);
-    if (!raw) {
+    const readResult = readDeployOutput(outputFile);
+    if (!readResult) {
       log('   Could not read deploy output — retrying...');
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
     }
+
+    const { raw, trimmed } = readResult;
 
     if (isTransientError(raw)) {
       const backoff = getBackoffMs(attempt);
@@ -328,9 +333,14 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    const result = parseDeployJson(raw);
+    const result = parseDeployJson(trimmed);
     if (!result) {
-      log(`   Invalid JSON on attempt ${attempt} — retrying...`);
+      // Log the raw file content so the exact SF CLI output is visible in the terminal
+      log(`   Invalid JSON on attempt ${attempt} — raw output below:`);
+      log('   --- RAW START ---');
+      log(raw.substring(0, 2000)); // cap at 2000 chars to avoid flooding the terminal
+      log('   --- RAW END ---');
+      log('   Retrying...');
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
@@ -504,7 +514,17 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /In field: object - no CustomObject named (.+?) found/i,
     ],
     label: 'object', whitelistKey: 'objects', cacheKey: 'objects',
-    repoPathFn: (r, n) => path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`),
+    // Standard SF objects (OperatingHours, Account, Case, etc.) never have an
+    // object-meta.xml in the repo — returning '' means fs.existsSync('') = false
+    // so they are never skipped by the repo check and get removed correctly.
+    // Only custom objects (__c, __mdt, __e, __b, __x, __kav, __ka, __hd) need
+    // the repo check — they have a real file when committed but not yet deployed.
+    repoPathFn: (r: string, n: string): string => {
+      const isCustom = /__(c|mdt|e|b|x|ka|kav|hd|history)$/i.test(n);
+      return isCustom
+        ? path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`)
+        : '';
+    },
     removeFn: removeObjectPermissionFromXml,
     displayTag: '[Object]',
   },
@@ -703,9 +723,6 @@ function processFailures(
   const unmatchedErrors: string[] = [];
   const removalFailures: string[] = [];
 
-  log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
-  failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
-
   for (const failure of failures) {
     const err = failure.problem;
 
@@ -768,6 +785,86 @@ function commitChange(
   } catch {
     log(`   [${tag}] Nothing to commit or commit failed.`);
   }
+}
+
+// ── Helper: process the result of a single deploy attempt ────────────────────
+// Extracted from invokeProcessMetadataItem to keep its cyclomatic complexity
+// under the ESLint limit of 20.
+type IterationOutcome =
+  | { done: true; status: string }
+  | { done: false; status: string };
+
+function processDeployIteration(
+  log: (msg: string) => void,
+  deployResult: DeployResult,
+  itemName: string,
+  filePath: string,
+  repoPath: string,
+  whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
+  allRemovedFields: string[],
+  allSkippedFields: string[]
+): IterationOutcome {
+  if (!deployResult.result) {
+    log(`[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(', ')}`);
+    log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
+    log(`[${itemName}] Stopping — re-run once the org is reachable.`);
+    return { done: true, status: 'Deploy Failed - Unrecognised Response' };
+  }
+
+  log(`   [Result] success=${String(deployResult.result.success)} | status=${String((deployResult.result as Record<string, unknown>).status ?? 'n/a')} | numberComponentErrors=${String((deployResult.result as Record<string, unknown>).numberComponentErrors ?? 'n/a')}`);
+
+  // componentFailures can be a plain object (not array) when SF returns a single failure.
+  const rawFailures = deployResult.result.details?.componentFailures;
+  const failures: ComponentFailure[] = !rawFailures
+    ? []
+    : Array.isArray(rawFailures)
+      ? rawFailures
+      : [rawFailures as ComponentFailure];
+
+  log(`   [Result] componentFailures count: ${failures.length}`);
+  failures.forEach((f, i) => log(`   [Result] Failure ${i + 1}: ${f.problem}`));
+
+  if (deployResult.result.success === true && failures.length === 0) {
+    log(`[${itemName}] Deploy validation SUCCESSFUL — no component failures!`);
+    return { done: true, status: allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success' };
+  }
+
+  if (failures.length === 0) {
+    log(`[${itemName}] Deploy returned success=false but no componentFailures. Full result:`);
+    log(JSON.stringify(deployResult.result, null, 2).substring(0, 3000));
+    return { done: true, status: 'Partial / Manual Check Needed' };
+  }
+
+  const xmlContent = fs.readFileSync(filePath, 'utf8');
+  const rootNode = getRootNodeName(xmlContent);
+
+  const { xmlContent: updatedXml, removedFields, skippedFields, removalFailures } = processFailures(
+    log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
+  );
+
+  allRemovedFields.push(...removedFields);
+
+  if (removedFields.length === 0) {
+    if (removalFailures.length > 0) {
+      log(`[${itemName}] ${removalFailures.length} removal failure(s) — SF reported errors but blocks not found in XML:`);
+      removalFailures.forEach((f) => log(`   ${f}`));
+      return { done: true, status: 'Removal Failed - Check Logs' };
+    }
+    if (skippedFields.length > 0) {
+      log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
+      return { done: true, status: 'Whitelisted Items Only - Manual Deploy Needed' };
+    }
+    log(`[${itemName}] No items removed this iteration. Moving on.`);
+    return { done: true, status: 'Partial / Manual Check Needed' };
+  }
+
+  saveXmlClean(updatedXml, filePath, rootNode);
+  log(`Saved updated XML for: ${itemName}`);
+  commitChange(log, filePath, repoPath,
+    `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`,
+    itemName);
+  return { done: false, status: 'Fixed & Committed' };
 }
 
 async function invokeProcessMetadataItem(
@@ -853,59 +950,17 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    if (!deployResult.result) {
-      log(`[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(', ')}`);
-      log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
-      log(`[${itemName}] Stopping — re-run once the org is reachable.`);
-      itemStatus = 'Deploy Failed - Unrecognised Response';
-      break;
-    }
-
-    if (deployResult.result.success === true) {
-      log(`[${itemName}] Deploy validation SUCCESSFUL!`);
-      itemStatus = 'Fixed & Committed';
-      break;
-    }
-
-    const failures = deployResult.result.details?.componentFailures;
-    if (!failures || failures.length === 0) {
-      log(`[${itemName}] No component failures found. Moving on.`);
-      itemStatus = 'Success';
-      break;
-    }
-
-    const xmlContent = fs.readFileSync(filePath, 'utf8');
-    const rootNode = getRootNodeName(xmlContent);
-
-    const { xmlContent: updatedXml, removedFields, skippedFields, removalFailures } = processFailures(
-      log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
+    const outcome = processDeployIteration(
+      log, deployResult, itemName, filePath, repoPath,
+      whitelist, globalMissing, allRemovedFields, allSkippedFields
     );
 
-    allRemovedFields.push(...removedFields);
+    itemStatus = outcome.status;
 
-    if (removedFields.length === 0) {
-      if (removalFailures.length > 0) {
-        log(`[${itemName}] ${removalFailures.length} removal failure(s) — SF reported errors but blocks not found in XML:`);
-        removalFailures.forEach((f) => log(`   ${f}`));
-        itemStatus = 'Removal Failed - Check Logs';
-      } else if (skippedFields.length > 0) {
-        log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
-        itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
-      } else {
-        log(`[${itemName}] No items removed this iteration. Moving on.`);
-        itemStatus = 'Partial / Manual Check Needed';
-      }
+    if (outcome.done) {
       continueLoop = false;
       break;
     }
-
-    saveXmlClean(updatedXml, filePath, rootNode);
-    log(`Saved updated XML for: ${itemName}`);
-
-    const commitMessage = `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`;
-    log(`Committing changes for ${itemName}...`);
-    commitChange(log, filePath, repoPath, commitMessage, itemName);
-    itemStatus = 'Fixed & Committed';
 
     if (iteration >= maxIterations) {
       log(`[${itemName}] Reached max iterations. Check remaining errors manually.`);
