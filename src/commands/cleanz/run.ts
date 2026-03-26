@@ -1119,6 +1119,46 @@ async function applyNamespacePreCheck(
 }
 
 // ===============================================================
+// WHITELIST MASKING
+// Before each dry-run deploy, temporarily strip whitelisted entries
+// from every active item's XML so Salesforce skips them and reports
+// ALL remaining real missing refs — not just the first one it finds.
+// Files are restored immediately after the deploy result arrives,
+// before any error-processing or git operations.
+// ===============================================================
+
+function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): string {
+  let xml = xmlContent;
+  for (const f of whitelist.fields) xml = removeFieldPermissionsFromXml(xml, f).updated;
+  for (const o of whitelist.objects) xml = removeObjectPermissionFromXml(xml, o).updated;
+  for (const c of whitelist.classes) xml = removeClassAccessFromXml(xml, c).updated;
+  for (const p of whitelist.pages) xml = removePageAccessFromXml(xml, p).updated;
+  for (const t of whitelist.tabs) xml = removeTabSettingFromXml(xml, t).updated;
+  for (const fl of whitelist.flows) xml = removeFlowAccessFromXml(xml, fl).updated;
+  for (const a of whitelist.apps) xml = removeApplicationVisibilityFromXml(xml, a).updated;
+  for (const l of whitelist.layouts) xml = removeLayoutAssignmentFromXml(xml, l).updated;
+  return xml;
+}
+
+function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
+  const saved = new Map<string, string>();
+  for (const item of activeItems) {
+    if (!fs.existsSync(item.filePath)) continue;
+    const orig = fs.readFileSync(item.filePath, 'utf8');
+    const masked = maskWhitelistedEntries(orig, whitelist);
+    saved.set(item.filePath, orig);
+    if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
+  }
+  return saved;
+}
+
+function restoreItems(saved: Map<string, string>): void {
+  for (const [filePath, content] of saved) {
+    fs.writeFileSync(filePath, content, 'utf8');
+  }
+}
+
+// ===============================================================
 // BATCH DEPLOY HELPERS
 // Extracted to keep runBatchDeploy under the complexity limit.
 // ===============================================================
@@ -1296,6 +1336,10 @@ async function runBatchDeploy(
     );
     log('Running batch dry-run deploy...');
 
+    // Temporarily strip whitelisted entries so Salesforce skips them and reports
+    // ALL real missing refs — not just the first one it encounters.
+    // Files are restored immediately after the result arrives.
+    const savedContents = maskActiveItems(activeItems, whitelist);
     // eslint-disable-next-line no-await-in-loop
     const deployResult = await invokeDeployWithRetry(
       log,
@@ -1305,6 +1349,7 @@ async function runBatchDeploy(
       timeoutMins,
       maxRetries
     );
+    restoreItems(savedContents);
 
     if (!deployResult) {
       log('Batch deploy failed after all retry attempts.');
