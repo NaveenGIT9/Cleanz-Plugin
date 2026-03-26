@@ -47,8 +47,8 @@ type DeployResult = {
 
 type ComponentFailure = {
   problem: string;
-  fullName?: string;   // component name e.g. "Rubrik Field Sales User - Old"
-  fileName?: string;   // relative path e.g. "force-app/.../Rubrik Field Sales User - Old.profile-meta.xml"
+  fullName?: string; // component name e.g. "Rubrik Field Sales User - Old"
+  fileName?: string; // relative path e.g. "force-app/.../Rubrik Field Sales User - Old.profile-meta.xml"
   componentType?: string;
 };
 
@@ -144,12 +144,7 @@ function formatXml(xml: string): string {
 
     formatted += '    '.repeat(indent) + trimmed + '\n';
 
-    if (
-      !trimmed.startsWith('<?') &&
-      !trimmed.startsWith('</') &&
-      !trimmed.endsWith('/>') &&
-      !trimmed.includes('</')
-    ) {
+    if (!trimmed.startsWith('<?') && !trimmed.startsWith('</') && !trimmed.endsWith('/>') && !trimmed.includes('</')) {
       indent++;
     }
   }
@@ -273,10 +268,10 @@ function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { upda
 // ===============================================================
 
 // Caches for namespace queries (keyed by org alias or "org:namespace")
-const namespaceCache = new Map<string, boolean>();          // "org:namespace" → installed?
-const installedNsCache = new Map<string, Set<string>>();    // org → Set of all installed namespace prefixes
-const nsFieldsCache = new Map<string, Set<string>>();      // "org:namespace" → "Object.Field__c" that exist
-const nsObjectsCache = new Map<string, Set<string>>();      // "org:namespace" → "Object__c" that exist
+const namespaceCache = new Map<string, boolean>(); // "org:namespace" → installed?
+const installedNsCache = new Map<string, Set<string>>(); // org → Set of all installed namespace prefixes
+const nsFieldsCache = new Map<string, Set<string>>(); // "org:namespace" → "Object.Field__c" that exist
+const nsObjectsCache = new Map<string, Set<string>>(); // "org:namespace" → "Object__c" that exist
 
 // Salesforce built-in prefixes that look like namespace prefixes but are NOT managed packages.
 // These must never be passed to the namespace installer check or bulk-removed.
@@ -286,7 +281,12 @@ function extractNamespaceFromError(errorMessage: string): string | null {
   // Matches "Namespace__" prefix inside names like:
   //   "Account.UniqueEntry__Field__c"  → "UniqueEntry"
   //   "UniqueEntry__Object__c"         → "UniqueEntry"
-  const m = /named\s+(?:\w+\.)?([A-Za-z][A-Za-z0-9]*)__\w/.exec(errorMessage);
+  // A real namespace-prefixed component always has TWO double-underscores:
+  //   Namespace__ComponentName__c  (e.g. UniqueEntry__Field__c, Rubrik__Obj__c)
+  // A plain custom field has only ONE:
+  //   PrecedingOpportunityOwner__c  ← NOT a namespace, just a field name
+  // The regex requires a second __ after the captured prefix to avoid false positives.
+  const m = /named\s+(?:\w+\.)?([A-Za-z][A-Za-z0-9]*)__\w[^.\s]*__/.exec(errorMessage);
   const ns = m?.[1] ?? null;
   // Skip Salesforce built-in prefixes — they are not managed packages.
   if (ns && SF_RESERVED_PREFIXES.has(ns.toLowerCase())) return null;
@@ -301,7 +301,10 @@ function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string):
     const chunks: string[] = [];
     proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
     proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => { proc.kill(); resolve([]); }, 30_000);
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve([]);
+    }, 30_000);
     proc.on('close', () => {
       clearTimeout(timer);
       try {
@@ -309,7 +312,9 @@ function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string):
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as { result?: { records?: T[] } };
         resolve(json?.result?.records ?? []);
-      } catch { resolve([]); }
+      } catch {
+        resolve([]);
+      }
     });
   });
 }
@@ -326,9 +331,7 @@ async function loadInstalledNamespaces(targetOrg: string): Promise<Set<string>> 
     '"SELECT SubscriberPackage.NamespacePrefix FROM InstalledSubscriberPackage"'
   );
   const set = new Set(
-    records
-      .map((r) => r.SubscriberPackage?.NamespacePrefix)
-      .filter((ns): ns is string => !!ns && ns !== 'null')
+    records.map((r) => r.SubscriberPackage?.NamespacePrefix).filter((ns): ns is string => !!ns && ns !== 'null')
   );
   installedNsCache.set(targetOrg, set);
   return set;
@@ -392,7 +395,7 @@ async function fetchNsExistingObjects(
 function removeNsFieldsNotInOrg(
   xmlContent: string,
   namespace: string,
-  existingFields: Set<string>  // Set of "Object.Namespace__Field__c"
+  existingFields: Set<string> // Set of "Object.Namespace__Field__c"
 ): { updated: string; removed: boolean } {
   const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
@@ -425,9 +428,7 @@ function removeNsObjectsNotInOrg(
   return { updated, removed: updated !== xmlContent };
 }
 
-function removeBlocksWithNamespace(
-  xml: string, blockTag: string, keyTag: string, namespace: string
-): string {
+function removeBlocksWithNamespace(xml: string, blockTag: string, keyTag: string, namespace: string): string {
   const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const bt = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = `(?:(?!<${bt}>)[\\s\\S])*?`;
@@ -445,11 +446,19 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
   {
     const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
     xml = xml.replace(
-      new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[^<]*\\.${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g'), ''
+      new RegExp(
+        `[ \\t]*<fieldPermissions>${inner}<field>[^<]*\\.${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      ''
     );
     // fieldPermissions: field = "Namespace__Object__c.AnyField"
     xml = xml.replace(
-      new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g'), ''
+      new RegExp(
+        `[ \\t]*<fieldPermissions>${inner}<field>${ns}__[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      ''
     );
   }
 
@@ -469,13 +478,26 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
 // ===============================================================
 
 const TRANSIENT_ERROR_PATTERNS = [
-  /rate limit/i, /request limit/i, /too many requests/i,
-  /ECONNRESET/i, /ECONNREFUSED/i, /ETIMEDOUT/i, /ENOTFOUND/i,
-  /socket hang up/i, /network/i, /connection.*reset/i,
-  /exceeded.*limit/i, /server.*unavailable/i,
-  /503/, /502/, /504/,
-  /session.*expired/i, /invalid.*session/i, /expired.*access/i,
-  /authentication/i, /INVALID_SESSION_ID/i,
+  /rate limit/i,
+  /request limit/i,
+  /too many requests/i,
+  /ECONNRESET/i,
+  /ECONNREFUSED/i,
+  /ETIMEDOUT/i,
+  /ENOTFOUND/i,
+  /socket hang up/i,
+  /network/i,
+  /connection.*reset/i,
+  /exceeded.*limit/i,
+  /server.*unavailable/i,
+  /503/,
+  /502/,
+  /504/,
+  /session.*expired/i,
+  /invalid.*session/i,
+  /expired.*access/i,
+  /authentication/i,
+  /INVALID_SESSION_ID/i,
   /Cannot read properties of undefined/i,
 ];
 
@@ -600,7 +622,18 @@ function runDeployProcess(
     for (const item of items) {
       metaArgs.push('-m', `"${item.metadataType}:${item.itemName}"`);
     }
-    const args = ['project', 'deploy', 'start', ...metaArgs, '--target-org', targetOrg, '--json', '--dry-run', '--wait', String(timeoutMins)];
+    const args = [
+      'project',
+      'deploy',
+      'start',
+      ...metaArgs,
+      '--target-org',
+      targetOrg,
+      '--json',
+      '--dry-run',
+      '--wait',
+      String(timeoutMins),
+    ];
 
     // Log the exact shell command for debugging
     const dbgCmd = `sf ${args.join(' ')}`;
@@ -645,19 +678,16 @@ function sleep(ms: number): Promise<void> {
 function queryDeployQueueCount(targetOrg: string): Promise<number> {
   return new Promise((resolve) => {
     // Single quotes inside the SOQL are fine inside cmd.exe-quoted args.
-    const query = '"SELECT Id FROM DeployRequest WHERE Status IN (\'Pending\',\'InProgress\')"';
-    const args = [
-      'data', 'query',
-      '--query', query,
-      '--use-tooling-api',
-      '--target-org', targetOrg,
-      '--json',
-    ];
+    const query = "\"SELECT Id FROM DeployRequest WHERE Status IN ('Pending','InProgress')\"";
+    const args = ['data', 'query', '--query', query, '--use-tooling-api', '--target-org', targetOrg, '--json'];
     const proc = spawn('sf', args, { shell: true });
     const chunks: string[] = [];
     proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
     proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => { proc.kill(); resolve(0); }, 30_000);
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve(0);
+    }, 30_000);
     proc.on('close', () => {
       clearTimeout(timer);
       try {
@@ -674,11 +704,7 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
   });
 }
 
-async function waitForQueueToClear(
-  log: (msg: string) => void,
-  targetOrg: string,
-  maxWaitMins = 30
-): Promise<void> {
+async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string, maxWaitMins = 30): Promise<void> {
   const POLL_MS = 30_000;
   const deadline = Date.now() + maxWaitMins * 60_000;
 
@@ -734,7 +760,7 @@ function shouldSkip(
 // ===============================================================
 
 type MetadataHandler = {
-  patterns: RegExp[];  // multiple patterns — SF can phrase the same error differently
+  patterns: RegExp[]; // multiple patterns — SF can phrase the same error differently
   label: string;
   refType: RefType;
   whitelistKey: keyof WhitelistMap;
@@ -749,8 +775,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'CustomApplication' named '(.+?)' cannot be found/i,
       /In field: application - no CustomApplication named (.+?) found/i,
     ],
-    label: 'app', refType: 'app', whitelistKey: 'apps',
-    removeFn: removeApplicationVisibilityFromXml, displayTag: '[App]',
+    label: 'app',
+    refType: 'app',
+    whitelistKey: 'apps',
+    removeFn: removeApplicationVisibilityFromXml,
+    displayTag: '[App]',
   },
   {
     patterns: [
@@ -758,8 +787,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'ApexClass' named '(.+?)' cannot be found/i,
       /In field: apexClass - no ApexClass named (.+?) found/i,
     ],
-    label: 'class', refType: 'class', whitelistKey: 'classes',
-    removeFn: removeClassAccessFromXml, displayTag: '[Class]',
+    label: 'class',
+    refType: 'class',
+    whitelistKey: 'classes',
+    removeFn: removeClassAccessFromXml,
+    displayTag: '[Class]',
   },
   {
     patterns: [
@@ -767,8 +799,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'ApexPage' named '(.+?)' cannot be found/i,
       /In field: apexPage - no ApexPage named (.+?) found/i,
     ],
-    label: 'page', refType: 'page', whitelistKey: 'pages',
-    removeFn: removePageAccessFromXml, displayTag: '[Page]',
+    label: 'page',
+    refType: 'page',
+    whitelistKey: 'pages',
+    removeFn: removePageAccessFromXml,
+    displayTag: '[Page]',
   },
   {
     patterns: [
@@ -776,8 +811,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'CustomTab' named '(.+?)' cannot be found/i,
       /In field: tab - no CustomTab named (.+?) found/i,
     ],
-    label: 'tab', refType: 'tab', whitelistKey: 'tabs',
-    removeFn: removeTabSettingFromXml, displayTag: '[Tab]',
+    label: 'tab',
+    refType: 'tab',
+    whitelistKey: 'tabs',
+    removeFn: removeTabSettingFromXml,
+    displayTag: '[Tab]',
   },
   {
     patterns: [
@@ -785,8 +823,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
       /In field: object - no CustomObject named (.+?) found/i,
     ],
-    label: 'object', refType: 'object', whitelistKey: 'objects',
-    removeFn: removeObjectPermissionFromXml, displayTag: '[Object]',
+    label: 'object',
+    refType: 'object',
+    whitelistKey: 'objects',
+    removeFn: removeObjectPermissionFromXml,
+    displayTag: '[Object]',
   },
   {
     patterns: [
@@ -797,8 +838,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'FlowDefinition' named '(.+?)' cannot be found/i,
       /In field: flow - no FlowDefinition named (.+?) found/i,
     ],
-    label: 'flow', refType: 'flow', whitelistKey: 'flows',
-    removeFn: removeFlowAccessFromXml, displayTag: '[Flow]',
+    label: 'flow',
+    refType: 'flow',
+    whitelistKey: 'flows',
+    removeFn: removeFlowAccessFromXml,
+    displayTag: '[Flow]',
   },
   {
     patterns: [
@@ -806,8 +850,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /Entity of type 'Layout' named '(.+?)' cannot be found/i,
       /In field: layout - no Layout named (.+?) found/i,
     ],
-    label: 'layout', refType: 'layout', whitelistKey: 'layouts',
-    removeFn: removeLayoutAssignmentFromXml, displayTag: '[Layout]',
+    label: 'layout',
+    refType: 'layout',
+    whitelistKey: 'layouts',
+    removeFn: removeLayoutAssignmentFromXml,
+    displayTag: '[Layout]',
   },
 ];
 
@@ -832,7 +879,10 @@ function processFieldFailure(
   let missingField: string | null = null;
   for (const p of fieldPatterns) {
     const m = p.exec(errorMessage);
-    if (m) { missingField = m[1].trim(); break; }
+    if (m) {
+      missingField = m[1].trim();
+      break;
+    }
   }
   if (!missingField) return { handled: false, xmlContent };
 
@@ -866,7 +916,10 @@ function processRegisteredFailure(
     let name: string | null = null;
     for (const pattern of handler.patterns) {
       const m = pattern.exec(errorMessage);
-      if (m) { name = m[1].trim(); break; }
+      if (m) {
+        name = m[1].trim();
+        break;
+      }
     }
     if (!name) continue;
 
@@ -992,10 +1045,9 @@ function sweepOtherFiles(
   const refLabels = refs.map((r) => r.label).join(', ');
   try {
     for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
-    execSync(
-      `git commit -m "Cross-file sweep: remove [${refLabels}] from ${modifiedFiles.length} other file(s)"`,
-      { cwd: repoPath }
-    );
+    execSync(`git commit -m "Cross-file sweep: remove [${refLabels}] from ${modifiedFiles.length} other file(s)"`, {
+      cwd: repoPath,
+    });
     log(`   [Sweep] Committed cleanup across ${modifiedFiles.length} file(s).`);
   } catch {
     log('   [Sweep] Commit failed or nothing new to stage.');
@@ -1024,7 +1076,8 @@ async function applyNamespacePreCheck(
     if (!ns || checked.has(ns)) continue;
     checked.add(ns);
 
-    const hasWhitelisted = Object.values(whitelist).flat()
+    const hasWhitelisted = Object.values(whitelist)
+      .flat()
       .some((v) => v.startsWith(`${ns}__`) || v.includes(`.${ns}__`));
     if (hasWhitelisted) {
       log(`   [NS Check] ${ns}: some components are whitelisted — skipping bulk removal`);
@@ -1077,10 +1130,7 @@ function validateBatchItems(log: (msg: string) => void, items: BatchItem[]): voi
   }
 }
 
-function routeFailuresToItems(
-  failures: ComponentFailure[],
-  activeItems: BatchItem[]
-): Map<string, ComponentFailure[]> {
+function routeFailuresToItems(failures: ComponentFailure[], activeItems: BatchItem[]): Map<string, ComponentFailure[]> {
   const itemByName = new Map<string, BatchItem>();
   const itemByFile = new Map<string, BatchItem>();
   for (const item of activeItems) {
@@ -1096,6 +1146,17 @@ function routeFailuresToItems(
     if (matched) failuresByItem.get(matched.itemName)?.push(failure);
   }
   return failuresByItem;
+}
+
+function sweepPerItemRefs(
+  log: (msg: string) => void,
+  perItemRefs: Map<string, RemovedRef[]>,
+  allFilePaths: string[],
+  repoPath: string
+): void {
+  for (const [sourceFilePath, refs] of perItemRefs) {
+    sweepOtherFiles(log, refs, new Set([sourceFilePath]), allFilePaths, repoPath);
+  }
 }
 
 function markPassedItems(
@@ -1119,9 +1180,9 @@ async function processItemsInIteration(
   whitelist: WhitelistMap,
   targetOrg: string,
   repoPath: string
-): Promise<{ iterationRemovedRefs: RemovedRef[]; modifiedPaths: Set<string>; anyProgress: boolean }> {
-  const iterationRemovedRefs: RemovedRef[] = [];
-  const modifiedPaths = new Set<string>();
+): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean }> {
+  // Track refs per source file so the sweep skips only the source file, not all modified files.
+  const perItemRefs = new Map<string, RemovedRef[]>();
   let anyProgress = false;
 
   for (const item of activeItems) {
@@ -1136,25 +1197,39 @@ async function processItemsInIteration(
     const rootNode = getRootNodeName(xmlContent);
 
     // eslint-disable-next-line no-await-in-loop
-    const { xml: nsXml, refs: nsRefs } = await applyNamespacePreCheck(log, itemFailures, xmlContent, whitelist, targetOrg, item.itemName);
-    const { xmlContent: updatedXml, removedRefs: perFailureRefs, skippedFields } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields);
+    const { xml: nsXml, refs: nsRefs } = await applyNamespacePreCheck(
+      log,
+      itemFailures,
+      xmlContent,
+      whitelist,
+      targetOrg,
+      item.itemName
+    );
+    const {
+      xmlContent: updatedXml,
+      removedRefs: perFailureRefs,
+      skippedFields,
+    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields);
     const removedRefs = [...nsRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
 
     if (removedRefs.length === 0) {
-      item.status = skippedFields.length > 0 ? 'Whitelisted Items Only - Manual Deploy Needed' : 'Partial / Manual Check Needed';
+      item.status =
+        skippedFields.length > 0 ? 'Whitelisted Items Only - Manual Deploy Needed' : 'Partial / Manual Check Needed';
       item.done = true;
       continue;
     }
 
     anyProgress = true;
-    iterationRemovedRefs.push(...removedRefs);
+    perItemRefs.set(item.filePath, removedRefs);
     saveXmlClean(updatedXml, item.filePath, rootNode);
-    modifiedPaths.add(item.filePath);
 
     try {
       execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-      execSync(`git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`, { cwd: repoPath });
+      execSync(
+        `git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`,
+        { cwd: repoPath }
+      );
       log(`   Committed changes for: ${item.itemName}`);
       item.status = 'Fixed & Committed';
     } catch {
@@ -1163,7 +1238,7 @@ async function processItemsInIteration(
     }
   }
 
-  return { iterationRemovedRefs, modifiedPaths, anyProgress };
+  return { perItemRefs, anyProgress };
 }
 
 // ===============================================================
@@ -1205,24 +1280,42 @@ async function runBatchDeploy(
 
     if (totalDeploys.value > maxTotalDeploys) {
       log(`Global deploy limit reached (${maxTotalDeploys}). Stopping.`);
-      for (const item of activeItems) { item.status = 'Stopped - Global Limit Reached'; item.done = true; }
+      for (const item of activeItems) {
+        item.status = 'Stopped - Global Limit Reached';
+        item.done = true;
+      }
       break;
     }
 
-    log(`\n--- Batch Iteration ${iteration} | Active: ${activeItems.length} | Total Deploys: ${totalDeploys.value} / ${maxTotalDeploys} ---`);
+    log(
+      `\n--- Batch Iteration ${iteration} | Active: ${activeItems.length} | Total Deploys: ${totalDeploys.value} / ${maxTotalDeploys} ---`
+    );
     log('Running batch dry-run deploy...');
 
     // eslint-disable-next-line no-await-in-loop
-    const deployResult = await invokeDeployWithRetry(log, activeItems, targetOrg, deployErrorsFile, timeoutMins, maxRetries);
+    const deployResult = await invokeDeployWithRetry(
+      log,
+      activeItems,
+      targetOrg,
+      deployErrorsFile,
+      timeoutMins,
+      maxRetries
+    );
 
     if (!deployResult) {
       log('Batch deploy failed after all retry attempts.');
-      for (const item of activeItems) { item.status = 'Deploy Failed - Exhausted Retries'; item.done = true; }
+      for (const item of activeItems) {
+        item.status = 'Deploy Failed - Exhausted Retries';
+        item.done = true;
+      }
       break;
     }
     if (!deployResult.result) {
       log(`SF CLI returned unrecognised response. Keys: ${Object.keys(deployResult).join(', ')}`);
-      for (const item of activeItems) { item.status = 'Deploy Failed - Unrecognised Response'; item.done = true; }
+      for (const item of activeItems) {
+        item.status = 'Deploy Failed - Unrecognised Response';
+        item.done = true;
+      }
       break;
     }
     if (deployResult.result.success === true) {
@@ -1237,9 +1330,14 @@ async function runBatchDeploy(
     const failures = deployResult.result.details?.componentFailures;
     if (!failures || failures.length === 0) {
       consecutiveEmptyRetries++;
-      log(`success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running.`);
+      log(
+        `success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running.`
+      );
       if (consecutiveEmptyRetries >= MAX_EMPTY_RETRIES) {
-        for (const item of activeItems) { item.status = 'Partial / Manual Check Needed'; item.done = true; }
+        for (const item of activeItems) {
+          item.status = 'Partial / Manual Check Needed';
+          item.done = true;
+        }
         break;
       }
       // eslint-disable-next-line no-await-in-loop
@@ -1252,17 +1350,28 @@ async function runBatchDeploy(
     markPassedItems(log, activeItems, failuresByItem);
 
     // eslint-disable-next-line no-await-in-loop
-    const { iterationRemovedRefs, modifiedPaths, anyProgress } = await processItemsInIteration(
-      log, activeItems, failuresByItem, whitelist, targetOrg, repoPath
+    const { perItemRefs, anyProgress } = await processItemsInIteration(
+      log,
+      activeItems,
+      failuresByItem,
+      whitelist,
+      targetOrg,
+      repoPath
     );
 
     if (!anyProgress && batchItems.some((i) => !i.done)) {
       log('No progress this iteration. Stopping batch.');
-      for (const item of batchItems.filter((i) => !i.done)) { item.status = 'Partial / Manual Check Needed'; item.done = true; }
+      for (const item of batchItems.filter((i) => !i.done)) {
+        item.status = 'Partial / Manual Check Needed';
+        item.done = true;
+      }
       break;
     }
 
-    sweepOtherFiles(log, iterationRemovedRefs, modifiedPaths, allFilePaths, repoPath);
+    // Sweep each item's removed refs to ALL other files except that item's own file.
+    // This ensures e.g. Profile B gets swept even if it was also modified this iteration
+    // for a different error — it would otherwise be missed if we skipped all modified files.
+    sweepPerItemRefs(log, perItemRefs, allFilePaths, repoPath);
   }
 
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
@@ -1300,9 +1409,7 @@ async function resolveInputs(
   let targetOrg = targetOrgFlag;
   if (!targetOrg) {
     // eslint-disable-next-line no-await-in-loop
-    targetOrg = await prompt(
-      'Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> '
-    );
+    targetOrg = await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ');
     targetOrg = targetOrg.trim();
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
@@ -1333,7 +1440,9 @@ export default class DeployAndFix extends SfCommand<void> {
 
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
-    const log = (msg: string): void => { this.log(msg); };
+    const log = (msg: string): void => {
+      this.log(msg);
+    };
 
     // ================= INTERACTIVE PROMPTS =================
     log('\n======================================================');
@@ -1341,7 +1450,11 @@ export default class DeployAndFix extends SfCommand<void> {
     log('======================================================\n');
 
     // eslint-disable-next-line no-await-in-loop
-    const { promotionJsonPath, targetOrg } = await resolveInputs(log, flags['json-path'] ?? '', flags['target-org'] ?? '');
+    const { promotionJsonPath, targetOrg } = await resolveInputs(
+      log,
+      flags['json-path'] ?? '',
+      flags['target-org'] ?? ''
+    );
 
     // ================= LOAD & PARSE JSON =================
     log('Loading promotion JSON...');
@@ -1455,9 +1568,17 @@ export default class DeployAndFix extends SfCommand<void> {
 
     // eslint-disable-next-line no-await-in-loop
     const summary = await runBatchDeploy(
-      log, batchItems, targetOrg, REPO_PATH, whitelist,
-      allFilePaths, MAX_ITERATIONS, MAX_TOTAL_DEPLOYS,
-      totalDeploys, DEPLOY_TIMEOUT_MINS, MAX_RETRIES
+      log,
+      batchItems,
+      targetOrg,
+      REPO_PATH,
+      whitelist,
+      allFilePaths,
+      MAX_ITERATIONS,
+      MAX_TOTAL_DEPLOYS,
+      totalDeploys,
+      DEPLOY_TIMEOUT_MINS,
+      MAX_RETRIES
     );
 
     // ================= FINAL SUMMARY =================
@@ -1468,18 +1589,28 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nPERMISSION SETS:');
     summary
       .filter((r) => r.Type === 'PermissionSet')
-      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
+      .forEach((r) =>
+        log(
+          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+            r.SkippedFields || 'none'
+          }`
+        )
+      );
 
     log('\nPROFILES:');
     summary
       .filter((r) => r.Type === 'Profile')
-      .forEach((r) => log(`   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`));
+      .forEach((r) =>
+        log(
+          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+            r.SkippedFields || 'none'
+          }`
+        )
+      );
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
-    const csvRows = summary.map(
-      (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`
-    );
+    const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
     fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
     log(`Summary CSV saved to : ${csvPath}`);
@@ -1493,8 +1624,10 @@ export default class DeployAndFix extends SfCommand<void> {
         log('\nNo commits were made — nothing to squash.');
       } else {
         execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
-        const allRemoved = summary.flatMap((r) => r.RemovedFields ? r.RemovedFields.split('; ') : []);
-        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${summary.filter((r) => r.Status !== 'No Change' && r.Status !== 'File Not Found').length} file(s)`;
+        const allRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
+        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${
+          summary.filter((r) => r.Status !== 'No Change' && r.Status !== 'File Not Found').length
+        } file(s)`;
         execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
         log(`\nSquashed all script commits into one: "${squashMsg}"`);
       }
