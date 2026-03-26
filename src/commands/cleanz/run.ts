@@ -20,10 +20,8 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
 import { Messages } from '@salesforce/core';
-
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
 const messages = Messages.loadMessages('@salesforce/plugin-cleanz', 'cleanz.run');
-
 // ===============================================================
 // TYPES
 // ===============================================================
@@ -31,7 +29,6 @@ type PromotionItem = {
   t: string;
   n: string;
 };
-
 type DeployResult = {
   status?: number;
   name?: string;
@@ -48,11 +45,9 @@ type DeployResult = {
   };
   messages?: Array<Record<string, unknown>>;
 };
-
 type ComponentFailure = {
   problem: string;
 };
-
 type SummaryRecord = {
   Type: string;
   Name: string;
@@ -60,9 +55,7 @@ type SummaryRecord = {
   RemovedFields: string;
   SkippedFields: string;
 };
-
 type TotalDeploys = { value: number };
-
 type WhitelistMap = {
   fields: string[];
   apps: string[];
@@ -72,7 +65,6 @@ type WhitelistMap = {
   objects: string[];
   flows: string[];
 };
-
 type GlobalMissingCache = {
   fields: Set<string>;
   apps: Set<string>;
@@ -82,14 +74,12 @@ type GlobalMissingCache = {
   objects: Set<string>;
   flows: Set<string>;
 };
-
 function makeGlobalMissingCache(): GlobalMissingCache {
   return {
     fields: new Set(), apps: new Set(), classes: new Set(),
     pages: new Set(), tabs: new Set(), objects: new Set(), flows: new Set(),
   };
 }
-
 // ===============================================================
 // CONSTANTS / CONFIG
 // ===============================================================
@@ -101,7 +91,6 @@ const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 3;
 const MAX_RETRIES = 3;
 const UNMATCHED_ERRORS_LOG = path.join(REPO_PATH, 'unmatched_errors.log');
-
 // ===============================================================
 // HELPERS
 // ===============================================================
@@ -111,7 +100,6 @@ function prompt(question: string): Promise<string> {
     rl.question(question, (answer) => { rl.close(); resolve(answer.trim()); });
   });
 }
-
 // ===============================================================
 // XML FORMATTING & SAVING
 // ===============================================================
@@ -130,7 +118,6 @@ function formatXml(xml: string): string {
   }
   return formatted;
 }
-
 function saveXmlClean(xmlContent: string, filePath: string, metadataType: string): void {
   let content = xmlContent.replace(/<\?xml[^?]*\?>\s*/gi, '');
   content = '<?xml version="1.0" encoding="UTF-8"?>\n' + content;
@@ -141,12 +128,10 @@ function saveXmlClean(xmlContent: string, filePath: string, metadataType: string
   content = content.replace(regex, (_m: string, tag: string) => `</${tag}>\n${closingTag}`);
   fs.writeFileSync(filePath, content, 'utf8');
 }
-
 function getRootNodeName(xmlContent: string): string {
   const match = /<(\w+)\s+xmlns=/i.exec(xmlContent) ?? /<(\w+)>/i.exec(xmlContent);
   return match ? match[1] : 'PermissionSet';
 }
-
 // ===============================================================
 // XML BLOCK REMOVERS
 // ===============================================================
@@ -154,28 +139,25 @@ function removeFieldPermissionsFromXml(xmlContent: string, missingField: string)
   const norm = xmlContent.replace(/\r\n/g, '\n');
   const ef = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = '(?:(?!<\\/?fieldPermissions>)[\\s\\S])*?';
-  const re = new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*${ef}[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\r?\n?`, 'g');
+  const re = new RegExp(`[ \t]*<fieldPermissions>${inner}<field>[ \t]*${ef}[ \t]*</field>${inner}</fieldPermissions>[ \t]*\r?\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
-
 function removeXmlBlock(xmlContent: string, blockTag: string, keyTag: string, name: string): { updated: string; removed: boolean } {
   const norm = xmlContent.replace(/\r\n/g, '\n');
   const en = name.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const et = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = `(?:(?!<\\/?${et}>)[\\s\\S])*?`;
-  const re = new RegExp(`[ \\t]*<${et}>${inner}<${keyTag}>[ \\t]*${en}[ \\t]*</${keyTag}>${inner}</${et}>[ \\t]*\r?\n?`, 'g');
+  const re = new RegExp(`[ \t]*<${et}>${inner}<${keyTag}>[ \t]*${en}[ \t]*</${keyTag}>${inner}</${et}>[ \t]*\r?\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
-
 const removeApplicationVisibilityFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'applicationVisibilities', 'application', n);
 const removeClassAccessFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'classAccesses', 'apexClass', n);
 const removePageAccessFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'pageAccesses', 'apexPage', n);
 const removeTabSettingFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'tabSettings', 'tab', n);
 const removeObjectPermissionFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'objectPermissions', 'object', n);
 const removeFlowAccessFromXml = (xml: string, n: string): { updated: string; removed: boolean } => removeXmlBlock(xml, 'flowAccesses', 'flow', n);
-
 // ===============================================================
 // DEPLOY INFRASTRUCTURE
 // ===============================================================
@@ -191,35 +173,28 @@ const TRANSIENT_ERROR_PATTERNS = [
   /RegistryError/i,
   /Missing metadata type definition in registry/i,
 ];
-
 function isTransientError(raw: string): boolean {
   return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(raw));
 }
-
 function getBackoffMs(attempt: number): number {
   return Math.min(15_000 * Math.pow(2, attempt - 1), 120_000);
 }
-
 function isPollingTimeout(result: DeployResult): boolean {
   const s = (result.result as Record<string, unknown> | undefined)?.status;
   return s === 'Pending' || s === 'InProgress' || s === 'Canceling';
 }
-
 // ===============================================================
 // FIXED: normaliseDeployResult - ESLint no-unsafe-call resolved
 // ===============================================================
 function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): DeployResult {
   if (!result.result && result.status !== undefined) {
     log(`   Normalising SF CLI response (status=${result.status}).`);
-
     const raw = result as Record<string, unknown>;
-
     // Extract from known locations with explicit types
     const directFailures = raw['componentFailures'] as ComponentFailure | ComponentFailure[] | undefined;
     const detailsObj = raw['details'] as Record<string, unknown> | undefined;
     const detailsFailures = detailsObj?.['componentFailures'] as ComponentFailure | ComponentFailure[] | undefined;
     const cliMessages = raw['messages'] as Array<Record<string, unknown>> | undefined;
-
     // ✅ FIX: Type-safe conversion with explicit return type
     const toArray = (v: unknown): ComponentFailure[] => {
       if (!v) return [];
@@ -233,21 +208,18 @@ function normaliseDeployResult(result: DeployResult, log: (msg: string) => void)
       }
       return [];
     };
-
-    // ✅ FIX: Convert messages separately with explicit typing
+    // ✅ FIX: Convert messages separately with explicit typing - AVOIDS .map() on toArray() result
     const messageFailures: ComponentFailure[] = (cliMessages ?? []).map(
       (m: Record<string, unknown>): ComponentFailure => ({
         problem: String(m['problem'] ?? m['message'] ?? m['text'] ?? JSON.stringify(m)),
       })
     );
-
     // ✅ FIX: Build failures array without chaining .map() on toArray() result
     const failures: ComponentFailure[] = [
       ...toArray(directFailures),
       ...toArray(detailsFailures),
       ...messageFailures,
     ];
-
     // Deduplicate by problem string
     const seen = new Set<string>();
     const dedupedFailures = failures.filter((f) => {
@@ -255,11 +227,9 @@ function normaliseDeployResult(result: DeployResult, log: (msg: string) => void)
       seen.add(f.problem);
       return true;
     });
-
     if (dedupedFailures.length > 0) {
       log(`   Extracted ${dedupedFailures.length} failure(s) from non-standard response shape.`);
     }
-
     return {
       ...result,
       result: {
@@ -270,7 +240,6 @@ function normaliseDeployResult(result: DeployResult, log: (msg: string) => void)
   }
   return result;
 }
-
 // ===============================================================
 // DEPLOY WITH RETRY
 // ===============================================================
@@ -286,31 +255,25 @@ async function invokeDeployWithRetry(
   const MAX_TOTAL_ATTEMPTS = maxRetries + 10;
   let attempt = 0;
   let hardAttempt = 0;
-
   while (hardAttempt < MAX_TOTAL_ATTEMPTS) {
     attempt++;
     hardAttempt++;
     log(`   Deploy attempt ${attempt} ...`);
-
     if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-
     // eslint-disable-next-line no-await-in-loop
-    const procResult = await runDeployProcess(metadataType, itemName, targetOrg, outputFile, timeoutMins);
-
+    const procResult = await runDeployProcess(log, metadataType, itemName, targetOrg, outputFile, timeoutMins);
     if (procResult === 'timeout') {
       log(`   Deploy timed out after ${timeoutMins} min(s). Retrying after backoff...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
     }
-
     if (!fs.existsSync(outputFile) || fs.statSync(outputFile).size === 0) {
       log('   Deploy output empty — retrying after backoff...');
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
     }
-
     let raw = '';
     try {
       raw = fs.readFileSync(outputFile, 'utf8');
@@ -323,7 +286,6 @@ async function invokeDeployWithRetry(
       await sleep(getBackoffMs(attempt));
       continue;
     }
-
     if (isTransientError(raw)) {
       const backoff = getBackoffMs(attempt);
       log(`   Transient error detected — waiting ${backoff / 1000}s before retry...`);
@@ -332,7 +294,6 @@ async function invokeDeployWithRetry(
       attempt = 0;
       continue;
     }
-
     let result: DeployResult;
     try {
       result = JSON.parse(raw) as DeployResult;
@@ -342,7 +303,6 @@ async function invokeDeployWithRetry(
       await sleep(getBackoffMs(attempt));
       continue;
     }
-
     const errText = `${result.message ?? ''} ${result.name ?? ''}`;
     if (!result.result && isTransientError(errText)) {
       const backoff = getBackoffMs(attempt);
@@ -352,7 +312,6 @@ async function invokeDeployWithRetry(
       attempt = 0;
       continue;
     }
-
     if (isPollingTimeout(result)) {
       const backoff = getBackoffMs(attempt);
       log(`   Deploy returned Pending/InProgress — waiting ${backoff / 1000}s before retry...`);
@@ -361,20 +320,18 @@ async function invokeDeployWithRetry(
       attempt = 0;
       continue;
     }
-
     const normResult = normaliseDeployResult(result, log);
     log('   Deploy response received.');
     return normResult;
   }
-
   log(`   Giving up after ${hardAttempt} total attempts for: ${itemName}`);
   return null;
 }
-
 // ===============================================================
-// DEPLOY PROCESS
+// ✅ FIXED: runDeployProcess - Use --metadata flag instead of --manifest
 // ===============================================================
 function runDeployProcess(
+  log: (msg: string) => void,
   metadataType: string,
   itemName: string,
   targetOrg: string,
@@ -382,46 +339,44 @@ function runDeployProcess(
   timeoutMins: number
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
-    const manifestContent = `<?xml version="1.0" encoding="UTF-8"?>
-<Package xmlns="http://soap.sforce.com/2006/04/metadata">
-<types>
-<members>${itemName}</members>
-<name>${metadataType}</name>
-</types>
-<version>59.0</version>
-</Package>`;
-    const manifestPath = outputFile + '.package.xml';
-    fs.writeFileSync(manifestPath, manifestContent, 'utf8');
-
+    // ✅ FIX: Use --metadata flag instead of --manifest + temp package.xml
+    // This avoids CLI parsing issues and is more reliable for single-item deploys
     const args = [
       'project', 'deploy', 'start',
-      '--manifest', manifestPath,
+      '--metadata', `${metadataType}:${itemName}`,  // ← Changed from --manifest
       '--target-org', targetOrg,
       '--json', '--dry-run', '--ignore-warnings',
-      '--wait', String(timeoutMins * 2),
+      '--wait', String(timeoutMins),  // ← Fixed: match timeoutMins (was *2)
     ];
-
-    const proc = spawn('sf', args, { shell: false });
+    // ✅ FIX: Add cwd so CLI finds sfdx-project.json
+    const proc = spawn('sf', args, { shell: false, cwd: REPO_PATH });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
-
     proc.stdout.pipe(outputStream);
-    proc.stderr.resume();
-
-    const timer = setTimeout(() => { proc.kill(); resolve('timeout'); }, timeoutMins * 60 * 1000);
-
+    proc.stderr.resume();  // Prevent backpressure
+    // Process-level timeout (kills the spawn if CLI hangs)
+    const timer = setTimeout(() => {
+      proc.kill();
+      outputStream.end();
+      resolve('timeout');
+    }, timeoutMins * 60 * 1000);
     proc.on('close', () => {
       clearTimeout(timer);
       outputStream.end();
-      try { fs.unlinkSync(manifestPath); } catch { /* best-effort */ }
-      resolve('ok');
+      // ✅ FIX: Small delay to ensure stream is fully flushed before reading
+      setTimeout(() => resolve('ok'), 500);
+    });
+    // ✅ FIX: Handle spawn errors (e.g., sf not in PATH) - Use log instead of console.error
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      outputStream.end();
+      log(`[ERROR] Spawn failed: ${err.message}`);
+      resolve('ok');  // Let caller handle via empty output check
     });
   });
 }
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 // ===============================================================
 // METADATA HANDLER REGISTRY
 // ===============================================================
@@ -434,7 +389,6 @@ type MetadataHandler = {
   removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
   displayTag: string;
 };
-
 const METADATA_HANDLERS: MetadataHandler[] = [
   {
     patterns: [
@@ -510,13 +464,11 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     displayTag: '[Flow]',
   },
 ];
-
 const FIELD_PATTERNS: RegExp[] = [
   /no CustomField named (.+?) found/i,
   /Entity of type 'CustomField' named '(.+?)' cannot be found/i,
   /In field: field - no CustomField named (.+?) found/i,
 ];
-
 // ===============================================================
 // UNMATCHED ERROR LOG
 // ===============================================================
@@ -524,7 +476,6 @@ function logUnmatchedError(itemName: string, errorMessage: string): void {
   const line = `[${new Date().toISOString()}] [${itemName}] ${errorMessage}\n`;
   try { fs.appendFileSync(UNMATCHED_ERRORS_LOG, line, 'utf8'); } catch { /* best-effort */ }
 }
-
 // ===============================================================
 // WHITELIST + REPO CHECK
 // ===============================================================
@@ -555,7 +506,6 @@ function shouldSkip(
   }
   return false;
 }
-
 // ===============================================================
 // PROCESS FAILURES
 // ===============================================================
@@ -573,11 +523,10 @@ function processFailures(
   const removedFields: string[] = [];
   const skippedFields: string[] = [];
   const unmatchedErrors: string[] = [];
-
   for (const failure of failures) {
     const err = failure.problem;
     let handled = false;
-
+    // ── CustomField ───────────────────────────────────────────────
     for (const p of FIELD_PATTERNS) {
       const m = p.exec(err);
       if (!m) continue;
@@ -586,11 +535,9 @@ function processFailures(
       const fieldRepoPath = parts.length === 2
         ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
         : '';
-
       if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
         handled = true; break;
       }
-
       log(`   Missing field: ${missingField}`);
       const { updated, removed } = removeFieldPermissionsFromXml(updatedXml, missingField);
       if (removed) {
@@ -604,7 +551,7 @@ function processFailures(
       handled = true; break;
     }
     if (handled) continue;
-
+    // ── Registered handlers (app, class, page, tab, object, flow) ──
     for (const handler of METADATA_HANDLERS) {
       let name: string | null = null;
       for (const p of handler.patterns) {
@@ -612,12 +559,10 @@ function processFailures(
         if (m) { name = m[1].trim(); break; }
       }
       if (!name) continue;
-
       const repoFilePath = handler.repoPathFn(repoPath, name);
       if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
         handled = true; break;
       }
-
       log(`   Missing ${handler.label}: ${name}`);
       const { updated, removed } = handler.removeFn(updatedXml, name);
       if (removed) {
@@ -631,20 +576,17 @@ function processFailures(
       handled = true; break;
     }
     if (handled) continue;
-
+    // ── Unmatched ─────────────────────────────────────────────────
     unmatchedErrors.push(err);
     log(`   [UNMATCHED] ${err}`);
   }
-
   if (unmatchedErrors.length > 0) {
     unmatchedErrors.forEach((e) => logUnmatchedError(itemName, e));
     log(`   [WARN] ${unmatchedErrors.length} unmatched error(s) logged to: ${UNMATCHED_ERRORS_LOG}`);
     log('   [WARN] Review that file and add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
   }
-
   return { xmlContent: updatedXml, removedFields, skippedFields };
 }
-
 // ===============================================================
 // PRE-SCRUB
 // ===============================================================
@@ -657,16 +599,12 @@ function applyGlobalMissingCacheToFile(
   let updated = xmlContent;
   const removedItems: string[] = [];
   const totalCached = Object.values(globalMissing).reduce((s, set) => s + set.size, 0);
-
   if (totalCached === 0) return { xmlContent: updated, removedItems };
-
   log(`   [Pre-scrub] ${totalCached} globally known missing reference(s) — applying without a deploy call...`);
-
   for (const field of globalMissing.fields) {
     const { updated: u, removed } = removeFieldPermissionsFromXml(updated, field);
     if (removed) { updated = u; removedItems.push(field); log(`   [Pre-scrub] Removed field: ${field}`); }
   }
-
   for (const handler of METADATA_HANDLERS) {
     for (const name of globalMissing[handler.cacheKey]) {
       const { updated: u, removed } = handler.removeFn(updated, name);
@@ -677,7 +615,6 @@ function applyGlobalMissingCacheToFile(
       }
     }
   }
-
   if (removedItems.length > 0) {
     log(`   [Pre-scrub] Cleaned ${removedItems.length} reference(s) from ${itemName} before first deploy.`);
   } else {
@@ -685,7 +622,6 @@ function applyGlobalMissingCacheToFile(
   }
   return { xmlContent: updated, removedItems };
 }
-
 // ===============================================================
 // GIT COMMIT
 // ===============================================================
@@ -704,7 +640,6 @@ function commitChange(
     log(`   [${tag}] Nothing to commit or commit failed.`);
   }
 }
-
 // ===============================================================
 // PROCESS A SINGLE METADATA ITEM
 // ===============================================================
@@ -730,7 +665,6 @@ async function invokeProcessMetadataItem(
     whitelist, globalMissing, maxIterations, maxTotalDeploys,
     totalDeploys, timeoutMins, maxRetries,
   } = params;
-
   const deployErrorsFile = path.join(repoPath, `deploy_errors_${itemName}.json`);
   let iteration = 0;
   let itemStatus = 'No Change';
@@ -738,17 +672,15 @@ async function invokeProcessMetadataItem(
   const allSkippedFields: string[] = [];
   const MAX_EMPTY_FAILURE_RETRIES = 3;
   let consecutiveEmptyFailures = 0;
-
   const icon = metadataType === 'Profile' ? 'Profile' : 'PermSet';
   log('\n================================================');
   log(`[${icon}] Processing ${metadataType} : ${itemName}`);
   log('================================================');
-
   if (!fs.existsSync(filePath)) {
     log(`File not found, skipping: ${filePath}`);
     return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
   }
-
+  // ── STEP 1: Pre-scrub from global cache (no deploy cost) ──────────
   {
     const rawXml = fs.readFileSync(filePath, 'utf8');
     const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(log, rawXml, globalMissing, itemName);
@@ -761,50 +693,43 @@ async function invokeProcessMetadataItem(
       itemStatus = 'Fixed & Committed';
     }
   }
-
+  // ── STEP 2: Deploy loop ───────────────────────────────────────────
   while (iteration < maxIterations) {
     iteration++;
     totalDeploys.value++;
-
     if (totalDeploys.value > maxTotalDeploys) {
       log(`Global deploy limit reached (${maxTotalDeploys}). Stopping entire script.`);
       itemStatus = 'Stopped - Global Limit Reached';
       break;
     }
-
     log(`\n--- [${itemName}] Iteration ${iteration} | Total Deploys Used: ${totalDeploys.value} / ${maxTotalDeploys} ---`);
     log('Running dry-run deploy...');
-
     // eslint-disable-next-line no-await-in-loop
     const deployResult = await invokeDeployWithRetry(
       log, metadataType, itemName, targetOrg,
       deployErrorsFile, timeoutMins, maxRetries
     );
-
     if (!deployResult) {
       log(`[${itemName}] Deploy failed after all attempts. Moving on.`);
       itemStatus = 'Deploy Failed - Exhausted Retries';
       break;
     }
-
     if (!deployResult.result) {
       log(`[${itemName}] Unrecognised response shape — keys: ${Object.keys(deployResult).join(', ')}`);
       itemStatus = 'Deploy Failed - Unrecognised Response';
       break;
     }
-
     const rawFailures = deployResult.result.details?.componentFailures;
     const failures: ComponentFailure[] = !rawFailures ? [] : Array.isArray(rawFailures) ? rawFailures : [rawFailures as ComponentFailure];
-
     log(`   [Result] success=${String(deployResult.result.success)} | failures=${failures.length}`);
     failures.forEach((f, i) => log(`   [Result] Failure ${i + 1}: ${f.problem}`));
-
+    // ── SUCCESS ────────────────────────────────────────────────────
     if (deployResult.result.success === true && failures.length === 0) {
       log(`[${itemName}] Deploy validation SUCCESSFUL!`);
       itemStatus = allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
       break;
     }
-
+    // ── success=false but NO component failures ────────────────────
     if (failures.length === 0) {
       consecutiveEmptyFailures++;
       log(`[${itemName}] success=false but 0 componentFailures (attempt ${consecutiveEmptyFailures}/${MAX_EMPTY_FAILURE_RETRIES}).`);
@@ -818,17 +743,14 @@ async function invokeProcessMetadataItem(
       await sleep(5000);
       continue;
     }
-
+    // ── FAILURES FOUND → fix, commit, loop again ───────────────────
     consecutiveEmptyFailures = 0;
     const xmlContent = fs.readFileSync(filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
-
     const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
       log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
     );
-
     allRemovedFields.push(...removedFields);
-
     if (removedFields.length === 0) {
       if (skippedFields.length > 0) {
         log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
@@ -839,22 +761,18 @@ async function invokeProcessMetadataItem(
       }
       break;
     }
-
     saveXmlClean(updatedXml, filePath, rootNode);
     log(`Saved updated XML for: ${itemName}`);
     commitChange(log, filePath, repoPath,
       `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`,
       itemName);
     itemStatus = 'Fixed & Committed';
-
     if (iteration >= maxIterations) {
       log(`[${itemName}] Reached max iterations. Check remaining errors manually.`);
       itemStatus = 'Max Iterations Reached';
     }
   }
-
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
-
   return {
     Type: metadataType,
     Name: itemName,
@@ -863,7 +781,6 @@ async function invokeProcessMetadataItem(
     SkippedFields: allSkippedFields.join('; '),
   };
 }
-
 // ===============================================================
 // MODULE-LEVEL PHASE HELPERS
 // ===============================================================
@@ -875,7 +792,6 @@ async function resolveInputs(
   log('\n======================================================');
   log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
   log('======================================================\n');
-
   let promotionJsonPath = jsonPathFlag;
   while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
     if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
@@ -886,7 +802,6 @@ async function resolveInputs(
     promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
   }
   log('   JSON file found.\n');
-
   let targetOrg = targetOrgFlag;
   if (!targetOrg) {
     // eslint-disable-next-line no-await-in-loop
@@ -896,14 +811,11 @@ async function resolveInputs(
     targetOrg = targetOrg.trim();
   }
   log(`\nTarget Org set to: ${targetOrg}\n`);
-
   return { promotionJsonPath, targetOrg };
 }
-
 function parsePromotionJson(jsonPath: string): { permSets: string[]; profiles: string[]; whitelist: WhitelistMap } {
   const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
   const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
-
   return {
     permSets: uniq('PermissionSet'),
     profiles: uniq('Profile'),
@@ -914,7 +826,6 @@ function parsePromotionJson(jsonPath: string): { permSets: string[]; profiles: s
     },
   };
 }
-
 async function printBannerAndConfirm(
   log: (msg: string) => void,
   targetOrg: string,
@@ -923,7 +834,6 @@ async function printBannerAndConfirm(
   whitelist: WhitelistMap
 ): Promise<boolean> {
   const total = Object.values(whitelist).reduce((s, a) => s + a.length, 0);
-
   log('\n======================================================');
   log('STARTING AUTOMATED DEPLOY & FIX LOOP');
   log('======================================================');
@@ -943,12 +853,10 @@ async function printBannerAndConfirm(
   log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
   log(`Max retries             : ${MAX_RETRIES} per deploy call`);
   log(`Unmatched errors log    : ${UNMATCHED_ERRORS_LOG}`);
-
   log('\nPermission Sets to process:');
   permSets.forEach((ps) => log(`   - ${ps}`));
   log('\nProfiles to process:');
   profiles.forEach((p) => log(`   - ${p}`));
-
   log('\nWhitelisted items (will never be removed):');
   log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
   log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
@@ -958,14 +866,12 @@ async function printBannerAndConfirm(
   log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
   log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
   log('');
-
   const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
   if (confirm.trim().toLowerCase() === 'exit') { log('\nScript cancelled by user.'); return false; }
   log('\nStarting script...');
   log('\n======================================================');
   return true;
 }
-
 async function processAllItems(
   log: (msg: string) => void,
   permSets: string[],
@@ -976,17 +882,14 @@ async function processAllItems(
 ): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
   const summary: SummaryRecord[] = [];
   const totalDeploys: TotalDeploys = { value: 0 };
-
   const common = {
     targetOrg, repoPath: REPO_PATH, whitelist, globalMissing,
     maxIterations: MAX_ITERATIONS, maxTotalDeploys: MAX_TOTAL_DEPLOYS,
     totalDeploys, timeoutMins: DEPLOY_TIMEOUT_MINS, maxRetries: MAX_RETRIES,
   };
-
   log('\n######################################################');
   log(`  PROCESSING PERMISSION SETS (${permSets.length})`);
   log('######################################################');
-
   for (const psName of permSets) {
     // eslint-disable-next-line no-await-in-loop
     summary.push(await invokeProcessMetadataItem(log, {
@@ -995,12 +898,10 @@ async function processAllItems(
     }));
     if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
   }
-
   if (totalDeploys.value <= MAX_TOTAL_DEPLOYS) {
     log('\n######################################################');
     log(`  PROCESSING PROFILES (${profiles.length})`);
     log('######################################################');
-
     for (const profileName of profiles) {
       // eslint-disable-next-line no-await-in-loop
       summary.push(await invokeProcessMetadataItem(log, {
@@ -1010,10 +911,8 @@ async function processAllItems(
       if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
     }
   }
-
   return { summary, totalDeploys };
 }
-
 function printFinalSummary(
   log: (msg: string) => void,
   summary: SummaryRecord[],
@@ -1023,7 +922,6 @@ function printFinalSummary(
   log('\n======================================================');
   log('ALL ITEMS PROCESSED - FINAL SUMMARY');
   log('======================================================');
-
   const totalCached = Object.values(globalMissing).reduce((s, set) => s + set.size, 0);
   log(`\nGlobal Missing Cache (discovered from deploy errors this run): ${totalCached} unique missing references`);
   if (globalMissing.fields.size) log(`  Fields   : ${[...globalMissing.fields].join(', ')}`);
@@ -1033,29 +931,23 @@ function printFinalSummary(
   if (globalMissing.tabs.size) log(`  Tabs     : ${[...globalMissing.tabs].join(', ')}`);
   if (globalMissing.objects.size) log(`  Objects  : ${[...globalMissing.objects].join(', ')}`);
   if (globalMissing.flows.size) log(`  Flows    : ${[...globalMissing.flows].join(', ')}`);
-
   if (fs.existsSync(UNMATCHED_ERRORS_LOG)) {
     log(`\n[WARN] Unmatched errors logged to: ${UNMATCHED_ERRORS_LOG}`);
     log('[WARN] Review and add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
   }
-
   const row = (r: SummaryRecord): string =>
     `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${r.SkippedFields || 'none'}`;
-
   log('\nPERMISSION SETS:');
   summary.filter((r) => r.Type === 'PermissionSet').forEach((r) => log(row(r)));
   log('\nPROFILES:');
   summary.filter((r) => r.Type === 'Profile').forEach((r) => log(row(r)));
-
   const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
   const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
   const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
   fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
-
   log(`\nSummary CSV saved to : ${csvPath}`);
   log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
 }
-
 // ===============================================================
 // SF PLUGIN COMMAND
 // ===============================================================
@@ -1063,7 +955,6 @@ export default class DeployAndFix extends SfCommand<void> {
   public static readonly summary = messages.getMessage('summary');
   public static readonly description = messages.getMessage('description');
   public static readonly examples = messages.getMessages('examples');
-
   public static readonly flags = {
     'json-path': Flags.string({
       char: 'j',
@@ -1076,24 +967,19 @@ export default class DeployAndFix extends SfCommand<void> {
       required: false,
     }),
   };
-
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
     const log = (msg: string): void => { this.log(msg); };
-
     const { promotionJsonPath, targetOrg } = await resolveInputs(
       log, flags['json-path'] ?? '', flags['target-org'] ?? ''
     );
-
     const { permSets, profiles, whitelist } = parsePromotionJson(promotionJsonPath);
     const confirmed = await printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
     if (!confirmed) return;
-
     const globalMissing = makeGlobalMissingCache();
     const { summary, totalDeploys } = await processAllItems(
       log, permSets, profiles, targetOrg, whitelist, globalMissing
     );
-
     printFinalSummary(log, summary, totalDeploys, globalMissing);
   }
 }
