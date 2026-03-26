@@ -106,7 +106,7 @@ type FailureResult = {
 // CONSTANTS / CONFIG
 // ===============================================================
 
-const REPO_PATH = 'D:\\RubrikRepoVDI\\rbk-sfdc-release';
+const REPO_PATH = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
 const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsets');
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
