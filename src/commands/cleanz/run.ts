@@ -204,7 +204,13 @@ function removePageAccessFromXml(xmlContent: string, name: string): { updated: s
   return removeXmlBlock(xmlContent, 'pageAccesses', 'apexPage', name);
 }
 function removeTabSettingFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
-  return removeXmlBlock(xmlContent, 'tabSettings', 'tab', name);
+  // PermissionSets store tab entries in <tabSettings>; Profiles store them in <tabVisibilities>.
+  const psResult = removeXmlBlock(xmlContent, 'tabSettings', 'tab', name);
+  const profileResult = removeXmlBlock(psResult.updated, 'tabVisibilities', 'tab', name);
+  return {
+    updated: profileResult.updated,
+    removed: psResult.removed || profileResult.removed,
+  };
 }
 function removeAllFieldPermissionsForObject(
   xmlContent: string,
@@ -279,6 +285,12 @@ async function invokeDeployWithRetry(
     log(`   Deploy attempt ${attempt} ...`);
 
     if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
+
+    // Wait for the org's deployment queue to clear before submitting.
+    // Prevents our validation from queuing behind active Copado deployments,
+    // and handles our own stale dry-runs that are still InProgress from a prior timeout.
+    // eslint-disable-next-line no-await-in-loop
+    await waitForQueueToClear(log, targetOrg);
 
     // eslint-disable-next-line no-await-in-loop
     const procResult = await runDeployProcess(metadataType, itemName, targetOrg, outputFile, timeoutMins);
@@ -401,6 +413,79 @@ function runDeployProcess(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ===============================================================
+// DEPLOY QUEUE CHECK
+// Queries the Tooling API DeployRequest object to count active
+// (Pending / InProgress) deployments in the org — including any
+// Copado promotions that are currently in flight.
+// We wait until the count reaches 0 before submitting our own
+// CheckOnly (dry-run) validation, which prevents our job from
+// sitting in the queue behind a long-running Copado deployment.
+// It also handles our own stale dry-runs: when --wait 10 expires
+// the job is still InProgress in the org; by waiting for it to
+// finish before retrying we avoid flooding the queue.
+// ===============================================================
+
+function queryDeployQueueCount(targetOrg: string): Promise<number> {
+  return new Promise((resolve) => {
+    // Single quotes inside the SOQL are fine inside cmd.exe-quoted args.
+    const query = `"SELECT Id FROM DeployRequest WHERE Status IN ('Pending','InProgress')"`;
+    const args = [
+      'data', 'query',
+      '--query', query,
+      '--use-tooling-api',
+      '--target-org', targetOrg,
+      '--json',
+    ];
+    const proc = spawn('sf', args, { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => { proc.kill(); resolve(0); }, 30_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+          result?: { totalSize?: number };
+        };
+        resolve(json?.result?.totalSize ?? 0);
+      } catch {
+        resolve(0); // If query fails, assume clear and proceed
+      }
+    });
+  });
+}
+
+async function waitForQueueToClear(
+  log: (msg: string) => void,
+  targetOrg: string,
+  maxWaitMins = 30
+): Promise<void> {
+  const POLL_MS = 30_000;
+  const deadline = Date.now() + maxWaitMins * 60_000;
+
+  // eslint-disable-next-line no-await-in-loop
+  let count = await queryDeployQueueCount(targetOrg);
+  if (count === 0) return;
+
+  log(`   [Queue] ${count} active deployment(s) in org (Copado or previous dry-run). Waiting for queue to clear...`);
+  while (count > 0 && Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(POLL_MS);
+    // eslint-disable-next-line no-await-in-loop
+    count = await queryDeployQueueCount(targetOrg);
+    if (count > 0) log(`   [Queue] Still ${count} active deployment(s). Waiting 30s...`);
+  }
+
+  if (count === 0) {
+    log('   [Queue] Org deployment queue is clear. Proceeding with validation.');
+  } else {
+    log(`   [Queue] Waited ${maxWaitMins} min — queue did not clear. Proceeding anyway.`);
+  }
 }
 
 // ===============================================================
