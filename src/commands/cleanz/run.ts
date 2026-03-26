@@ -197,6 +197,8 @@ const TRANSIENT_ERROR_PATTERNS = [
   /session.*expired/i, /invalid.*session/i, /expired.*access/i,
   /authentication/i, /INVALID_SESSION_ID/i,
   /Cannot read properties of undefined/i,
+  /RegistryError/i,
+  /Missing metadata type definition in registry/i,
 ];
 
 function isTransientError(raw: string): boolean {
@@ -215,9 +217,6 @@ function isPollingTimeout(result: DeployResult): boolean {
 function normaliseDeployResult(result: DeployResult, log: (msg: string) => void): DeployResult {
   if (!result.result && result.status !== undefined) {
     log(`   Normalising SF CLI response (status=${result.status}).`);
-
-    // Dump the full raw response so we can see where the real failures live
-    log(`   [RAW RESPONSE DUMP]: ${JSON.stringify(result).substring(0, 3000)}`);
 
     // SF CLI v2 sometimes returns failures at the TOP LEVEL under various keys.
     // Try to extract component failures from every known location.
@@ -374,19 +373,41 @@ function runDeployProcess(
   timeoutMins: number
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
+    // Write a temp package.xml — avoids shell quoting issues with spaces in names
+    // when using -m "Type:Name With Spaces" which gets mis-parsed by the shell.
+    const manifestContent = `<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>${itemName}</members>
+        <name>${metadataType}</name>
+    </types>
+    <version>59.0</version>
+</Package>`;
+    const manifestPath = outputFile + '.package.xml';
+    fs.writeFileSync(manifestPath, manifestContent, 'utf8');
+
     const args = [
       'project', 'deploy', 'start',
-      '-m', `${metadataType}:${itemName}`,
+      '--manifest', manifestPath,
       '--target-org', targetOrg,
       '--json', '--dry-run', '--ignore-warnings',
       '--wait', String(timeoutMins * 2),
     ];
-    const proc = spawn('sf', args, { shell: true });
+
+    // shell: false so args are passed directly without shell re-splitting on spaces
+    const proc = spawn('sf', args, { shell: false });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
     proc.stdout.pipe(outputStream);
     proc.stderr.resume();
+
     const timer = setTimeout(() => { proc.kill(); resolve('timeout'); }, timeoutMins * 60 * 1000);
-    proc.on('close', () => { clearTimeout(timer); outputStream.end(); resolve('ok'); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      outputStream.end();
+      // Clean up temp manifest
+      try { fs.unlinkSync(manifestPath); } catch { /* best-effort */ }
+      resolve('ok');
+    });
   });
 }
 
