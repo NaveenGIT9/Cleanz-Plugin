@@ -47,6 +47,9 @@ type DeployResult = {
 
 type ComponentFailure = {
   problem: string;
+  fullName?: string;   // component name e.g. "Rubrik Field Sales User - Old"
+  fileName?: string;   // relative path e.g. "force-app/.../Rubrik Field Sales User - Old.profile-meta.xml"
+  componentType?: string;
 };
 
 type SummaryRecord = {
@@ -58,6 +61,16 @@ type SummaryRecord = {
 };
 
 type TotalDeploys = { value: number };
+
+type BatchItem = {
+  metadataType: string;
+  itemName: string;
+  filePath: string;
+  status: string;
+  allRemovedFields: string[];
+  allSkippedFields: string[];
+  done: boolean;
+};
 
 type WhitelistMap = {
   fields: string[];
@@ -262,15 +275,22 @@ function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { upda
 // Caches for namespace queries (keyed by org alias or "org:namespace")
 const namespaceCache = new Map<string, boolean>();          // "org:namespace" → installed?
 const installedNsCache = new Map<string, Set<string>>();    // org → Set of all installed namespace prefixes
-const nsFieldsCache  = new Map<string, Set<string>>();      // "org:namespace" → "Object.Field__c" that exist
+const nsFieldsCache = new Map<string, Set<string>>();      // "org:namespace" → "Object.Field__c" that exist
 const nsObjectsCache = new Map<string, Set<string>>();      // "org:namespace" → "Object__c" that exist
+
+// Salesforce built-in prefixes that look like namespace prefixes but are NOT managed packages.
+// These must never be passed to the namespace installer check or bulk-removed.
+const SF_RESERVED_PREFIXES = new Set(['standard', 'force', 'chatter', 'sf']);
 
 function extractNamespaceFromError(errorMessage: string): string | null {
   // Matches "Namespace__" prefix inside names like:
   //   "Account.UniqueEntry__Field__c"  → "UniqueEntry"
   //   "UniqueEntry__Object__c"         → "UniqueEntry"
   const m = /named\s+(?:\w+\.)?([A-Za-z][A-Za-z0-9]*)__\w/.exec(errorMessage);
-  return m?.[1] ?? null;
+  const ns = m?.[1] ?? null;
+  // Skip Salesforce built-in prefixes — they are not managed packages.
+  if (ns && SF_RESERVED_PREFIXES.has(ns.toLowerCase())) return null;
+  return ns;
 }
 
 // Shared Tooling API query helper — returns records array or [] on failure.
@@ -297,13 +317,9 @@ function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string):
 // Loads ALL installed package namespace prefixes for an org in one query and caches the Set.
 // NamespacePrefix cannot be used in a WHERE clause on InstalledSubscriberPackage (Tooling API
 // restriction), so we pull the full list once and do client-side lookups for every namespace.
-async function loadInstalledNamespaces(
-  log: (msg: string) => void,
-  targetOrg: string
-): Promise<Set<string>> {
+async function loadInstalledNamespaces(targetOrg: string): Promise<Set<string>> {
   if (installedNsCache.has(targetOrg)) return installedNsCache.get(targetOrg)!;
 
-  log('   [NS Check] Loading installed package namespaces from org (one-time)...');
   type PkgRec = { SubscriberPackage: { NamespacePrefix: string } };
   const records = await toolingQuery<PkgRec>(
     targetOrg,
@@ -315,7 +331,6 @@ async function loadInstalledNamespaces(
       .filter((ns): ns is string => !!ns && ns !== 'null')
   );
   installedNsCache.set(targetOrg, set);
-  log(`   [NS Check] ${set.size} namespace(s) installed in org`);
   return set;
 }
 
@@ -327,7 +342,7 @@ async function checkNamespaceInstalled(
   const key = `${targetOrg}:${namespace}`;
   if (namespaceCache.has(key)) return namespaceCache.get(key)!;
 
-  const installedNs = await loadInstalledNamespaces(log, targetOrg);
+  const installedNs = await loadInstalledNamespaces(targetOrg);
   const installed = installedNs.has(namespace);
   namespaceCache.set(key, installed);
   log(`   [NS Check] ${namespace}: ${installed ? 'installed' : 'NOT installed — bulk-removing all refs'}`);
@@ -474,8 +489,7 @@ function getBackoffMs(attempt: number): number {
 
 async function invokeDeployWithRetry(
   log: (msg: string) => void,
-  metadataType: string,
-  itemName: string,
+  items: Array<{ metadataType: string; itemName: string }>,
   targetOrg: string,
   outputFile: string,
   timeoutMins: number,
@@ -493,13 +507,11 @@ async function invokeDeployWithRetry(
     if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
 
     // Wait for the org's deployment queue to clear before submitting.
-    // Prevents our validation from queuing behind active Copado deployments,
-    // and handles our own stale dry-runs that are still InProgress from a prior timeout.
     // eslint-disable-next-line no-await-in-loop
     await waitForQueueToClear(log, targetOrg);
 
     // eslint-disable-next-line no-await-in-loop
-    const procResult = await runDeployProcess(metadataType, itemName, targetOrg, outputFile, timeoutMins);
+    const procResult = await runDeployProcess(items, targetOrg, outputFile, timeoutMins);
 
     if (procResult === 'timeout') {
       log(`   Deploy timed out after ${timeoutMins} min(s). Retrying after backoff...`);
@@ -570,32 +582,28 @@ async function invokeDeployWithRetry(
     return result;
   }
 
-  log(`   Giving up after ${hardAttempt} total attempts for: ${itemName}`);
+  log(`   Giving up after ${hardAttempt} total attempts.`);
   return null;
 }
 
 function runDeployProcess(
-  metadataType: string,
-  itemName: string,
+  items: Array<{ metadataType: string; itemName: string }>,
   targetOrg: string,
   outputFile: string,
   timeoutMins: number
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
-    // shell: true is required on Windows to resolve sf.cmd from PATH.
-    // The -m value is wrapped in quotes so cmd.exe treats "Profile:Name With Spaces"
-    // as a single argument (cmd.exe case-2 stripping: outer quotes removed, inner preserved).
-    const metaArg = `"${metadataType}:${itemName}"`;
-    const args = [
-      'project', 'deploy', 'start',
-      '-m', metaArg,
-      '--target-org', targetOrg,
-      '--json',
-      '--dry-run',
-      '--wait', '10',
-    ];
+    // Build one "-m Type:Name" pair per item.
+    // Each value is double-quoted so cmd.exe (shell:true) strips the outer quotes
+    // and passes "Type:Name With Spaces" as a single argument.
+    const metaArgs: string[] = [];
+    for (const item of items) {
+      metaArgs.push('-m', `"${item.metadataType}:${item.itemName}"`);
+    }
+    const args = ['project', 'deploy', 'start', ...metaArgs, '--target-org', targetOrg, '--json', '--dry-run', '--wait', String(timeoutMins)];
+
     // Log the exact shell command for debugging
-    const dbgCmd = `sf ${['project', 'deploy', 'start', '-m', metaArg, '--target-org', targetOrg, '--json', '--dry-run', '--wait', '10'].join(' ')}`;
+    const dbgCmd = `sf ${args.join(' ')}`;
     fs.appendFileSync(outputFile + '.cmd.txt', dbgCmd + '\n', 'utf8');
 
     const proc = spawn('sf', args, { shell: true });
@@ -937,7 +945,7 @@ function processFailures(
 function sweepOtherFiles(
   log: (msg: string) => void,
   refs: RemovedRef[],
-  currentFilePath: string,
+  skipPaths: Set<string>,
   allFilePaths: string[],
   repoPath: string
 ): void {
@@ -947,7 +955,7 @@ function sweepOtherFiles(
   const modifiedFiles: string[] = [];
 
   for (const filePath of allFilePaths) {
-    if (filePath === currentFilePath || !fs.existsSync(filePath)) continue;
+    if (skipPaths.has(filePath) || !fs.existsSync(filePath)) continue;
 
     let xml = fs.readFileSync(filePath, 'utf8');
     let fileModified = false;
@@ -1055,104 +1063,183 @@ async function applyNamespacePreCheck(
 }
 
 // ===============================================================
-// PROCESS A SINGLE METADATA ITEM
+// BATCH DEPLOY HELPERS
+// Extracted to keep runBatchDeploy under the complexity limit.
 // ===============================================================
 
-async function invokeProcessMetadataItem(
+function validateBatchItems(log: (msg: string) => void, items: BatchItem[]): void {
+  for (const item of items) {
+    if (!fs.existsSync(item.filePath)) {
+      log(`File not found, skipping: ${item.filePath}`);
+      item.status = 'File Not Found';
+      item.done = true;
+    }
+  }
+}
+
+function routeFailuresToItems(
+  failures: ComponentFailure[],
+  activeItems: BatchItem[]
+): Map<string, ComponentFailure[]> {
+  const itemByName = new Map<string, BatchItem>();
+  const itemByFile = new Map<string, BatchItem>();
+  for (const item of activeItems) {
+    itemByName.set(item.itemName.toLowerCase(), item);
+    itemByFile.set(path.basename(item.filePath).toLowerCase(), item);
+  }
+  const failuresByItem = new Map<string, ComponentFailure[]>();
+  for (const item of activeItems) failuresByItem.set(item.itemName, []);
+  for (const failure of failures) {
+    let matched: BatchItem | undefined;
+    if (failure.fullName) matched = itemByName.get(failure.fullName.toLowerCase());
+    if (!matched && failure.fileName) matched = itemByFile.get(path.basename(failure.fileName).toLowerCase());
+    if (matched) failuresByItem.get(matched.itemName)?.push(failure);
+  }
+  return failuresByItem;
+}
+
+function markPassedItems(
   log: (msg: string) => void,
-  params: {
-    metadataType: string;
-    itemName: string;
-    filePath: string;
-    targetOrg: string;
-    repoPath: string;
-    whitelist: WhitelistMap;
-    maxIterations: number;
-    maxTotalDeploys: number;
-    totalDeploys: TotalDeploys;
-    timeoutMins: number;
-    maxRetries: number;
-    allFilePaths: string[];
+  activeItems: BatchItem[],
+  failuresByItem: Map<string, ComponentFailure[]>
+): void {
+  for (const item of activeItems) {
+    if ((failuresByItem.get(item.itemName) ?? []).length === 0) {
+      log(`   [${item.itemName}] No failures this iteration — passed.`);
+      item.status = item.allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
+      item.done = true;
+    }
   }
-): Promise<SummaryRecord> {
-  const {
-    metadataType, itemName, filePath, targetOrg, repoPath,
-    whitelist, maxIterations, maxTotalDeploys,
-    totalDeploys, timeoutMins, maxRetries, allFilePaths,
-  } = params;
+}
 
-  const deployErrorsFile = path.join(repoPath, `deploy_errors_${itemName}.json`);
-  let iteration = 0;
-  let itemStatus = 'No Change';
-  const allRemovedFields: string[] = [];
-  const allSkippedFields: string[] = [];
+async function processItemsInIteration(
+  log: (msg: string) => void,
+  activeItems: BatchItem[],
+  failuresByItem: Map<string, ComponentFailure[]>,
+  whitelist: WhitelistMap,
+  targetOrg: string,
+  repoPath: string
+): Promise<{ iterationRemovedRefs: RemovedRef[]; modifiedPaths: Set<string>; anyProgress: boolean }> {
+  const iterationRemovedRefs: RemovedRef[] = [];
+  const modifiedPaths = new Set<string>();
+  let anyProgress = false;
 
-  const icon = metadataType === 'Profile' ? 'Profile' : 'PermSet';
-  log('\n================================================');
-  log(`[${icon}] Processing ${metadataType} : ${itemName}`);
-  log('================================================');
+  for (const item of activeItems) {
+    if (item.done) continue;
+    const itemFailures = failuresByItem.get(item.itemName) ?? [];
+    if (itemFailures.length === 0) continue;
 
-  if (!fs.existsSync(filePath)) {
-    log(`File not found, skipping: ${filePath}`);
-    return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
+    log(`\n   [${item.itemName}] ${itemFailures.length} failure(s):`);
+    itemFailures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem}`));
+
+    const xmlContent = fs.readFileSync(item.filePath, 'utf8');
+    const rootNode = getRootNodeName(xmlContent);
+
+    // eslint-disable-next-line no-await-in-loop
+    const { xml: nsXml, refs: nsRefs } = await applyNamespacePreCheck(log, itemFailures, xmlContent, whitelist, targetOrg, item.itemName);
+    const { xmlContent: updatedXml, removedRefs: perFailureRefs, skippedFields } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields);
+    const removedRefs = [...nsRefs, ...perFailureRefs];
+    item.allRemovedFields.push(...removedRefs.map((r) => r.label));
+
+    if (removedRefs.length === 0) {
+      item.status = skippedFields.length > 0 ? 'Whitelisted Items Only - Manual Deploy Needed' : 'Partial / Manual Check Needed';
+      item.done = true;
+      continue;
+    }
+
+    anyProgress = true;
+    iterationRemovedRefs.push(...removedRefs);
+    saveXmlClean(updatedXml, item.filePath, rootNode);
+    modifiedPaths.add(item.filePath);
+
+    try {
+      execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+      execSync(`git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`, { cwd: repoPath });
+      log(`   Committed changes for: ${item.itemName}`);
+      item.status = 'Fixed & Committed';
+    } catch {
+      log(`   Nothing to commit or commit failed for: ${item.itemName}`);
+      item.status = 'Commit Failed';
+    }
   }
 
-  let continueLoop = true;
-  // Tracks consecutive deploys that returned success=false with zero component failures.
-  // This happens when --wait 2 expires before the org finishes validating (still InProgress).
-  // We retry up to this limit before giving up.
+  return { iterationRemovedRefs, modifiedPaths, anyProgress };
+}
+
+// ===============================================================
+// BATCH DEPLOY LOOP
+// Deploys all permsets + profiles together in a single SF call each
+// iteration. Failures are routed to the right file via fullName /
+// fileName in ComponentFailure. Items not present in failures have
+// passed validation and are dropped from subsequent iterations.
+// One queue-wait covers the entire batch instead of one per item.
+// ===============================================================
+
+async function runBatchDeploy(
+  log: (msg: string) => void,
+  batchItems: BatchItem[],
+  targetOrg: string,
+  repoPath: string,
+  whitelist: WhitelistMap,
+  allFilePaths: string[],
+  maxIterations: number,
+  maxTotalDeploys: number,
+  totalDeploys: TotalDeploys,
+  timeoutMins: number,
+  maxRetries: number
+): Promise<SummaryRecord[]> {
+  validateBatchItems(log, batchItems);
+
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
+  let iteration = 0;
+  const deployErrorsFile = path.join(repoPath, 'deploy_errors_batch.json');
 
-  while (continueLoop && iteration < maxIterations) {
+  while (iteration < maxIterations) {
+    const activeItems = batchItems.filter((i) => !i.done);
+    if (activeItems.length === 0) break;
+
     iteration++;
+    // eslint-disable-next-line no-param-reassign
     totalDeploys.value++;
 
     if (totalDeploys.value > maxTotalDeploys) {
-      log(`Global deploy limit reached (${maxTotalDeploys}). Stopping entire script.`);
-      itemStatus = 'Stopped - Global Limit Reached';
+      log(`Global deploy limit reached (${maxTotalDeploys}). Stopping.`);
+      for (const item of activeItems) { item.status = 'Stopped - Global Limit Reached'; item.done = true; }
       break;
     }
 
-    log(`\n--- [${itemName}] Iteration ${iteration} | Total Deploys Used: ${totalDeploys.value} / ${maxTotalDeploys} ---`);
-    log('Running dry-run deploy...');
+    log(`\n--- Batch Iteration ${iteration} | Active: ${activeItems.length} | Total Deploys: ${totalDeploys.value} / ${maxTotalDeploys} ---`);
+    log('Running batch dry-run deploy...');
 
     // eslint-disable-next-line no-await-in-loop
-    const deployResult = await invokeDeployWithRetry(
-      log, metadataType, itemName, targetOrg,
-      deployErrorsFile, timeoutMins, maxRetries
-    );
+    const deployResult = await invokeDeployWithRetry(log, activeItems, targetOrg, deployErrorsFile, timeoutMins, maxRetries);
 
     if (!deployResult) {
-      log(`[${itemName}] Deploy failed after all attempts. Moving on.`);
-      itemStatus = 'Deploy Failed - Exhausted Retries';
+      log('Batch deploy failed after all retry attempts.');
+      for (const item of activeItems) { item.status = 'Deploy Failed - Exhausted Retries'; item.done = true; }
       break;
     }
-
     if (!deployResult.result) {
-      log(`[${itemName}] SF CLI returned an unrecognised response shape. Keys: ${Object.keys(deployResult).join(', ')}`);
-      log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
-      itemStatus = 'Deploy Failed - Unrecognised Response';
+      log(`SF CLI returned unrecognised response. Keys: ${Object.keys(deployResult).join(', ')}`);
+      for (const item of activeItems) { item.status = 'Deploy Failed - Unrecognised Response'; item.done = true; }
       break;
     }
-
-    // ── SUCCESS ────────────────────────────────────────────────────
     if (deployResult.result.success === true) {
-      log(`[${itemName}] Deploy validation SUCCESSFUL!`);
-      itemStatus = allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
+      log('All remaining items passed validation!');
+      for (const item of activeItems) {
+        item.status = item.allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
+        item.done = true;
+      }
       break;
     }
 
     const failures = deployResult.result.details?.componentFailures;
-
-    // success=false + zero failures means SF CLI's --wait 2 expired before the org
-    // finished validating (deploy still InProgress). Retry to get the real result.
     if (!failures || failures.length === 0) {
       consecutiveEmptyRetries++;
-      log(`[${itemName}] success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running in org. Re-validating...`);
+      log(`success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running.`);
       if (consecutiveEmptyRetries >= MAX_EMPTY_RETRIES) {
-        log(`[${itemName}] Giving up after ${MAX_EMPTY_RETRIES} retries with no component failures. Manual check needed.`);
-        itemStatus = 'Partial / Manual Check Needed';
+        for (const item of activeItems) { item.status = 'Partial / Manual Check Needed'; item.done = true; }
         break;
       }
       // eslint-disable-next-line no-await-in-loop
@@ -1160,73 +1247,33 @@ async function invokeProcessMetadataItem(
       continue;
     }
 
-    consecutiveEmptyRetries = 0; // reset when real failures arrive
+    consecutiveEmptyRetries = 0;
+    const failuresByItem = routeFailuresToItems(failures, activeItems);
+    markPassedItems(log, activeItems, failuresByItem);
 
-    // ── FAILURES FOUND ─────────────────────────────────────────────
-    const xmlContent = fs.readFileSync(filePath, 'utf8');
-    const rootNode = getRootNodeName(xmlContent);
-
-    // ── NAMESPACE PRE-CHECK ─────────────────────────────────────────
     // eslint-disable-next-line no-await-in-loop
-    const { xml: nsCleanedXml, refs: nsRemovedRefs } = await applyNamespacePreCheck(
-      log, failures, xmlContent, whitelist, targetOrg, itemName
+    const { iterationRemovedRefs, modifiedPaths, anyProgress } = await processItemsInIteration(
+      log, activeItems, failuresByItem, whitelist, targetOrg, repoPath
     );
 
-    const { xmlContent: updatedXml, removedRefs: perFailureRefs, skippedFields } = processFailures(
-      log, failures, nsCleanedXml, whitelist, allSkippedFields
-    );
-
-    const removedRefs = [...nsRemovedRefs, ...perFailureRefs];
-
-    allRemovedFields.push(...removedRefs.map((r) => r.label));
-
-    if (removedRefs.length === 0) {
-      if (skippedFields.length > 0) {
-        log(`[${itemName}] Only whitelisted items remain. Manual deploy needed.`);
-        itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
-      } else {
-        log(`[${itemName}] No items removed this iteration. Moving on.`);
-        itemStatus = 'Partial / Manual Check Needed';
-      }
-      continueLoop = false;
+    if (!anyProgress && batchItems.some((i) => !i.done)) {
+      log('No progress this iteration. Stopping batch.');
+      for (const item of batchItems.filter((i) => !i.done)) { item.status = 'Partial / Manual Check Needed'; item.done = true; }
       break;
     }
 
-    // 1. Save + commit the current file
-    saveXmlClean(updatedXml, filePath, rootNode);
-    log(`Saved updated XML for: ${itemName}`);
-
-    const commitMessage = `[${itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}`;
-    log(`Committing changes for ${itemName}...`);
-    try {
-      execSync(`git add "${filePath}"`, { cwd: repoPath });
-      execSync(`git commit -m "${commitMessage}"`, { cwd: repoPath });
-      log(`Commit successful for: ${itemName}`);
-      itemStatus = 'Fixed & Committed';
-    } catch {
-      log(`Nothing to commit or commit failed for: ${itemName}`);
-      itemStatus = 'Commit Failed';
-    }
-
-    // 2. Remove the same refs from every other file in the batch (one commit)
-    sweepOtherFiles(log, removedRefs, filePath, allFilePaths, repoPath);
-
-    // 3. Loop back to re-validate current file until it passes
-    if (iteration >= maxIterations) {
-      log(`[${itemName}] Reached max iterations. Check remaining errors manually.`);
-      itemStatus = 'Max Iterations Reached';
-    }
+    sweepOtherFiles(log, iterationRemovedRefs, modifiedPaths, allFilePaths, repoPath);
   }
 
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
 
-  return {
-    Type: metadataType,
-    Name: itemName,
-    Status: itemStatus,
-    RemovedFields: allRemovedFields.join('; '),
-    SkippedFields: allSkippedFields.join('; '),
-  };
+  return batchItems.map((item) => ({
+    Type: item.metadataType,
+    Name: item.itemName,
+    Status: item.status,
+    RemovedFields: item.allRemovedFields.join('; '),
+    SkippedFields: item.allSkippedFields.join('; '),
+  }));
 }
 
 // ===============================================================
@@ -1368,54 +1415,46 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nStarting script...');
     log('\n======================================================');
 
-    const summary: SummaryRecord[] = [];
+    // Pre-load all installed package namespaces from the org once upfront.
+    // This avoids an extra SF CLI call on the first namespace error and ensures
+    // the cache is warm before any item processing begins.
+    // eslint-disable-next-line no-await-in-loop
+    await loadInstalledNamespaces(targetOrg);
+
     const totalDeploys: TotalDeploys = { value: 0 };
 
-    const common = {
-      targetOrg,
-      repoPath: REPO_PATH,
-      whitelist,
-      maxIterations: MAX_ITERATIONS,
-      maxTotalDeploys: MAX_TOTAL_DEPLOYS,
-      totalDeploys,
-      timeoutMins: DEPLOY_TIMEOUT_MINS,
-      maxRetries: MAX_RETRIES,
-      allFilePaths,
-    };
+    // Build one BatchItem per permset + profile — all deployed together each iteration.
+    const batchItems: BatchItem[] = [
+      ...permSets.map((n) => ({
+        metadataType: 'PermissionSet',
+        itemName: n,
+        filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
+        status: 'No Change',
+        allRemovedFields: [] as string[],
+        allSkippedFields: [] as string[],
+        done: false,
+      })),
+      ...profiles.map((n) => ({
+        metadataType: 'Profile',
+        itemName: n,
+        filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
+        status: 'No Change',
+        allRemovedFields: [] as string[],
+        allSkippedFields: [] as string[],
+        done: false,
+      })),
+    ];
 
-    // ================= PROCESS PERMISSION SETS =================
     log('\n######################################################');
-    log(`  PROCESSING PERMISSION SETS (${permSets.length})`);
+    log(`  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${profiles.length} Profile(s)`);
     log('######################################################');
 
-    for (const psName of permSets) {
-      // eslint-disable-next-line no-await-in-loop
-      summary.push(await invokeProcessMetadataItem(log, {
-        ...common,
-        metadataType: 'PermissionSet',
-        itemName: psName,
-        filePath: path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`),
-      }));
-      if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
-    }
-
-    // ================= PROCESS PROFILES =================
-    if (totalDeploys.value <= MAX_TOTAL_DEPLOYS) {
-      log('\n######################################################');
-      log(`  PROCESSING PROFILES (${profiles.length})`);
-      log('######################################################');
-
-      for (const profileName of profiles) {
-        // eslint-disable-next-line no-await-in-loop
-        summary.push(await invokeProcessMetadataItem(log, {
-          ...common,
-          metadataType: 'Profile',
-          itemName: profileName,
-          filePath: path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`),
-        }));
-        if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
-      }
-    }
+    // eslint-disable-next-line no-await-in-loop
+    const summary = await runBatchDeploy(
+      log, batchItems, targetOrg, REPO_PATH, whitelist,
+      allFilePaths, MAX_ITERATIONS, MAX_TOTAL_DEPLOYS,
+      totalDeploys, DEPLOY_TIMEOUT_MINS, MAX_RETRIES
+    );
 
     // ================= FINAL SUMMARY =================
     log('\n======================================================');
