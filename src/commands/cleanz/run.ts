@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -59,7 +58,6 @@ type SummaryRecord = {
 
 type TotalDeploys = { value: number };
 
-// ── Whitelist map — one entry per metadata type ───────────────
 type WhitelistMap = {
   fields: string[];
   apps: string[];
@@ -70,10 +68,8 @@ type WhitelistMap = {
   flows: string[];
 };
 
-// ── Global missing cache ──────────────────────────────────────
-// Populated ONLY from actual deploy validation errors.
-// Used so subsequent items get those known-missing refs
-// removed without burning a deploy call for each one.
+// Populated ONLY from actual deploy validation errors this run.
+// Used to pre-scrub subsequent items without burning a deploy call.
 type GlobalMissingCache = {
   fields: Set<string>;
   apps: Set<string>;
@@ -86,13 +82,8 @@ type GlobalMissingCache = {
 
 function makeGlobalMissingCache(): GlobalMissingCache {
   return {
-    fields: new Set(),
-    apps: new Set(),
-    classes: new Set(),
-    pages: new Set(),
-    tabs: new Set(),
-    objects: new Set(),
-    flows: new Set(),
+    fields: new Set(), apps: new Set(), classes: new Set(),
+    pages: new Set(), tabs: new Set(), objects: new Set(), flows: new Set(),
   };
 }
 
@@ -116,10 +107,7 @@ const UNMATCHED_ERRORS_LOG = path.join(REPO_PATH, 'unmatched_errors.log');
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
+    rl.question(question, (answer) => { rl.close(); resolve(answer.trim()); });
   });
 }
 
@@ -131,27 +119,15 @@ function formatXml(xml: string): string {
   let formatted = '';
   let indent = 0;
   const lines = xml.replace(/\r\n/g, '\n').replace(/>\s*</g, '>\n<').split('\n');
-
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-
-    if (trimmed.startsWith('</')) {
-      indent = Math.max(0, indent - 1);
-    }
-
+    if (trimmed.startsWith('</')) indent = Math.max(0, indent - 1);
     formatted += '    '.repeat(indent) + trimmed + '\n';
-
-    if (
-      !trimmed.startsWith('<?') &&
-      !trimmed.startsWith('</') &&
-      !trimmed.endsWith('/>') &&
-      !trimmed.includes('</')
-    ) {
+    if (!trimmed.startsWith('<?') && !trimmed.startsWith('</') && !trimmed.endsWith('/>') && !trimmed.includes('</')) {
       indent++;
     }
   }
-
   return formatted;
 }
 
@@ -159,12 +135,10 @@ function saveXmlClean(xmlContent: string, filePath: string, metadataType: string
   let content = xmlContent.replace(/<\?xml[^?]*\?>\s*/gi, '');
   content = '<?xml version="1.0" encoding="UTF-8"?>\n' + content;
   content = formatXml(content);
-
   const closingTag = `</${metadataType}>`;
   const escapedClose = closingTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const regex = new RegExp(`</(\\w+)>${escapedClose}`, 'g');
   content = content.replace(regex, (_m: string, tag: string) => `</${tag}>\n${closingTag}`);
-
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
@@ -177,35 +151,21 @@ function getRootNodeName(xmlContent: string): string {
 // XML BLOCK REMOVERS
 // ===============================================================
 
-function removeFieldPermissionsFromXml(
-  xmlContent: string,
-  missingField: string
-): { updated: string; removed: boolean } {
+function removeFieldPermissionsFromXml(xmlContent: string, missingField: string): { updated: string; removed: boolean } {
   const norm = xmlContent.replace(/\r\n/g, '\n');
-  const escapedField = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const ef = missingField.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const inner = '(?:(?!<\\/?fieldPermissions>)[\\s\\S])*?';
-  const re = new RegExp(
-    `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*${escapedField}[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
-    'g'
-  );
+  const re = new RegExp(`[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*${ef}[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
 
-function removeXmlBlock(
-  xmlContent: string,
-  blockTag: string,
-  keyTag: string,
-  name: string
-): { updated: string; removed: boolean } {
+function removeXmlBlock(xmlContent: string, blockTag: string, keyTag: string, name: string): { updated: string; removed: boolean } {
   const norm = xmlContent.replace(/\r\n/g, '\n');
-  const escapedName = name.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const escapedTag = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const inner = `(?:(?!<\\/?${escapedTag}>)[\\s\\S])*?`;
-  const re = new RegExp(
-    `[ \\t]*<${escapedTag}>${inner}<${keyTag}>[ \\t]*${escapedName}[ \\t]*</${keyTag}>${inner}</${escapedTag}>[ \\t]*\\r?\\n?`,
-    'g'
-  );
+  const en = name.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const et = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = `(?:(?!<\\/?${et}>)[\\s\\S])*?`;
+  const re = new RegExp(`[ \\t]*<${et}>${inner}<${keyTag}>[ \\t]*${en}[ \\t]*</${keyTag}>${inner}</${et}>[ \\t]*\\r?\\n?`, 'g');
   const updated = norm.replace(re, '');
   return { updated, removed: updated !== norm };
 }
@@ -240,31 +200,7 @@ function getBackoffMs(attempt: number): number {
   return Math.min(15_000 * Math.pow(2, attempt - 1), 120_000);
 }
 
-function readDeployOutput(outputFile: string): { raw: string; trimmed: string } | null {
-  try {
-    const raw = fs.readFileSync(outputFile, 'utf8');
-    // SF CLI with --json always starts with '{' — find the FIRST one.
-    // Using lastIndexOf was wrong: it sliced into the middle of a valid JSON
-    // (e.g. the opening brace of a nested componentFailures object).
-    const jsonStart = raw.indexOf('{');
-    if (jsonStart < 0) return null;
-    return { raw, trimmed: raw.substring(jsonStart) };
-  } catch {
-    return null;
-  }
-}
-
-function parseDeployJson(trimmed: string): DeployResult | null {
-  try {
-    return JSON.parse(trimmed) as DeployResult;
-  } catch {
-    return null;
-  }
-}
-
 function isPollingTimeout(result: DeployResult): boolean {
-  // Only treat as a polling timeout when SF explicitly says the deploy is still running.
-  // Do NOT retry on success:true + no details — that is the normal --dry-run success shape.
   const s = (result.result as Record<string, unknown> | undefined)?.status;
   return s === 'Pending' || s === 'InProgress' || s === 'Canceling';
 }
@@ -314,15 +250,18 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    const readResult = readDeployOutput(outputFile);
-    if (!readResult) {
+    let raw = '';
+    try {
+      raw = fs.readFileSync(outputFile, 'utf8');
+      const jsonStart = raw.indexOf('{');
+      if (jsonStart < 0) throw new Error('no JSON');
+      raw = raw.substring(jsonStart);
+    } catch {
       log('   Could not read deploy output — retrying...');
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
     }
-
-    const { raw, trimmed } = readResult;
 
     if (isTransientError(raw)) {
       const backoff = getBackoffMs(attempt);
@@ -333,14 +272,11 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    const result = parseDeployJson(trimmed);
-    if (!result) {
-      // Log the raw file content so the exact SF CLI output is visible in the terminal
-      log(`   Invalid JSON on attempt ${attempt} — raw output below:`);
-      log('   --- RAW START ---');
-      log(raw.substring(0, 2000)); // cap at 2000 chars to avoid flooding the terminal
-      log('   --- RAW END ---');
-      log('   Retrying...');
+    let result: DeployResult;
+    try {
+      result = JSON.parse(raw) as DeployResult;
+    } catch {
+      log(`   Invalid JSON on attempt ${attempt} — retrying...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
@@ -386,66 +322,20 @@ function runDeployProcess(
       'project', 'deploy', 'start',
       '-m', `${metadataType}:${itemName}`,
       '--target-org', targetOrg,
-      '--json',
-      '--dry-run',
-      '--ignore-warnings',
+      '--json', '--dry-run', '--ignore-warnings',
       '--wait', String(timeoutMins * 2),
     ];
-
     const proc = spawn('sf', args, { shell: true });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
-
-    // stdout only → file; stderr drained so it never blocks the process
     proc.stdout.pipe(outputStream);
     proc.stderr.resume();
-
     const timer = setTimeout(() => { proc.kill(); resolve('timeout'); }, timeoutMins * 60 * 1000);
-
-    proc.on('close', () => {
-      clearTimeout(timer);
-      outputStream.end();
-      resolve('ok');
-    });
+    proc.on('close', () => { clearTimeout(timer); outputStream.end(); resolve('ok'); });
   });
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ===============================================================
-// WHITELIST + REPO CHECK
-// Returns true → SKIP this item (do NOT remove it)
-// ===============================================================
-
-function shouldSkip(
-  log: (msg: string) => void,
-  label: string,
-  name: string,
-  whitelistEntries: string[],
-  repoFilePath: string,
-  skippedFields: string[],
-  allSkippedFields: string[]
-): boolean {
-  if (whitelistEntries.includes(name)) {
-    log(`   SKIPPING whitelisted ${label} (in JSON): ${name}`);
-    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
-    skippedFields.push(entry);
-    allSkippedFields.push(entry);
-    return true;
-  }
-
-  if (fs.existsSync(repoFilePath)) {
-    log(`   SKIPPING ${label} exists in repo but missing from org: ${name}`);
-    log(`   WARNING: Deploy the ${label} first, then re-run this script.`);
-    log(`   Found at: ${repoFilePath}`);
-    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
-    skippedFields.push(entry);
-    allSkippedFields.push(entry);
-    return true;
-  }
-
-  return false;
 }
 
 // ===============================================================
@@ -514,16 +404,12 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /In field: object - no CustomObject named (.+?) found/i,
     ],
     label: 'object', whitelistKey: 'objects', cacheKey: 'objects',
-    // Standard SF objects (OperatingHours, Account, Case, etc.) never have an
-    // object-meta.xml in the repo — returning '' means fs.existsSync('') = false
-    // so they are never skipped by the repo check and get removed correctly.
-    // Only custom objects (__c, __mdt, __e, __b, __x, __kav, __ka, __hd) need
-    // the repo check — they have a real file when committed but not yet deployed.
+    // Standard SF objects never have an object-meta.xml in repo — returning ''
+    // means fs.existsSync('') = false so they are always removed correctly.
+    // Only custom objects (__c, __mdt etc.) need the repo check.
     repoPathFn: (r: string, n: string): string => {
       const isCustom = /__(c|mdt|e|b|x|ka|kav|hd|history)$/i.test(n);
-      return isCustom
-        ? path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`)
-        : '';
+      return isCustom ? path.join(r, 'force-app', 'main', 'default', 'objects', n, `${n}.object-meta.xml`) : '';
     },
     removeFn: removeObjectPermissionFromXml,
     displayTag: '[Object]',
@@ -561,8 +447,132 @@ function logUnmatchedError(itemName: string, errorMessage: string): void {
 }
 
 // ===============================================================
-// PRE-SCRUB — apply globally known-missing refs to a new file
-// ONLY populated from real deploy errors — no filesystem guessing.
+// WHITELIST + REPO CHECK
+// ===============================================================
+
+function shouldSkip(
+  log: (msg: string) => void,
+  label: string,
+  name: string,
+  whitelistEntries: string[],
+  repoFilePath: string,
+  skippedFields: string[],
+  allSkippedFields: string[]
+): boolean {
+  if (whitelistEntries.includes(name)) {
+    log(`   SKIPPING whitelisted ${label} (in JSON): ${name}`);
+    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
+    skippedFields.push(entry);
+    allSkippedFields.push(entry);
+    return true;
+  }
+  if (repoFilePath && fs.existsSync(repoFilePath)) {
+    log(`   SKIPPING ${label} exists in repo but missing from org: ${name}`);
+    log(`   WARNING: Deploy the ${label} first, then re-run this script.`);
+    log(`   Found at: ${repoFilePath}`);
+    const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
+    skippedFields.push(entry);
+    allSkippedFields.push(entry);
+    return true;
+  }
+  return false;
+}
+
+// ===============================================================
+// PROCESS FAILURES — one per deploy iteration
+// ===============================================================
+
+function processFailures(
+  log: (msg: string) => void,
+  failures: ComponentFailure[],
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  globalMissing: GlobalMissingCache,
+  repoPath: string,
+  itemName: string,
+  allSkippedFields: string[]
+): { xmlContent: string; removedFields: string[]; skippedFields: string[] } {
+  let updatedXml = xmlContent;
+  const removedFields: string[] = [];
+  const skippedFields: string[] = [];
+  const unmatchedErrors: string[] = [];
+
+  for (const failure of failures) {
+    const err = failure.problem;
+    let handled = false;
+
+    // ── CustomField ───────────────────────────────────────────────
+    for (const p of FIELD_PATTERNS) {
+      const m = p.exec(err);
+      if (!m) continue;
+      const missingField = m[1].trim();
+      const parts = missingField.split('.');
+      const fieldRepoPath = parts.length === 2
+        ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
+        : '';
+
+      if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
+        handled = true; break;
+      }
+      log(`   Missing field: ${missingField}`);
+      const { updated, removed } = removeFieldPermissionsFromXml(updatedXml, missingField);
+      if (removed) {
+        updatedXml = updated;
+        log(`   Removed fieldPermissions for: ${missingField}`);
+        removedFields.push(missingField);
+        globalMissing.fields.add(missingField);
+      } else {
+        log(`   Field block not found in XML: ${missingField}`);
+      }
+      handled = true; break;
+    }
+    if (handled) continue;
+
+    // ── Registered handlers (app, class, page, tab, object, flow) ──
+    for (const handler of METADATA_HANDLERS) {
+      let name: string | null = null;
+      for (const p of handler.patterns) {
+        const m = p.exec(err);
+        if (m) { name = m[1].trim(); break; }
+      }
+      if (!name) continue;
+
+      const repoFilePath = handler.repoPathFn(repoPath, name);
+      if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
+        handled = true; break;
+      }
+      log(`   Missing ${handler.label}: ${name}`);
+      const { updated, removed } = handler.removeFn(updatedXml, name);
+      if (removed) {
+        updatedXml = updated;
+        log(`   Removed ${handler.label} block for: ${name}`);
+        removedFields.push(`${handler.displayTag} ${name}`);
+        (globalMissing[handler.cacheKey]).add(name);
+      } else {
+        log(`   ${handler.label} block not found in XML: ${name}`);
+      }
+      handled = true; break;
+    }
+    if (handled) continue;
+
+    // ── Unmatched ─────────────────────────────────────────────────
+    unmatchedErrors.push(err);
+    log(`   [UNMATCHED] ${err}`);
+  }
+
+  if (unmatchedErrors.length > 0) {
+    unmatchedErrors.forEach((e) => logUnmatchedError(itemName, e));
+    log(`   [WARN] ${unmatchedErrors.length} unmatched error(s) logged to: ${UNMATCHED_ERRORS_LOG}`);
+    log('   [WARN] Review that file and add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
+  }
+
+  return { xmlContent: updatedXml, removedFields, skippedFields };
+}
+
+// ===============================================================
+// PRE-SCRUB — apply globally known-missing refs BEFORE first deploy
+// Only uses refs discovered from real deploy errors earlier this run.
+// Zero deploy cost — applied directly to XML.
 // ===============================================================
 
 function applyGlobalMissingCacheToFile(
@@ -574,22 +584,16 @@ function applyGlobalMissingCacheToFile(
   let updated = xmlContent;
   const removedItems: string[] = [];
 
-  const totalCached =
-    globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
-    globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
-    globalMissing.flows.size;
-
+  const totalCached = Object.values(globalMissing).reduce((s, set) => s + set.size, 0);
   if (totalCached === 0) return { xmlContent: updated, removedItems };
 
   log(`   [Pre-scrub] ${totalCached} globally known missing reference(s) — applying without a deploy call...`);
 
-  // Fields
   for (const field of globalMissing.fields) {
     const { updated: u, removed } = removeFieldPermissionsFromXml(updated, field);
     if (removed) { updated = u; removedItems.push(field); log(`   [Pre-scrub] Removed field: ${field}`); }
   }
 
-  // All handler types
   for (const handler of METADATA_HANDLERS) {
     for (const name of globalMissing[handler.cacheKey]) {
       const { updated: u, removed } = handler.removeFn(updated, name);
@@ -604,171 +608,14 @@ function applyGlobalMissingCacheToFile(
   if (removedItems.length > 0) {
     log(`   [Pre-scrub] Cleaned ${removedItems.length} reference(s) from ${itemName} before first deploy.`);
   } else {
-    log('   [Pre-scrub] No cached references matched this file. Proceeding normally.');
+    log('   [Pre-scrub] No cached references matched this file — proceeding to deploy.');
   }
 
   return { xmlContent: updated, removedItems };
 }
 
 // ===============================================================
-// PROCESS FAILURES
-// Called once per deploy iteration with the real SF error list.
-// Decision per error:
-//   1. Match a pattern → extract name
-//   2. Name in whitelist? → SKIP
-//   3. Name file exists in repo? → SKIP (warn: deploy it first)
-//   4. Otherwise → REMOVE the block + add to global cache
-// ===============================================================
-
-function processFieldFailure(
-  log: (msg: string) => void,
-  errorMessage: string,
-  xmlContent: string,
-  whitelist: WhitelistMap,
-  globalMissing: GlobalMissingCache,
-  repoPath: string,
-  removedFields: string[],
-  skippedFields: string[],
-  allSkippedFields: string[],
-  removalFailures: string[]
-): { handled: boolean; xmlContent: string } {
-  let missingField: string | null = null;
-  for (const p of FIELD_PATTERNS) {
-    const m = p.exec(errorMessage);
-    if (m) { missingField = m[1].trim(); break; }
-  }
-  if (!missingField) return { handled: false, xmlContent };
-
-  const parts = missingField.split('.');
-  const fieldRepoPath = parts.length === 2
-    ? path.join(repoPath, 'force-app', 'main', 'default', 'objects', parts[0], 'fields', `${parts[1]}.field-meta.xml`)
-    : '';
-
-  if (shouldSkip(log, 'field', missingField, whitelist.fields, fieldRepoPath, skippedFields, allSkippedFields)) {
-    return { handled: true, xmlContent };
-  }
-
-  log(`   Missing field: ${missingField}`);
-  const { updated, removed } = removeFieldPermissionsFromXml(xmlContent, missingField);
-  if (removed) {
-    log(`   Removed fieldPermissions for: ${missingField}`);
-    removedFields.push(missingField);
-    globalMissing.fields.add(missingField);
-    return { handled: true, xmlContent: updated };
-  }
-
-  const msg = `[Field] ${missingField} — SF reported missing but block NOT found in XML. Raw: ${errorMessage}`;
-  log(`   [REMOVAL-FAILED] ${msg}`);
-  removalFailures.push(msg);
-  return { handled: true, xmlContent };
-}
-
-function processRegisteredFailure(
-  log: (msg: string) => void,
-  errorMessage: string,
-  xmlContent: string,
-  whitelist: WhitelistMap,
-  globalMissing: GlobalMissingCache,
-  repoPath: string,
-  removedFields: string[],
-  skippedFields: string[],
-  allSkippedFields: string[],
-  removalFailures: string[]
-): { handled: boolean; xmlContent: string } {
-  for (const handler of METADATA_HANDLERS) {
-    let name: string | null = null;
-    for (const p of handler.patterns) {
-      const m = p.exec(errorMessage);
-      if (m) { name = m[1].trim(); break; }
-    }
-    if (!name) continue;
-
-    const repoFilePath = handler.repoPathFn(repoPath, name);
-
-    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], repoFilePath, skippedFields, allSkippedFields)) {
-      return { handled: true, xmlContent };
-    }
-
-    log(`   Missing ${handler.label}: ${name}`);
-    const { updated, removed } = handler.removeFn(xmlContent, name);
-    if (removed) {
-      log(`   Removed ${handler.label} block for: ${name}`);
-      removedFields.push(`${handler.displayTag} ${name}`);
-      (globalMissing[handler.cacheKey]).add(name);
-      return { handled: true, xmlContent: updated };
-    }
-
-    const msg = `[${handler.displayTag}] ${name} — SF reported missing but block NOT found in XML. Raw: ${errorMessage}`;
-    log(`   [REMOVAL-FAILED] ${msg}`);
-    removalFailures.push(msg);
-    return { handled: true, xmlContent };
-  }
-
-  return { handled: false, xmlContent };
-}
-
-function processFailures(
-  log: (msg: string) => void,
-  failures: ComponentFailure[],
-  xmlContent: string,
-  whitelist: WhitelistMap,
-  globalMissing: GlobalMissingCache,
-  repoPath: string,
-  itemName: string,
-  allSkippedFields: string[]
-): { xmlContent: string; removedFields: string[]; skippedFields: string[]; removalFailures: string[] } {
-  let updatedXml = xmlContent;
-  const removedFields: string[] = [];
-  const skippedFields: string[] = [];
-  const unmatchedErrors: string[] = [];
-  const removalFailures: string[] = [];
-
-  for (const failure of failures) {
-    const err = failure.problem;
-
-    const fieldResult = processFieldFailure(
-      log, err, updatedXml, whitelist, globalMissing, repoPath,
-      removedFields, skippedFields, allSkippedFields, removalFailures
-    );
-    if (fieldResult.handled) { updatedXml = fieldResult.xmlContent; continue; }
-
-    const regResult = processRegisteredFailure(
-      log, err, updatedXml, whitelist, globalMissing, repoPath,
-      removedFields, skippedFields, allSkippedFields, removalFailures
-    );
-    if (regResult.handled) { updatedXml = regResult.xmlContent; continue; }
-
-    unmatchedErrors.push(err);
-    log(`   [UNMATCHED] ${err}`);
-  }
-
-  if (unmatchedErrors.length > 0) {
-    unmatchedErrors.forEach((e) => logUnmatchedError(itemName, e));
-    log(`   [WARN] ${unmatchedErrors.length} unmatched error(s) appended to: ${UNMATCHED_ERRORS_LOG}`);
-    log('   [WARN] Check that file to add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
-  }
-
-  if (removalFailures.length > 0) {
-    const ts = new Date().toISOString();
-    const lines = removalFailures.map((e) => `[${ts}] [${itemName}] ${e}`).join('\n') + '\n';
-    try { fs.appendFileSync(UNMATCHED_ERRORS_LOG, lines, 'utf8'); } catch { /* best-effort */ }
-    log(`   [WARN] ${removalFailures.length} removal failure(s) logged to: ${UNMATCHED_ERRORS_LOG}`);
-  }
-
-  return { xmlContent: updatedXml, removedFields, skippedFields, removalFailures };
-}
-
-// ===============================================================
-// PROCESS A SINGLE METADATA ITEM
-// Flow:
-//   1. Pre-scrub with globally known-missing refs (FREE — no deploy)
-//   2. Deploy loop:
-//        a. Run dry-run deploy
-//        b. On success → done
-//        c. On failures → process each error → remove/skip/warn
-//        d. Save XML, git commit, repeat
-// NO static filesystem scanning is done. Every removal decision
-// comes from an actual SF validation error message.
+// GIT COMMIT
 // ===============================================================
 
 function commitChange(
@@ -787,85 +634,21 @@ function commitChange(
   }
 }
 
-// ── Helper: process the result of a single deploy attempt ────────────────────
-// Extracted from invokeProcessMetadataItem to keep its cyclomatic complexity
-// under the ESLint limit of 20.
-type IterationOutcome =
-  | { done: true; status: string }
-  | { done: false; status: string };
-
-function processDeployIteration(
-  log: (msg: string) => void,
-  deployResult: DeployResult,
-  itemName: string,
-  filePath: string,
-  repoPath: string,
-  whitelist: WhitelistMap,
-  globalMissing: GlobalMissingCache,
-  allRemovedFields: string[],
-  allSkippedFields: string[]
-): IterationOutcome {
-  if (!deployResult.result) {
-    log(`[${itemName}] SF CLI returned an unrecognised response shape. Raw keys: ${Object.keys(deployResult).join(', ')}`);
-    log(`[${itemName}] Full response: ${JSON.stringify(deployResult)}`);
-    log(`[${itemName}] Stopping — re-run once the org is reachable.`);
-    return { done: true, status: 'Deploy Failed - Unrecognised Response' };
-  }
-
-  log(`   [Result] success=${String(deployResult.result.success)} | status=${String((deployResult.result as Record<string, unknown>).status ?? 'n/a')} | numberComponentErrors=${String((deployResult.result as Record<string, unknown>).numberComponentErrors ?? 'n/a')}`);
-
-  // componentFailures can be a plain object (not array) when SF returns a single failure.
-  const rawFailures = deployResult.result.details?.componentFailures;
-  const failures: ComponentFailure[] = !rawFailures
-    ? []
-    : Array.isArray(rawFailures)
-      ? rawFailures
-      : [rawFailures as ComponentFailure];
-
-  log(`   [Result] componentFailures count: ${failures.length}`);
-  failures.forEach((f, i) => log(`   [Result] Failure ${i + 1}: ${f.problem}`));
-
-  if (deployResult.result.success === true && failures.length === 0) {
-    log(`[${itemName}] Deploy validation SUCCESSFUL — no component failures!`);
-    return { done: true, status: allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success' };
-  }
-
-  if (failures.length === 0) {
-    log(`[${itemName}] Deploy returned success=false but no componentFailures. Full result:`);
-    log(JSON.stringify(deployResult.result, null, 2).substring(0, 3000));
-    return { done: true, status: 'Partial / Manual Check Needed' };
-  }
-
-  const xmlContent = fs.readFileSync(filePath, 'utf8');
-  const rootNode = getRootNodeName(xmlContent);
-
-  const { xmlContent: updatedXml, removedFields, skippedFields, removalFailures } = processFailures(
-    log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
-  );
-
-  allRemovedFields.push(...removedFields);
-
-  if (removedFields.length === 0) {
-    if (removalFailures.length > 0) {
-      log(`[${itemName}] ${removalFailures.length} removal failure(s) — SF reported errors but blocks not found in XML:`);
-      removalFailures.forEach((f) => log(`   ${f}`));
-      return { done: true, status: 'Removal Failed - Check Logs' };
-    }
-    if (skippedFields.length > 0) {
-      log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
-      return { done: true, status: 'Whitelisted Items Only - Manual Deploy Needed' };
-    }
-    log(`[${itemName}] No items removed this iteration. Moving on.`);
-    return { done: true, status: 'Partial / Manual Check Needed' };
-  }
-
-  saveXmlClean(updatedXml, filePath, rootNode);
-  log(`Saved updated XML for: ${itemName}`);
-  commitChange(log, filePath, repoPath,
-    `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`,
-    itemName);
-  return { done: false, status: 'Fixed & Committed' };
-}
+// ===============================================================
+// PROCESS A SINGLE METADATA ITEM
+//
+// Flow per item:
+//   1. Pre-scrub: apply globally known-missing refs from cache (FREE)
+//      → single commit if anything removed
+//   2. Deploy loop (up to MAX_ITERATIONS):
+//        a. Dry-run deploy
+//        b. SUCCESS → done ✓
+//        c. FAILURES → process each, remove from XML, update global cache
+//           → save XML, git commit
+//           → LOOP AGAIN (re-validate) ← this is the key fix
+//        d. success=false + empty failures → LOOP AGAIN (may be transient state)
+//        e. After MAX_EMPTY_RETRY_LIMIT consecutive empty-failure responses → stop
+// ===============================================================
 
 async function invokeProcessMetadataItem(
   log: (msg: string) => void,
@@ -896,6 +679,11 @@ async function invokeProcessMetadataItem(
   const allRemovedFields: string[] = [];
   const allSkippedFields: string[] = [];
 
+  // How many consecutive iterations with success=false + 0 failures before we give up.
+  // This handles the Profiles case where SF returns a weird transient false+empty response.
+  const MAX_EMPTY_FAILURE_RETRIES = 3;
+  let consecutiveEmptyFailures = 0;
+
   const icon = metadataType === 'Profile' ? 'Profile' : 'PermSet';
   log('\n================================================');
   log(`[${icon}] Processing ${metadataType} : ${itemName}`);
@@ -906,9 +694,7 @@ async function invokeProcessMetadataItem(
     return { Type: metadataType, Name: itemName, Status: 'File Not Found', RemovedFields: '', SkippedFields: '' };
   }
 
-  // ── Step 1: Pre-scrub using only the globally known-missing cache ──
-  // This cache is populated exclusively from prior deploy errors in
-  // this same run — never from filesystem checks. Zero deploy cost.
+  // ── STEP 1: Pre-scrub from global cache (no deploy cost) ──────────
   {
     const rawXml = fs.readFileSync(filePath, 'utf8');
     const { xmlContent: scrubbed, removedItems } = applyGlobalMissingCacheToFile(log, rawXml, globalMissing, itemName);
@@ -922,10 +708,8 @@ async function invokeProcessMetadataItem(
     }
   }
 
-  // ── Step 2: Deploy loop — all removals driven by actual SF errors ──
-  let continueLoop = true;
-
-  while (continueLoop && iteration < maxIterations) {
+  // ── STEP 2: Deploy loop — keep going until SUCCESS or ceiling ─────
+  while (iteration < maxIterations) {
     iteration++;
     totalDeploys.value++;
 
@@ -950,17 +734,77 @@ async function invokeProcessMetadataItem(
       break;
     }
 
-    const outcome = processDeployIteration(
-      log, deployResult, itemName, filePath, repoPath,
-      whitelist, globalMissing, allRemovedFields, allSkippedFields
-    );
-
-    itemStatus = outcome.status;
-
-    if (outcome.done) {
-      continueLoop = false;
+    if (!deployResult.result) {
+      log(`[${itemName}] Unrecognised response shape — keys: ${Object.keys(deployResult).join(', ')}`);
+      itemStatus = 'Deploy Failed - Unrecognised Response';
       break;
     }
+
+    // componentFailures can be a plain object when SF returns a single failure
+    const rawFailures = deployResult.result.details?.componentFailures;
+    const failures: ComponentFailure[] = !rawFailures ? [] : Array.isArray(rawFailures) ? rawFailures : [rawFailures as ComponentFailure];
+
+    log(`   [Result] success=${String(deployResult.result.success)} | failures=${failures.length}`);
+    failures.forEach((f, i) => log(`   [Result] Failure ${i + 1}: ${f.problem}`));
+
+    // ── SUCCESS ────────────────────────────────────────────────────
+    if (deployResult.result.success === true && failures.length === 0) {
+      log(`[${itemName}] Deploy validation SUCCESSFUL!`);
+      itemStatus = allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
+      break;
+    }
+
+    // ── success=false but NO component failures ────────────────────
+    // SF sometimes returns this transiently (normalisation artefact, deploy queue, etc.)
+    // Retry up to MAX_EMPTY_FAILURE_RETRIES times, then stop.
+    if (failures.length === 0) {
+      consecutiveEmptyFailures++;
+      log(`[${itemName}] success=false but 0 componentFailures (attempt ${consecutiveEmptyFailures}/${MAX_EMPTY_FAILURE_RETRIES}).`);
+      if (consecutiveEmptyFailures >= MAX_EMPTY_FAILURE_RETRIES) {
+        log(`[${itemName}] Giving up after ${MAX_EMPTY_FAILURE_RETRIES} consecutive empty-failure responses.`);
+        itemStatus = 'Partial / Manual Check Needed';
+        break;
+      }
+      // Brief pause then loop again — burn a deploy call to re-validate
+      log(`[${itemName}] Re-validating after short pause...`);
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(5000);
+      continue;
+    }
+
+    // ── FAILURES FOUND → fix, commit, loop again ───────────────────
+    consecutiveEmptyFailures = 0; // reset on real failure
+
+    const xmlContent = fs.readFileSync(filePath, 'utf8');
+    const rootNode = getRootNodeName(xmlContent);
+
+    const { xmlContent: updatedXml, removedFields, skippedFields } = processFailures(
+      log, failures, xmlContent, whitelist, globalMissing, repoPath, itemName, allSkippedFields
+    );
+
+    allRemovedFields.push(...removedFields);
+    // skippedFields are already pushed to allSkippedFields inside processFailures via shouldSkip
+
+    if (removedFields.length === 0) {
+      // Nothing removed — either all whitelisted/repo-present, or unmatched errors
+      if (skippedFields.length > 0) {
+        log(`[${itemName}] Only whitelisted/repo items remain. Manual deploy needed.`);
+        itemStatus = 'Whitelisted Items Only - Manual Deploy Needed';
+      } else {
+        log(`[${itemName}] No items removed this iteration — unmatched errors or already removed.`);
+        itemStatus = 'Partial / Manual Check Needed';
+      }
+      break;
+    }
+
+    // Save and commit — then LOOP to re-validate (this is the critical fix)
+    saveXmlClean(updatedXml, filePath, rootNode);
+    log(`Saved updated XML for: ${itemName}`);
+    commitChange(log, filePath, repoPath,
+      `[${itemName}] Auto-remove missing metadata: ${removedFields.join(', ')}`,
+      itemName);
+    itemStatus = 'Fixed & Committed';
+    // ↑ Do NOT break here — continue the loop to re-validate until SUCCESS
 
     if (iteration >= maxIterations) {
       log(`[${itemName}] Reached max iterations. Check remaining errors manually.`);
@@ -1015,24 +859,16 @@ async function resolveInputs(
   return { promotionJsonPath, targetOrg };
 }
 
-function parsePromotionJson(jsonPath: string): {
-  permSets: string[];
-  profiles: string[];
-  whitelist: WhitelistMap;
-} {
+function parsePromotionJson(jsonPath: string): { permSets: string[]; profiles: string[]; whitelist: WhitelistMap } {
   const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')) as PromotionItem[];
   const uniq = (t: string): string[] => [...new Set(data.filter((i) => i.t === t).map((i) => i.n))].sort();
   return {
     permSets: uniq('PermissionSet'),
     profiles: uniq('Profile'),
     whitelist: {
-      fields: uniq('CustomField'),
-      apps: uniq('CustomApplication'),
-      classes: uniq('ApexClass'),
-      pages: uniq('ApexPage'),
-      tabs: uniq('CustomTab'),
-      objects: uniq('CustomObject'),
-      flows: uniq('Flow'),
+      fields: uniq('CustomField'), apps: uniq('CustomApplication'),
+      classes: uniq('ApexClass'), pages: uniq('ApexPage'),
+      tabs: uniq('CustomTab'), objects: uniq('CustomObject'), flows: uniq('Flow'),
     },
   };
 }
@@ -1070,7 +906,6 @@ async function printBannerAndConfirm(
   permSets.forEach((ps) => log(`   - ${ps}`));
   log('\nProfiles to process:');
   profiles.forEach((p) => log(`   - ${p}`));
-
   log('\nWhitelisted items (will never be removed):');
   log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
   log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
@@ -1098,17 +933,10 @@ async function processAllItems(
 ): Promise<{ summary: SummaryRecord[]; totalDeploys: TotalDeploys }> {
   const summary: SummaryRecord[] = [];
   const totalDeploys: TotalDeploys = { value: 0 };
-
   const common = {
-    targetOrg,
-    repoPath: REPO_PATH,
-    whitelist,
-    globalMissing,
-    maxIterations: MAX_ITERATIONS,
-    maxTotalDeploys: MAX_TOTAL_DEPLOYS,
-    totalDeploys,
-    timeoutMins: DEPLOY_TIMEOUT_MINS,
-    maxRetries: MAX_RETRIES,
+    targetOrg, repoPath: REPO_PATH, whitelist, globalMissing,
+    maxIterations: MAX_ITERATIONS, maxTotalDeploys: MAX_TOTAL_DEPLOYS,
+    totalDeploys, timeoutMins: DEPLOY_TIMEOUT_MINS, maxRetries: MAX_RETRIES,
   };
 
   log('\n######################################################');
@@ -1118,9 +946,7 @@ async function processAllItems(
   for (const psName of permSets) {
     // eslint-disable-next-line no-await-in-loop
     summary.push(await invokeProcessMetadataItem(log, {
-      ...common,
-      metadataType: 'PermissionSet',
-      itemName: psName,
+      ...common, metadataType: 'PermissionSet', itemName: psName,
       filePath: path.join(PS_BASE_PATH, `${psName}.permissionset-meta.xml`),
     }));
     if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
@@ -1134,9 +960,7 @@ async function processAllItems(
     for (const profileName of profiles) {
       // eslint-disable-next-line no-await-in-loop
       summary.push(await invokeProcessMetadataItem(log, {
-        ...common,
-        metadataType: 'Profile',
-        itemName: profileName,
+        ...common, metadataType: 'Profile', itemName: profileName,
         filePath: path.join(PROFILE_BASE_PATH, `${profileName}.profile-meta.xml`),
       }));
       if (totalDeploys.value > MAX_TOTAL_DEPLOYS) break;
@@ -1156,11 +980,7 @@ function printFinalSummary(
   log('ALL ITEMS PROCESSED - FINAL SUMMARY');
   log('======================================================');
 
-  const totalCached =
-    globalMissing.fields.size + globalMissing.apps.size + globalMissing.classes.size +
-    globalMissing.pages.size + globalMissing.tabs.size + globalMissing.objects.size +
-    globalMissing.flows.size;
-
+  const totalCached = Object.values(globalMissing).reduce((s, set) => s + set.size, 0);
   log(`\nGlobal Missing Cache (discovered from deploy errors this run): ${totalCached} unique missing references`);
   if (globalMissing.fields.size) log(`  Fields   : ${[...globalMissing.fields].join(', ')}`);
   if (globalMissing.apps.size) log(`  Apps     : ${[...globalMissing.apps].join(', ')}`);
@@ -1171,8 +991,8 @@ function printFinalSummary(
   if (globalMissing.flows.size) log(`  Flows    : ${[...globalMissing.flows].join(', ')}`);
 
   if (fs.existsSync(UNMATCHED_ERRORS_LOG)) {
-    log(`\n[WARN] Unmatched or failed removals were logged to: ${UNMATCHED_ERRORS_LOG}`);
-    log('[WARN] Review that file and add new regex patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
+    log(`\n[WARN] Unmatched errors logged to: ${UNMATCHED_ERRORS_LOG}`);
+    log('[WARN] Review and add new patterns to METADATA_HANDLERS or FIELD_PATTERNS.');
   }
 
   const row = (r: SummaryRecord): string =>
@@ -1185,9 +1005,7 @@ function printFinalSummary(
 
   const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
   const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
-  const csvRows = summary.map(
-    (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`
-  );
+  const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
   fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
   log(`\nSummary CSV saved to : ${csvPath}`);
@@ -1223,20 +1041,14 @@ export default class DeployAndFix extends SfCommand<void> {
     const { promotionJsonPath, targetOrg } = await resolveInputs(
       log, flags['json-path'] ?? '', flags['target-org'] ?? ''
     );
-
     const { permSets, profiles, whitelist } = parsePromotionJson(promotionJsonPath);
-
     const confirmed = await printBannerAndConfirm(log, targetOrg, permSets, profiles, whitelist);
     if (!confirmed) return;
 
-    // Single shared cache — grows only from real deploy errors.
-    // Subsequent items get those known-missing refs removed for free.
     const globalMissing = makeGlobalMissingCache();
-
     const { summary, totalDeploys } = await processAllItems(
       log, permSets, profiles, targetOrg, whitelist, globalMissing
     );
-
     printFinalSummary(log, summary, totalDeploys, globalMissing);
   }
 }
