@@ -780,7 +780,7 @@ type MetadataHandler = {
   patterns: RegExp[]; // multiple patterns — SF can phrase the same error differently
   label: string;
   refType: RefType;
-  whitelistKey?: keyof WhitelistMap; // optional — omit for types that are always removed (no whitelist)
+  whitelistKey: keyof WhitelistMap; // required — all registered types are standalone components with a whitelist
   removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
   displayTag: string;
 };
@@ -873,14 +873,6 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     removeFn: removeLayoutAssignmentFromXml,
     displayTag: '[Layout]',
   },
-  {
-    patterns: [/Unknown user permission:\s*(.+)/i],
-    label: 'userPermission',
-    refType: 'userPermission',
-    // no whitelistKey — always remove, never whitelisted
-    removeFn: removeUserPermissionFromXml,
-    displayTag: '[UserPerm]',
-  },
 ];
 
 // ===============================================================
@@ -929,6 +921,29 @@ function processFieldFailure(
   return { handled: true, xmlContent };
 }
 
+function processUserPermissionFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string
+): FailureResult {
+  const m = /Unknown user permission:\s*(.+)/i.exec(errorMessage);
+  if (!m) return { handled: false, xmlContent };
+
+  const permName = m[1].trim();
+  log(`   Unknown user permission: ${permName}`);
+  const { updated, removed } = removeUserPermissionFromXml(xmlContent, permName);
+  if (removed) {
+    log(`   Removed userPermissions block for: ${permName}`);
+    return {
+      handled: true,
+      xmlContent: updated,
+      removedRef: { type: 'userPermission', name: permName, label: `[UserPerm] ${permName}` },
+    };
+  }
+  log(`   userPermissions block not found in XML: ${permName} — already removed or not present.`);
+  return { handled: true, xmlContent };
+}
+
 function processRegisteredFailure(
   log: (msg: string) => void,
   errorMessage: string,
@@ -965,10 +980,7 @@ function processRegisteredFailure(
       return { handled: true, xmlContent };
     }
 
-    if (
-      handler.whitelistKey &&
-      shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)
-    ) {
+    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
       return { handled: true, xmlContent };
     }
 
@@ -1019,7 +1031,15 @@ function processFailures(
       continue;
     }
 
-    // ── Registered handlers (app / class / page / tab / object / flow) ──
+    // ── Unknown user permission (not a standalone component — no whitelist) ──
+    const upResult = processUserPermissionFailure(log, err, updatedXml);
+    if (upResult.handled) {
+      updatedXml = upResult.xmlContent;
+      if (upResult.removedRef) removedRefs.push(upResult.removedRef);
+      continue;
+    }
+
+    // ── Registered handlers (app / class / page / tab / object / flow / layout) ──
     const regResult = processRegisteredFailure(
       log,
       err,
@@ -1077,6 +1097,8 @@ function sweepOtherFiles(
         result = bulkRemoveNamespaceRefs(xml, ref.name);
       } else if (ref.type === 'field') {
         result = removeFieldPermissionsFromXml(xml, ref.name);
+      } else if (ref.type === 'userPermission') {
+        result = removeUserPermissionFromXml(xml, ref.name);
       } else {
         const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
         if (!handler) continue;
