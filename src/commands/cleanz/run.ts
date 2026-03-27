@@ -839,7 +839,6 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /no CustomObject named (.+?) found/i,
       /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
       /In field: object - no CustomObject named (.+?) found/i,
-      /The user license doesn't allow the permission: .+ (\S+)/i,
     ],
     label: 'object',
     refType: 'object',
@@ -1023,6 +1022,12 @@ function processFailures(
 
   for (const failure of failures) {
     const err = failure.problem ?? failure.error ?? '';
+
+    // ── User license errors — needs developer discussion, do not remove anything ──
+    if (/The user license doesn't allow the permission:/i.test(err)) {
+      log(`   [UserLicense] Ignoring (needs developer review): ${err}`);
+      continue;
+    }
 
     // ── CustomField ───────────────────────────────────────────────
     const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
