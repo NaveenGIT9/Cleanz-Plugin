@@ -914,7 +914,8 @@ function processRegisteredFailure(
   xmlContent: string,
   whitelist: WhitelistMap,
   skippedFields: string[],
-  allSkippedFields: string[]
+  allSkippedFields: string[],
+  metadataType: string
 ): FailureResult {
   for (const handler of METADATA_HANDLERS) {
     let name: string | null = null;
@@ -926,6 +927,15 @@ function processRegisteredFailure(
       }
     }
     if (!name) continue;
+
+    // Skip class and page removal for Profiles.
+    // Salesforce check-only (dry-run) strictly flags missing classAccesses/pageAccesses
+    // in profiles, but real deployments silently accept them. Removing them causes
+    // unnecessary XML churn. Revert this guard if confirmed not needed.
+    if (metadataType === 'Profile' && (handler.refType === 'class' || handler.refType === 'page')) {
+      log(`   [Profile] Skipping ${handler.label} (check-only false positive for profiles): ${name}`);
+      return { handled: true, xmlContent };
+    }
 
     if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
       return { handled: true, xmlContent };
@@ -957,7 +967,8 @@ function processFailures(
   failures: ComponentFailure[],
   xmlContent: string,
   whitelist: WhitelistMap,
-  allSkippedFields: string[]
+  allSkippedFields: string[],
+  metadataType: string
 ): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[] } {
   let updatedXml = xmlContent;
   const removedRefs: RemovedRef[] = [];
@@ -978,7 +989,15 @@ function processFailures(
     }
 
     // ── Registered handlers (app / class / page / tab / object / flow) ──
-    const regResult = processRegisteredFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
+    const regResult = processRegisteredFailure(
+      log,
+      err,
+      updatedXml,
+      whitelist,
+      skippedFields,
+      allSkippedFields,
+      metadataType
+    );
     if (regResult.handled) {
       updatedXml = regResult.xmlContent;
       if (regResult.removedRef) removedRefs.push(regResult.removedRef);
@@ -1017,7 +1036,11 @@ function sweepOtherFiles(
     let xml = fs.readFileSync(filePath, 'utf8');
     let fileModified = false;
 
+    const isProfile = filePath.endsWith('.profile-meta.xml');
     for (const ref of refs) {
+      // Mirror the same guard as processRegisteredFailure — don't sweep class/page
+      // refs into Profile files since real deployments accept them without error.
+      if (isProfile && (ref.type === 'class' || ref.type === 'page')) continue;
       let result: { updated: string; removed: boolean };
       if (ref.type === 'namespace') {
         result = bulkRemoveNamespaceRefs(xml, ref.name);
@@ -1254,7 +1277,7 @@ async function processItemsInIteration(
       xmlContent: updatedXml,
       removedRefs: perFailureRefs,
       skippedFields,
-    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields);
+    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields, item.metadataType);
     const removedRefs = [...nsRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
 
