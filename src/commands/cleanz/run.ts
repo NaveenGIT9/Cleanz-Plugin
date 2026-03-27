@@ -87,7 +87,17 @@ type WhitelistMap = {
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
-type RefType = 'field' | 'app' | 'class' | 'page' | 'tab' | 'object' | 'flow' | 'layout' | 'namespace';
+type RefType =
+  | 'field'
+  | 'app'
+  | 'class'
+  | 'page'
+  | 'tab'
+  | 'object'
+  | 'flow'
+  | 'layout'
+  | 'namespace'
+  | 'userPermission';
 
 type RemovedRef = {
   type: RefType;
@@ -260,6 +270,9 @@ function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { upda
   // A block may also contain a <recordType> child — removeXmlBlock handles this correctly
   // because its inner pattern is non-greedy and stops at the next block opener.
   return removeXmlBlock(xmlContent, 'layoutAssignments', 'layout', name);
+}
+function removeUserPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'userPermissions', 'name', name);
 }
 
 // ===============================================================
@@ -767,7 +780,7 @@ type MetadataHandler = {
   patterns: RegExp[]; // multiple patterns — SF can phrase the same error differently
   label: string;
   refType: RefType;
-  whitelistKey: keyof WhitelistMap;
+  whitelistKey?: keyof WhitelistMap; // optional — omit for types that are always removed (no whitelist)
   removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
   displayTag: string;
 };
@@ -860,6 +873,14 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     removeFn: removeLayoutAssignmentFromXml,
     displayTag: '[Layout]',
   },
+  {
+    patterns: [/Unknown user permission:\s*(.+)/i],
+    label: 'userPermission',
+    refType: 'userPermission',
+    // no whitelistKey — always remove, never whitelisted
+    removeFn: removeUserPermissionFromXml,
+    displayTag: '[UserPerm]',
+  },
 ];
 
 // ===============================================================
@@ -944,7 +965,10 @@ function processRegisteredFailure(
       return { handled: true, xmlContent };
     }
 
-    if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
+    if (
+      handler.whitelistKey &&
+      shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)
+    ) {
       return { handled: true, xmlContent };
     }
 
