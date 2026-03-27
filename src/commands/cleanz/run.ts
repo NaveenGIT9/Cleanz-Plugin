@@ -928,6 +928,13 @@ function processRegisteredFailure(
     }
     if (!name) continue;
 
+    // Ignore standard_ app errors — Copado's pipeline YAML strips these before
+    // deploying, so they never appear in real promotion runs. No removal needed.
+    if (handler.refType === 'app' && name.startsWith('standard_')) {
+      log(`   [StandardApp] Ignoring standard app (handled by Copado YAML): ${name}`);
+      return { handled: true, xmlContent };
+    }
+
     // Skip class and page removal for Profiles.
     // Salesforce check-only (dry-run) strictly flags missing classAccesses/pageAccesses
     // in profiles, but real deployments silently accept them. Removing them causes
@@ -1600,6 +1607,7 @@ export default class DeployAndFix extends SfCommand<void> {
     }
     log('\nStarting script...');
     log('\n======================================================');
+    const startTime = Date.now();
 
     // Pre-load all installed package namespaces from the org once upfront.
     // This avoids an extra SF CLI call on the first namespace error and ensures
@@ -1711,5 +1719,10 @@ export default class DeployAndFix extends SfCommand<void> {
     } catch (e) {
       log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
     }
+
+    const elapsedMs = Date.now() - startTime;
+    const elapsedMins = Math.floor(elapsedMs / 60_000);
+    const elapsedSecs = Math.floor((elapsedMs % 60_000) / 1000);
+    log(`\nTotal time: ${elapsedMins}m ${elapsedSecs}s`);
   }
 }
