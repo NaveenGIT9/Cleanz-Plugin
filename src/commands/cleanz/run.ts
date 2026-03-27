@@ -1735,6 +1735,36 @@ export default class DeployAndFix extends SfCommand<void> {
         )
       );
 
+    // ================= CONCLUSION =================
+    const passedClean = summary.filter((r) => r.Status === 'Success' || r.Status === 'No Change');
+    const hadFixes = summary.filter((r) => r.Status === 'Fixed & Committed');
+    const needsAttention = summary.filter(
+      (r) => r.Status !== 'Success' && r.Status !== 'No Change' && r.Status !== 'Fixed & Committed'
+    );
+
+    log('\n======================================================');
+    log('CONCLUSION');
+    log('======================================================');
+
+    log(`\nPassed without any errors (${passedClean.length}):`);
+    if (passedClean.length === 0) {
+      log('   (none)');
+    } else {
+      passedClean.forEach((r) => log(`   - [${r.Type}] ${r.Name}`));
+    }
+
+    log(`\nHad missing refs — fixed and committed (${hadFixes.length}):`);
+    if (hadFixes.length === 0) {
+      log('   (none)');
+    } else {
+      hadFixes.forEach((r) => log(`   - [${r.Type}] ${r.Name}: removed ${r.RemovedFields}`));
+    }
+
+    if (needsAttention.length > 0) {
+      log(`\nNeeds manual attention (${needsAttention.length}):`);
+      needsAttention.forEach((r) => log(`   - [${r.Type}] ${r.Name}: ${r.Status}`));
+    }
+
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
     const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
