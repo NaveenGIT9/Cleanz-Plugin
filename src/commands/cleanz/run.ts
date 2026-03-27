@@ -97,12 +97,14 @@ type RefType =
   | 'flow'
   | 'layout'
   | 'namespace'
-  | 'userPermission';
+  | 'userPermission'
+  | 'objectFlag'; // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
 
 type RemovedRef = {
   type: RefType;
   name: string;
   label: string; // display string e.g. "Account.Name" or "[Class] MyClass"
+  meta?: string; // extra data — used by 'objectFlag' to carry the XML element name (e.g. "viewAllRecords")
 };
 
 // Result returned by each failure-handler function.
@@ -273,6 +275,34 @@ function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { upda
 }
 function removeUserPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'userPermissions', 'name', name);
+}
+
+// Removes a single <flagElement>true</flagElement> line from the objectPermissions block
+// for the given object — used when "The user license doesn't allow the permission: X" fires.
+// Only removes the flag when its value is "true"; if already false/absent, no-op.
+function removeObjectPermissionFlag(
+  xmlContent: string,
+  objectName: string,
+  flagElement: string
+): { updated: string; removed: boolean } {
+  const escapedObject = objectName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const escapedFlag = flagElement.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+  const blockRegex = new RegExp(
+    `(<objectPermissions>${inner}<object>[ \\t]*${escapedObject}[ \\t]*</object>${inner}</objectPermissions>)`,
+    'g'
+  );
+  let removed = false;
+  const updated = xmlContent.replace(blockRegex, (blockMatch: string) => {
+    const flagRegex = new RegExp(`[ \\t]*<${escapedFlag}>true</${escapedFlag}>[ \\t]*\\r?\\n?`, 'g');
+    const newBlock = blockMatch.replace(flagRegex, '');
+    if (newBlock !== blockMatch) {
+      removed = true;
+      return newBlock;
+    }
+    return blockMatch;
+  });
+  return { updated, removed };
 }
 
 // ===============================================================
@@ -771,6 +801,20 @@ function shouldSkip(
   return false;
 }
 
+// Ref types that Copado real deployments do NOT enforce for Profile files.
+// Only flows and userPermissions actually fail on profiles during deployment.
+// Used in both the sweep guard and the processRegisteredFailure safety net.
+const PROFILE_SKIPPED_REF_TYPES = new Set<RefType>([
+  'app',
+  'class',
+  'page',
+  'field',
+  'object',
+  'layout',
+  'tab',
+  'objectFlag',
+]);
+
 // ===============================================================
 // METADATA HANDLER REGISTRY
 // repoPathFn removed — whitelist is JSON-only now.
@@ -944,6 +988,57 @@ function processUserPermissionFailure(
   return { handled: true, xmlContent };
 }
 
+// Maps the human-readable permission label from the error message to the XML element name.
+const USER_LICENSE_FLAG_MAP: Record<string, string> = {
+  'View All': 'viewAllRecords',
+  'Modify All': 'modifyAllRecords',
+  Read: 'allowRead',
+  Create: 'allowCreate',
+  Edit: 'allowEdit',
+  Delete: 'allowDelete',
+};
+
+function processUserLicenseFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string
+): FailureResult {
+  // Only handle object-permission flag errors — e.g.
+  // "The user license doesn't allow the permission: View All CodeBuilder__Alert__e"
+  const m =
+    /The user license doesn't allow the permission:\s*(View All|Modify All|Read|Create|Edit|Delete)\s+(.+)/i.exec(
+      errorMessage
+    );
+  if (!m) return { handled: false, xmlContent };
+
+  const permLabel = m[1].trim();
+  const objectName = m[2].trim();
+  const flagElement = USER_LICENSE_FLAG_MAP[permLabel];
+
+  if (!flagElement) {
+    log(`   [UserLicense] Unrecognised permission label "${permLabel}" — ignoring`);
+    return { handled: true, xmlContent };
+  }
+
+  log(`   [UserLicense] Removing ${permLabel} flag for object: ${objectName}`);
+  const { updated, removed } = removeObjectPermissionFlag(xmlContent, objectName, flagElement);
+  if (removed) {
+    log(`   Removed <${flagElement}>true from objectPermissions for: ${objectName}`);
+    return {
+      handled: true,
+      xmlContent: updated,
+      removedRef: {
+        type: 'objectFlag',
+        name: objectName,
+        label: `[UserLicense] ${permLabel} ${objectName}`,
+        meta: flagElement,
+      },
+    };
+  }
+  log(`   <${flagElement}>true not found in objectPermissions for: ${objectName} — already removed or not present.`);
+  return { handled: true, xmlContent };
+}
+
 function processRegisteredFailure(
   log: (msg: string) => void,
   errorMessage: string,
@@ -971,12 +1066,11 @@ function processRegisteredFailure(
       return { handled: true, xmlContent };
     }
 
-    // Skip class and page removal for Profiles.
-    // Salesforce check-only (dry-run) strictly flags missing classAccesses/pageAccesses
-    // in profiles, but real deployments silently accept them. Removing them causes
-    // unnecessary XML churn. Revert this guard if confirmed not needed.
-    if (metadataType === 'Profile' && (handler.refType === 'class' || handler.refType === 'page')) {
-      log(`   [Profile] Skipping ${handler.label} (check-only false positive for profiles): ${name}`);
+    // Safety net: skip non-flow/non-userPerm types for Profiles.
+    // maskProfileFalsePositives strips these before dry-run so they should never
+    // reach here, but guard anyway in case masking is incomplete.
+    if (metadataType === 'Profile' && PROFILE_SKIPPED_REF_TYPES.has(handler.refType)) {
+      log(`   [Profile] Skipping ${handler.label} (not enforced by Copado deployment): ${name}`);
       return { handled: true, xmlContent };
     }
 
@@ -1023,9 +1117,27 @@ function processFailures(
   for (const failure of failures) {
     const err = failure.problem ?? failure.error ?? '';
 
-    // ── User license errors — needs developer discussion, do not remove anything ──
+    // ── User license errors — fix known object-permission flags; ignore the rest ──
     if (/The user license doesn't allow the permission:/i.test(err)) {
+      const ulResult = processUserLicenseFailure(log, err, updatedXml);
+      if (ulResult.handled) {
+        updatedXml = ulResult.xmlContent;
+        if (ulResult.removedRef) removedRefs.push(ulResult.removedRef);
+        continue;
+      }
       log(`   [UserLicense] Ignoring (needs developer review): ${err}`);
+      continue;
+    }
+
+    // ── Tab settings errors — validation-only, Copado real deploys ignore these ──
+    if (/You can't edit tab settings for .+, as it's not a valid tab/i.test(err)) {
+      log(`   [TabSettings] Ignoring validation-only error: ${err}`);
+      continue;
+    }
+
+    // ── Permission dependency errors — validation-only, not enforced by Copado ──
+    if (/Permission .+ depends on permission\(s\):/i.test(err)) {
+      log(`   [PermDep] Ignoring validation-only permission dependency error: ${err}`);
       continue;
     }
 
@@ -1095,9 +1207,9 @@ function sweepOtherFiles(
 
     const isProfile = filePath.endsWith('.profile-meta.xml');
     for (const ref of refs) {
-      // Mirror the same guard as processRegisteredFailure — don't sweep class/page
-      // refs into Profile files since real deployments accept them without error.
-      if (isProfile && (ref.type === 'class' || ref.type === 'page')) continue;
+      // Don't sweep refs into Profile files that Copado real deployments ignore.
+      // Only flows and userPermissions actually fail on profiles during deployment.
+      if (isProfile && PROFILE_SKIPPED_REF_TYPES.has(ref.type)) continue;
       let result: { updated: string; removed: boolean };
       if (ref.type === 'namespace') {
         result = bulkRemoveNamespaceRefs(xml, ref.name);
@@ -1105,6 +1217,9 @@ function sweepOtherFiles(
         result = removeFieldPermissionsFromXml(xml, ref.name);
       } else if (ref.type === 'userPermission') {
         result = removeUserPermissionFromXml(xml, ref.name);
+      } else if (ref.type === 'objectFlag') {
+        if (!ref.meta) continue;
+        result = removeObjectPermissionFlag(xml, ref.name, ref.meta);
       } else {
         const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
         if (!handler) continue;
@@ -1240,14 +1355,19 @@ function maskStandardApps(xmlContent: string): string {
 }
 
 function maskProfileFalsePositives(xmlContent: string): string {
-  // Mask ALL classAccesses and pageAccesses from profiles before each dry-run.
-  // These are check-only false positives — real deploys accept them silently.
-  // We never remove them from profiles, so letting Salesforce report errors for
-  // them just consumes the one-error-per-component slot and hides real issues
-  // (flows, layouts, fields, etc.) that need actual removal.
+  // Mask several block types from profiles before each dry-run.
+  // Copado real deployments do NOT error on missing classes, pages, fields,
+  // objects, layouts, or tab visibilities in profiles — only on missing flows
+  // and unknown user permissions. Stripping these prevents them from consuming
+  // the one-error-per-component slot and blocking real issue discovery.
+  // The original XML is restored immediately after the deploy result arrives.
   let xml = xmlContent;
   xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
   return xml;
 }
 
