@@ -1696,11 +1696,15 @@ export default class DeployAndFix extends SfCommand<void> {
       if (currentHead === startingCommit) {
         log('\nNo commits were made — nothing to squash.');
       } else {
+        // Count files actually changed between starting commit and now (before reset).
+        const changedFiles = execSync(`git diff --name-only ${startingCommit} HEAD`, { cwd: REPO_PATH })
+          .toString()
+          .trim()
+          .split('\n')
+          .filter(Boolean);
         execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
         const allRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
-        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${
-          summary.filter((r) => r.Status !== 'No Change' && r.Status !== 'File Not Found').length
-        } file(s)`;
+        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
         execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
         log(`\nSquashed all script commits into one: "${squashMsg}"`);
       }
