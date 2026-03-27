@@ -839,6 +839,7 @@ const METADATA_HANDLERS: MetadataHandler[] = [
       /no CustomObject named (.+?) found/i,
       /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
       /In field: object - no CustomObject named (.+?) found/i,
+      /The user license doesn't allow the permission: .+ (\S+)/i,
     ],
     label: 'object',
     refType: 'object',
@@ -1217,12 +1218,29 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   return xml;
 }
 
+function maskStandardApps(xmlContent: string): string {
+  // Temporarily strip all applicationVisibilities whose <application> starts with
+  // "standard_" before each dry-run. Salesforce always errors on these but they are
+  // removed by Copado's pipeline YAML before the real deploy. Without this masking
+  // they block error discovery — Salesforce reports only one error per component per
+  // iteration, so a standard_ app error would hide every subsequent real missing ref.
+  const inner = '(?:(?!<applicationVisibilities>)[\\s\\S])*?';
+  return xmlContent.replace(
+    new RegExp(
+      `[ \\t]*<applicationVisibilities>${inner}<application>[ \\t]*standard_[^<]*[ \\t]*</application>${inner}</applicationVisibilities>[ \\t]*\\r?\\n?`,
+      'g'
+    ),
+    ''
+  );
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
     if (!fs.existsSync(item.filePath)) continue;
     const orig = fs.readFileSync(item.filePath, 'utf8');
-    const masked = maskWhitelistedEntries(orig, whitelist);
+    let masked = maskWhitelistedEntries(orig, whitelist);
+    masked = maskStandardApps(masked);
     saved.set(item.filePath, orig);
     if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
   }
