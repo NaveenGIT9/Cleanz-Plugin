@@ -1196,76 +1196,6 @@ async function applyNamespacePreCheck(
 }
 
 // ===============================================================
-// PROACTIVE PROFILE FLOW CHECK
-// Salesforce check-only (dry-run) does NOT validate <flowAccesses>
-// in Profiles — the deploy passes silently even if flows are missing.
-// After the main batch loop we query the org directly: any flowAccess
-// whose flow neither exists in the org nor is being promoted (whitelisted)
-// is removed and committed here, then swept to other files.
-// ===============================================================
-
-async function proactiveProfileFlowCheck(
-  log: (msg: string) => void,
-  profileItems: BatchItem[],
-  whitelist: WhitelistMap,
-  targetOrg: string,
-  repoPath: string,
-  allFilePaths: string[]
-): Promise<void> {
-  log('\n[ProfileFlow] Proactive flow check (check-only does not validate profile flowAccesses)...');
-
-  type FlowRec = { DeveloperName: string };
-  const records = await toolingQuery<FlowRec>(targetOrg, '"SELECT DeveloperName FROM FlowDefinition"');
-  const orgFlows = new Set(records.map((r) => r.DeveloperName).filter(Boolean));
-  log(`   [ProfileFlow] ${orgFlows.size} flow(s) exist in org`);
-
-  for (const item of profileItems) {
-    if (!fs.existsSync(item.filePath)) continue;
-    let xml = fs.readFileSync(item.filePath, 'utf8');
-
-    // Collect all <flow> values inside <flowAccesses> blocks
-    const flowsInXml: string[] = [];
-    const regex = /<flowAccesses>[\s\S]*?<flow>([\s\S]*?)<\/flow>[\s\S]*?<\/flowAccesses>/g;
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(xml)) !== null) flowsInXml.push(m[1].trim());
-
-    // Keep only flows that are missing from org AND not being promoted
-    const toRemove = flowsInXml.filter((f) => !whitelist.flows.includes(f) && !orgFlows.has(f));
-    if (toRemove.length === 0) continue;
-
-    const removedRefs: RemovedRef[] = [];
-    for (const flowName of toRemove) {
-      const result = removeFlowAccessFromXml(xml, flowName);
-      if (result.removed) {
-        xml = result.updated;
-        removedRefs.push({ type: 'flow', name: flowName, label: `[Flow] ${flowName}` });
-        log(`   [ProfileFlow] ${item.itemName}: removing missing flowAccess "${flowName}"`);
-      }
-    }
-    if (removedRefs.length === 0) continue;
-
-    item.allRemovedFields.push(...removedRefs.map((r) => r.label));
-    item.status = 'Fixed & Committed';
-    saveXmlClean(xml, item.filePath, getRootNodeName(xml));
-    try {
-      execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-      execSync(
-        `git commit -m "[${item.itemName}] Remove ${removedRefs.length} missing flowAccess(es): ${removedRefs
-          .map((r) => r.name)
-          .join(', ')}"`,
-        { cwd: repoPath }
-      );
-      log(`   [ProfileFlow] Committed flow fixes for ${item.itemName}`);
-    } catch {
-      log(`   [ProfileFlow] Commit failed or nothing to stage for ${item.itemName}`);
-    }
-
-    // Propagate the same removal to all other files in the batch
-    sweepOtherFiles(log, removedRefs, new Set([item.filePath]), allFilePaths, repoPath);
-  }
-}
-
-// ===============================================================
 // WHITELIST MASKING
 // Before each dry-run deploy, temporarily strip whitelisted entries
 // from every active item's XML so Salesforce skips them and reports
@@ -1764,7 +1694,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('######################################################');
 
     // eslint-disable-next-line no-await-in-loop
-    await runBatchDeploy(
+    const summary = await runBatchDeploy(
       log,
       batchItems,
       targetOrg,
@@ -1777,25 +1707,6 @@ export default class DeployAndFix extends SfCommand<void> {
       DEPLOY_TIMEOUT_MINS,
       MAX_RETRIES
     );
-
-    // Proactive flow check for profiles — Salesforce check-only does not validate
-    // profile flowAccesses, so missing flows never appear as dry-run errors.
-    // We query the org directly and remove any flowAccess that neither exists in
-    // the org nor is being promoted by Copado (whitelisted).
-    const profileBatchItems = batchItems.filter((i) => i.metadataType === 'Profile');
-    if (profileBatchItems.length > 0) {
-      // eslint-disable-next-line no-await-in-loop
-      await proactiveProfileFlowCheck(log, profileBatchItems, whitelist, targetOrg, REPO_PATH, allFilePaths);
-    }
-
-    // Build final summary from batchItems — proactive check may have updated statuses.
-    const summary = batchItems.map((item) => ({
-      Type: item.metadataType,
-      Name: item.itemName,
-      Status: item.status,
-      RemovedFields: item.allRemovedFields.join('; '),
-      SkippedFields: item.allSkippedFields.join('; '),
-    }));
 
     // ================= FINAL SUMMARY =================
     log('\n======================================================');
