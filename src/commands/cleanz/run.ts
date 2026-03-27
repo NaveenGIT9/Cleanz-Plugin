@@ -1239,6 +1239,18 @@ function maskStandardApps(xmlContent: string): string {
   );
 }
 
+function maskProfileFalsePositives(xmlContent: string): string {
+  // Mask ALL classAccesses and pageAccesses from profiles before each dry-run.
+  // These are check-only false positives — real deploys accept them silently.
+  // We never remove them from profiles, so letting Salesforce report errors for
+  // them just consumes the one-error-per-component slot and hides real issues
+  // (flows, layouts, fields, etc.) that need actual removal.
+  let xml = xmlContent;
+  xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
+  return xml;
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
@@ -1246,6 +1258,9 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     const orig = fs.readFileSync(item.filePath, 'utf8');
     let masked = maskWhitelistedEntries(orig, whitelist);
     masked = maskStandardApps(masked);
+    if (item.filePath.endsWith('.profile-meta.xml')) {
+      masked = maskProfileFalsePositives(masked);
+    }
     saved.set(item.filePath, orig);
     if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
   }
