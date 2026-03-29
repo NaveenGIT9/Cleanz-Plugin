@@ -85,6 +85,7 @@ type WhitelistMap = {
   flows: string[];
   layouts: string[];
   flexipages: string[];
+  recordTypes: string[]; // "Object.DeveloperName" — profileActionOverrides blocks referencing these are kept
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -273,13 +274,24 @@ function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: s
 function removeProfileActionOverrideFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'profileActionOverrides', 'content', name);
 }
+// Removes profileActionOverrides blocks keyed by their <recordType> value.
+// Used during whitelist masking: if a RecordType is in the promotion JSON (being deployed),
+// its profileActionOverrides block is masked before each dry-run so the RT-not-found error
+// doesn't consume the one-error-per-component slot.
+function removeProfileActionOverrideByRecordTypeFromXml(
+  xmlContent: string,
+  recordTypeName: string
+): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'profileActionOverrides', 'recordType', recordTypeName);
+}
 // Removes profileActionOverrides blocks whose <recordType> value is NOT in the org's
 // active RecordType set. Returns the updated XML and the list of invalid RT values removed.
 // Salesforce doesn't report the specific RecordType name in the error, so we query the org
 // for all active RecordTypes and surgically remove only the blocks that reference missing ones.
 function removeProfileActionOverridesWithMissingRecordType(
   xmlContent: string,
-  existingRecordTypes: Set<string>
+  existingRecordTypes: Set<string>,
+  whitelistedRecordTypes: string[]
 ): { updated: string; removedRecordTypes: string[] } {
   const inner = '(?:(?!<profileActionOverrides>)[\\s\\S])*?';
   const blockRegex = new RegExp(
@@ -288,8 +300,10 @@ function removeProfileActionOverridesWithMissingRecordType(
   );
   const removedRecordTypes: string[] = [];
   const updated = xmlContent.replace(blockRegex, (match: string, recordType: string) => {
-    if (existingRecordTypes.has(recordType.trim())) return match; // valid — keep
-    removedRecordTypes.push(recordType.trim());
+    const rt = recordType.trim();
+    if (existingRecordTypes.has(rt)) return match; // exists in org — keep
+    if (whitelistedRecordTypes.includes(rt)) return match; // being deployed in this promotion — keep
+    removedRecordTypes.push(rt);
     return '';
   });
   return { updated, removedRecordTypes };
@@ -1424,14 +1438,19 @@ async function applyRecordTypePreCheck(
   failures: ComponentFailure[],
   xmlContent: string,
   targetOrg: string,
-  itemName: string
+  itemName: string,
+  whitelist: WhitelistMap
 ): Promise<{ xml: string; refs: RemovedRef[] }> {
   const RT_ERROR = /The value you specified for RecordType is invalid/i;
   const hasRTError = failures.some((f) => RT_ERROR.test(f.problem ?? f.error ?? ''));
   if (!hasRTError) return { xml: xmlContent, refs: [] };
 
   const existingRTs = await loadExistingRecordTypes(log, targetOrg);
-  const { updated, removedRecordTypes } = removeProfileActionOverridesWithMissingRecordType(xmlContent, existingRTs);
+  const { updated, removedRecordTypes } = removeProfileActionOverridesWithMissingRecordType(
+    xmlContent,
+    existingRTs,
+    whitelist.recordTypes
+  );
   if (removedRecordTypes.length === 0) {
     log(`   [RT Check] No invalid profileActionOverrides found in: ${itemName}`);
     return { xml: xmlContent, refs: [] };
@@ -1470,6 +1489,7 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   for (const a of whitelist.apps) xml = removeApplicationVisibilityFromXml(xml, a).updated;
   for (const l of whitelist.layouts) xml = removeLayoutAssignmentFromXml(xml, l).updated;
   for (const fp of whitelist.flexipages) xml = removeProfileActionOverrideFromXml(xml, fp).updated;
+  for (const rt of whitelist.recordTypes) xml = removeProfileActionOverrideByRecordTypeFromXml(xml, rt).updated;
   return xml;
 }
 
@@ -1631,7 +1651,8 @@ async function processItemsInIteration(
       itemFailures,
       nsXml,
       targetOrg,
-      item.itemName
+      item.itemName,
+      whitelist
     );
     const {
       xmlContent: updatedXml,
@@ -1921,6 +1942,7 @@ export default class DeployAndFix extends SfCommand<void> {
       flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
       layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout').map((i) => i.n))].sort(),
       flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage').map((i) => i.n))].sort(),
+      recordTypes: [...new Set(promotionData.filter((i) => i.t === 'RecordType').map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
@@ -1948,6 +1970,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`  - Flows               : ${whitelist.flows.length}`);
     log(`  - Layouts             : ${whitelist.layouts.length}`);
     log(`  - FlexiPages          : ${whitelist.flexipages.length}`);
+    log(`  - RecordTypes         : ${whitelist.recordTypes.length}`);
     log(`Max per item            : ${MAX_ITERATIONS} iterations`);
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
@@ -1965,9 +1988,10 @@ export default class DeployAndFix extends SfCommand<void> {
     log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
     log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
     log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
-    log('  Flows      : ' + (whitelist.flows.join(', ') || 'none'));
-    log('  Layouts    : ' + (whitelist.layouts.join(', ') || 'none'));
-    log('  FlexiPages : ' + (whitelist.flexipages.join(', ') || 'none'));
+    log('  Flows       : ' + (whitelist.flows.join(', ') || 'none'));
+    log('  Layouts     : ' + (whitelist.layouts.join(', ') || 'none'));
+    log('  FlexiPages  : ' + (whitelist.flexipages.join(', ') || 'none'));
+    log('  RecordTypes : ' + (whitelist.recordTypes.join(', ') || 'none'));
 
     log('');
     // eslint-disable-next-line no-await-in-loop
