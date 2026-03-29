@@ -1369,6 +1369,7 @@ function maskProfileFalsePositives(xmlContent: string): string {
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<recordTypeVisibilities>[\s\S]*?<\/recordTypeVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
   return xml;
