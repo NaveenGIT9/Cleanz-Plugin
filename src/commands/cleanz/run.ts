@@ -521,6 +521,7 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
   xml = removeBlocksWithNamespace(xml, 'tabVisibilities', 'tab', namespace);
   xml = removeBlocksWithNamespace(xml, 'flowAccesses', 'flow', namespace);
   xml = removeBlocksWithNamespace(xml, 'applicationVisibilities', 'application', namespace);
+  xml = removeBlocksWithNamespace(xml, 'profileActionOverrides', 'content', namespace);
 
   return { updated: xml, removed: xml !== xmlContent };
 }
@@ -567,7 +568,8 @@ async function invokeDeployWithRetry(
   targetOrg: string,
   outputFile: string,
   timeoutMins: number,
-  maxRetries: number
+  maxRetries: number,
+  verbose: boolean
 ): Promise<DeployResult | null> {
   const MAX_TOTAL_ATTEMPTS = maxRetries + 10;
   let attempt = 0;
@@ -585,7 +587,7 @@ async function invokeDeployWithRetry(
     await waitForQueueToClear(log, targetOrg, MAX_QUEUE_WAIT_MINS);
 
     // eslint-disable-next-line no-await-in-loop
-    const procResult = await runDeployProcess(items, targetOrg, outputFile, timeoutMins);
+    const procResult = await runDeployProcess(items, targetOrg, outputFile, timeoutMins, verbose);
 
     if (procResult === 'timeout') {
       log(`   Deploy timed out after ${timeoutMins} min(s). Retrying after backoff...`);
@@ -664,7 +666,8 @@ function runDeployProcess(
   items: Array<{ metadataType: string; itemName: string }>,
   targetOrg: string,
   outputFile: string,
-  timeoutMins: number
+  timeoutMins: number,
+  verbose: boolean
 ): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
     // Build one "-m Type:Name" pair per item.
@@ -687,9 +690,11 @@ function runDeployProcess(
       String(timeoutMins),
     ];
 
-    // Log the exact shell command for debugging
-    const dbgCmd = `sf ${args.join(' ')}`;
-    fs.appendFileSync(outputFile + '.cmd.txt', dbgCmd + '\n', 'utf8');
+    // Log the exact shell command for debugging (verbose only)
+    if (verbose) {
+      const dbgCmd = `sf ${args.join(' ')}`;
+      fs.appendFileSync(outputFile + '.cmd.txt', dbgCmd + '\n', 'utf8');
+    }
 
     const proc = spawn('sf', args, { shell: true });
     const outputStream = fs.createWriteStream(outputFile, { encoding: 'utf8' });
@@ -1122,14 +1127,16 @@ function processFailures(
   xmlContent: string,
   whitelist: WhitelistMap,
   allSkippedFields: string[],
-  metadataType: string
+  metadataType: string,
+  verbose: boolean
 ): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[] } {
   let updatedXml = xmlContent;
   const removedRefs: RemovedRef[] = [];
   const skippedFields: string[] = [];
+  const vlog: (msg: string) => void = verbose ? log : (): void => {};
 
-  log(`   [DEBUG] Total failures this iteration: ${failures.length}`);
-  failures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
+  vlog(`   [DEBUG] Total failures this iteration: ${failures.length}`);
+  failures.forEach((f, i) => vlog(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
 
   for (const failure of failures) {
     const err = failure.problem ?? failure.error ?? '';
@@ -1480,8 +1487,10 @@ async function processItemsInIteration(
   failuresByItem: Map<string, ComponentFailure[]>,
   whitelist: WhitelistMap,
   targetOrg: string,
-  repoPath: string
+  repoPath: string,
+  verbose: boolean
 ): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean }> {
+  const vlog: (msg: string) => void = verbose ? log : (): void => {};
   // Track refs per source file so the sweep skips only the source file, not all modified files.
   const perItemRefs = new Map<string, RemovedRef[]>();
   let anyProgress = false;
@@ -1492,7 +1501,7 @@ async function processItemsInIteration(
     if (itemFailures.length === 0) continue;
 
     log(`\n   [${item.itemName}] ${itemFailures.length} failure(s):`);
-    itemFailures.forEach((f, i) => log(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
+    itemFailures.forEach((f, i) => vlog(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
 
     const xmlContent = fs.readFileSync(item.filePath, 'utf8');
     const rootNode = getRootNodeName(xmlContent);
@@ -1510,7 +1519,7 @@ async function processItemsInIteration(
       xmlContent: updatedXml,
       removedRefs: perFailureRefs,
       skippedFields,
-    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields, item.metadataType);
+    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
     const removedRefs = [...nsRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
 
@@ -1562,7 +1571,8 @@ async function runBatchDeploy(
   maxTotalDeploys: number,
   totalDeploys: TotalDeploys,
   timeoutMins: number,
-  maxRetries: number
+  maxRetries: number,
+  verbose: boolean
 ): Promise<SummaryRecord[]> {
   validateBatchItems(log, batchItems);
 
@@ -1604,7 +1614,8 @@ async function runBatchDeploy(
       targetOrg,
       deployErrorsFile,
       timeoutMins,
-      maxRetries
+      maxRetries,
+      verbose
     );
     restoreItems(savedContents);
 
@@ -1662,7 +1673,8 @@ async function runBatchDeploy(
       failuresByItem,
       whitelist,
       targetOrg,
-      repoPath
+      repoPath,
+      verbose
     );
 
     if (!anyProgress && batchItems.some((i) => !i.done)) {
@@ -1742,10 +1754,16 @@ export default class DeployAndFix extends SfCommand<void> {
       summary: messages.getMessage('flags.target-org.summary'),
       required: false,
     }),
+    verbose: Flags.boolean({
+      char: 'v',
+      summary: messages.getMessage('flags.verbose.summary'),
+      default: false,
+    }),
   };
 
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
+    const verbose = flags.verbose;
     const log = (msg: string): void => {
       this.log(msg);
     };
@@ -1805,6 +1823,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`  - CustomObjects       : ${whitelist.objects.length}`);
     log(`  - Flows               : ${whitelist.flows.length}`);
     log(`  - Layouts             : ${whitelist.layouts.length}`);
+    log(`  - FlexiPages          : ${whitelist.flexipages.length}`);
     log(`Max per item            : ${MAX_ITERATIONS} iterations`);
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
@@ -1822,8 +1841,9 @@ export default class DeployAndFix extends SfCommand<void> {
     log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
     log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
     log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
-    log('  Flows    : ' + (whitelist.flows.join(', ') || 'none'));
-    log('  Layouts  : ' + (whitelist.layouts.join(', ') || 'none'));
+    log('  Flows      : ' + (whitelist.flows.join(', ') || 'none'));
+    log('  Layouts    : ' + (whitelist.layouts.join(', ') || 'none'));
+    log('  FlexiPages : ' + (whitelist.flexipages.join(', ') || 'none'));
 
     log('');
     // eslint-disable-next-line no-await-in-loop
@@ -1886,7 +1906,8 @@ export default class DeployAndFix extends SfCommand<void> {
       MAX_TOTAL_DEPLOYS,
       totalDeploys,
       DEPLOY_TIMEOUT_MINS,
-      MAX_RETRIES
+      MAX_RETRIES,
+      verbose
     );
 
     // ================= FINAL SUMMARY =================

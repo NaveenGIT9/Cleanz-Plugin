@@ -18,3 +18,7 @@ Full path to your Copado Promotion JSON file.
 # flags.target-org.summary
 
 Target org username or alias.
+
+# flags.verbose.summary
+
+Print all individual deployment error details (useful for debugging).
