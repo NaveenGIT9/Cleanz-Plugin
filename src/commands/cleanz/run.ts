@@ -1354,101 +1354,17 @@ function maskStandardApps(xmlContent: string): string {
   );
 }
 
-// Cache so we only query each org once per run.
-const categoryGroupCache = new Map<string, Set<string>>();
-
-async function fetchOrgCategoryGroups(targetOrg: string): Promise<Set<string>> {
-  if (categoryGroupCache.has(targetOrg)) return categoryGroupCache.get(targetOrg)!;
-  return new Promise<Set<string>>((resolve) => {
-    const args = [
-      'org',
-      'list',
-      'metadata',
-      '--metadata-type',
-      'DataCategoryGroup',
-      '--target-org',
-      targetOrg,
-      '--json',
-    ];
-    const proc = spawn('sf', args, { shell: true });
-    const chunks: string[] = [];
-    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
-    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => {
-      proc.kill();
-      resolve(new Set());
-    }, 30_000);
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const raw = chunks.join('');
-        const start = raw.indexOf('{');
-        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as { result?: Array<{ fullName?: string }> };
-        const names = new Set((json?.result ?? []).map((r) => r.fullName ?? '').filter(Boolean));
-        categoryGroupCache.set(targetOrg, names);
-        resolve(names);
-      } catch {
-        resolve(new Set());
-      }
-    });
-  });
-}
-
-async function removeMissingCategoryGroups(
-  log: (msg: string) => void,
-  filePath: string,
-  targetOrg: string,
-  repoPath: string
-): Promise<void> {
-  if (!filePath.endsWith('.profile-meta.xml')) return;
-  const xml = fs.readFileSync(filePath, 'utf8');
-  const blocks = [...xml.matchAll(/<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>/g)];
-  if (blocks.length === 0) return;
-
-  const orgGroups = await fetchOrgCategoryGroups(targetOrg);
-  if (orgGroups.size === 0) {
-    log('   [CategoryGroup] Could not fetch org category groups — skipping proactive check.');
-    return;
-  }
-
-  let updated = xml;
-  const removed: string[] = [];
-  for (const m of blocks) {
-    const nameMatch = m[0].match(/<dataCategoryGroup>([^<]+)<\/dataCategoryGroup>/);
-    if (!nameMatch) continue;
-    const groupName = nameMatch[1].trim();
-    if (!orgGroups.has(groupName)) {
-      updated = updated.replace(m[0], '');
-      removed.push(groupName);
-    }
-  }
-
-  if (removed.length === 0) return;
-
-  // Clean up any blank lines left behind
-  updated = updated.replace(/\n(\s*\n){2,}/g, '\n\n');
-  fs.writeFileSync(filePath, updated, 'utf8');
-  execSync(`git add "${filePath}"`, { cwd: repoPath });
-  execSync(
-    `git commit -m "Auto-fix: remove ${removed.length} missing categoryGroupVisibilities from ${path.basename(
-      filePath
-    )}"`,
-    { cwd: repoPath }
-  );
-  log(`   [CategoryGroup] Removed ${removed.length} missing group(s) and committed: ${removed.join(', ')}`);
-}
-
 function maskProfileFalsePositives(xmlContent: string): string {
   // Mask several block types from profiles before each dry-run.
-  // Copado real deployments do NOT error on missing classes, pages, fields,
-  // objects, layouts, tab visibilities, or app visibilities in profiles —
-  // only on missing flows and unknown user permissions. Stripping these
-  // prevents them from consuming the one-error-per-component slot and
-  // blocking real issue discovery (e.g. applicationVisibilities error
-  // appearing before flowAccesses error, causing the loop to exit early).
-  // The original XML is restored immediately after the deploy result arrives.
+  // Copado real deployments only enforce flowAccesses and userPermissions —
+  // all other sections are either stripped by Copado TRIM or cause
+  // unpredictable "insufficient access rights" errors (categoryGroupVisibilities)
+  // that cannot be detected upfront. Stripping these prevents them from
+  // consuming the one-error-per-component slot and blocking flow/userPerm
+  // discovery. The original XML is restored immediately after each dry-run.
   let xml = xmlContent;
   xml = xml.replace(/[ \t]*<applicationVisibilities>[\s\S]*?<\/applicationVisibilities>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
@@ -1616,18 +1532,6 @@ async function processItemsInIteration(
 // One queue-wait covers the entire batch instead of one per item.
 // ===============================================================
 
-async function preCleanProfileCategoryGroups(
-  log: (msg: string) => void,
-  batchItems: BatchItem[],
-  targetOrg: string,
-  repoPath: string
-): Promise<void> {
-  for (const item of batchItems.filter((i) => i.filePath.endsWith('.profile-meta.xml'))) {
-    // eslint-disable-next-line no-await-in-loop
-    await removeMissingCategoryGroups(log, item.filePath, targetOrg, repoPath);
-  }
-}
-
 async function runBatchDeploy(
   log: (msg: string) => void,
   batchItems: BatchItem[],
@@ -1642,13 +1546,6 @@ async function runBatchDeploy(
   maxRetries: number
 ): Promise<SummaryRecord[]> {
   validateBatchItems(log, batchItems);
-
-  // Proactively remove categoryGroupVisibilities blocks that reference groups
-  // not present in the target org. Copado keeps these sections (unlike most
-  // other profile sections) so they cause deployment failures. We check upfront
-  // because the SF error "insufficient access rights on cross-reference id" is
-  // too generic to identify which group is missing after the fact.
-  await preCleanProfileCategoryGroups(log, batchItems, targetOrg, repoPath);
 
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
