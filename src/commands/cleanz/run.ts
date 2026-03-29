@@ -100,7 +100,8 @@ type RefType =
   | 'flexipage'
   | 'namespace'
   | 'userPermission'
-  | 'objectFlag'; // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
+  | 'objectFlag' // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
+  | 'recordTypeOverride'; // profileActionOverrides block with an invalid <recordType> reference
 
 type RemovedRef = {
   type: RefType;
@@ -272,6 +273,27 @@ function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: s
 function removeProfileActionOverrideFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'profileActionOverrides', 'content', name);
 }
+// Removes profileActionOverrides blocks whose <recordType> value is NOT in the org's
+// active RecordType set. Returns the updated XML and the list of invalid RT values removed.
+// Salesforce doesn't report the specific RecordType name in the error, so we query the org
+// for all active RecordTypes and surgically remove only the blocks that reference missing ones.
+function removeProfileActionOverridesWithMissingRecordType(
+  xmlContent: string,
+  existingRecordTypes: Set<string>
+): { updated: string; removedRecordTypes: string[] } {
+  const inner = '(?:(?!<profileActionOverrides>)[\\s\\S])*?';
+  const blockRegex = new RegExp(
+    `[ \\t]*<profileActionOverrides>${inner}<recordType>([^<]*)</recordType>${inner}</profileActionOverrides>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const removedRecordTypes: string[] = [];
+  const updated = xmlContent.replace(blockRegex, (match: string, recordType: string) => {
+    if (existingRecordTypes.has(recordType.trim())) return match; // valid — keep
+    removedRecordTypes.push(recordType.trim());
+    return '';
+  });
+  return { updated, removedRecordTypes };
+}
 function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   // Profiles store layout refs in <layoutAssignments> blocks keyed by <layout>.
   // A block may also contain a <recordType> child — removeXmlBlock handles this correctly
@@ -319,6 +341,11 @@ function removeObjectPermissionFlag(
 // in one pass — then sweep the same removal across every other file.
 // ===============================================================
 
+// Caches for RecordType queries (keyed by org alias)
+// Set entries are "SobjectType.DeveloperName" (e.g. "Contact.Sales_Rep") — the same
+// format used in profileActionOverrides <recordType> elements.
+const recordTypeCache = new Map<string, Set<string>>(); // org → Set of active "Object.DevName"
+
 // Caches for namespace queries (keyed by org alias or "org:namespace")
 const namespaceCache = new Map<string, boolean>(); // "org:namespace" → installed?
 const installedNsCache = new Map<string, Set<string>>(); // org → Set of all installed namespace prefixes
@@ -345,10 +372,20 @@ function extractNamespaceFromError(errorMessage: string): string | null {
   return ns;
 }
 
-// Shared Tooling API query helper — returns records array or [] on failure.
-function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string): Promise<T[]> {
+// Shared SF CLI query helper — returns records array or [] on failure.
+// useTooling=true → adds --use-tooling-api (Tooling API); false → regular SOQL.
+function runSfQuery<T extends object>(targetOrg: string, quotedQuery: string, useTooling: boolean): Promise<T[]> {
   return new Promise<T[]>((resolve) => {
-    const args = ['data', 'query', '--query', quotedQuery, '--use-tooling-api', '--target-org', targetOrg, '--json'];
+    const args = [
+      'data',
+      'query',
+      '--query',
+      quotedQuery,
+      ...(useTooling ? ['--use-tooling-api'] : []),
+      '--target-org',
+      targetOrg,
+      '--json',
+    ];
     const proc = spawn('sf', args, { shell: true });
     const chunks: string[] = [];
     proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
@@ -369,6 +406,29 @@ function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string):
       }
     });
   });
+}
+function toolingQuery<T extends object>(targetOrg: string, quotedQuery: string): Promise<T[]> {
+  return runSfQuery<T>(targetOrg, quotedQuery, true);
+}
+function soqlQuery<T extends object>(targetOrg: string, quotedQuery: string): Promise<T[]> {
+  return runSfQuery<T>(targetOrg, quotedQuery, false);
+}
+
+// Loads all ACTIVE RecordTypes from the org and caches the Set as "SobjectType.DeveloperName".
+// Uses regular SOQL (not Tooling API) — RecordType is a standard object.
+async function loadExistingRecordTypes(log: (msg: string) => void, targetOrg: string): Promise<Set<string>> {
+  if (recordTypeCache.has(targetOrg)) return recordTypeCache.get(targetOrg)!;
+
+  log('   [RT Check] Querying org for active RecordTypes...');
+  type RTRec = { SobjectType: string; DeveloperName: string };
+  const records = await soqlQuery<RTRec>(
+    targetOrg,
+    '"SELECT SobjectType, DeveloperName FROM RecordType WHERE IsActive = true"'
+  );
+  const set = new Set(records.map((r) => `${r.SobjectType}.${r.DeveloperName}`));
+  recordTypeCache.set(targetOrg, set);
+  log(`   [RT Check] Found ${set.size} active RecordType(s) in org`);
+  return set;
 }
 
 // Loads ALL installed package namespace prefixes for an org in one query and caches the Set.
@@ -812,8 +872,10 @@ function shouldSkip(
 }
 
 // Ref types that Copado real deployments do NOT enforce for Profile files.
-// Only flows and userPermissions actually fail on profiles during deployment.
-// Used in both the sweep guard and the processRegisteredFailure safety net.
+// Only flows, userPermissions, and profileActionOverrides actually fail on profiles
+// during deployment. Used in both the sweep guard and the processRegisteredFailure safety net.
+// 'recordTypeOverride' is excluded from the sweep because each profile will hit the error
+// independently and be fixed by applyRecordTypePreCheck (no sweep needed).
 const PROFILE_SKIPPED_REF_TYPES = new Set<RefType>([
   'app',
   'class',
@@ -823,6 +885,7 @@ const PROFILE_SKIPPED_REF_TYPES = new Set<RefType>([
   'layout',
   'tab',
   'objectFlag',
+  'recordTypeOverride',
 ]);
 
 // ===============================================================
@@ -1165,6 +1228,12 @@ function processFailures(
       continue;
     }
 
+    // ── profileActionOverrides RecordType error — handled by applyRecordTypePreCheck ──
+    if (/The value you specified for RecordType is invalid/i.test(err)) {
+      log('   [ProfileActionOverride] RecordType error — handled by pre-check');
+      continue;
+    }
+
     // ── CustomField ───────────────────────────────────────────────
     const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
     if (fieldResult.handled) {
@@ -1338,6 +1407,47 @@ async function applyNamespacePreCheck(
   }
 
   return { xml, refs };
+}
+
+// ===============================================================
+// RECORD TYPE PRE-CHECK
+// Salesforce reports "The value you specified for RecordType is invalid or doesn't
+// match the object you specified." without naming the specific block. We query the org
+// for all active RecordTypes and remove only profileActionOverrides blocks whose
+// <recordType> is not in the result set. Each profile in the batch will hit this error
+// independently and be fixed by this pre-check (no cross-file sweep needed since the
+// RT cache is warm for all subsequent files after the first query).
+// ===============================================================
+
+async function applyRecordTypePreCheck(
+  log: (msg: string) => void,
+  failures: ComponentFailure[],
+  xmlContent: string,
+  targetOrg: string,
+  itemName: string
+): Promise<{ xml: string; refs: RemovedRef[] }> {
+  const RT_ERROR = /The value you specified for RecordType is invalid/i;
+  const hasRTError = failures.some((f) => RT_ERROR.test(f.problem ?? f.error ?? ''));
+  if (!hasRTError) return { xml: xmlContent, refs: [] };
+
+  const existingRTs = await loadExistingRecordTypes(log, targetOrg);
+  const { updated, removedRecordTypes } = removeProfileActionOverridesWithMissingRecordType(xmlContent, existingRTs);
+  if (removedRecordTypes.length === 0) {
+    log(`   [RT Check] No invalid profileActionOverrides found in: ${itemName}`);
+    return { xml: xmlContent, refs: [] };
+  }
+
+  log(
+    `   [RT Check] Removed ${removedRecordTypes.length} profileActionOverrides block(s) with invalid RecordType from: ${itemName}`
+  );
+  return {
+    xml: updated,
+    refs: removedRecordTypes.map((rt) => ({
+      type: 'recordTypeOverride' as RefType,
+      name: rt,
+      label: `[ProfileActionOverride] RecordType:${rt}`,
+    })),
+  };
 }
 
 // ===============================================================
@@ -1515,12 +1625,20 @@ async function processItemsInIteration(
       targetOrg,
       item.itemName
     );
+    // eslint-disable-next-line no-await-in-loop
+    const { xml: rtXml, refs: rtRefs } = await applyRecordTypePreCheck(
+      log,
+      itemFailures,
+      nsXml,
+      targetOrg,
+      item.itemName
+    );
     const {
       xmlContent: updatedXml,
       removedRefs: perFailureRefs,
       skippedFields,
-    } = processFailures(log, itemFailures, nsXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
-    const removedRefs = [...nsRefs, ...perFailureRefs];
+    } = processFailures(log, itemFailures, rtXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
+    const removedRefs = [...nsRefs, ...rtRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
 
     if (removedRefs.length === 0) {
