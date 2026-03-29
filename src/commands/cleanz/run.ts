@@ -1605,19 +1605,25 @@ async function runBatchDeploy(
 
     // Temporarily strip whitelisted entries so Salesforce skips them and reports
     // ALL real missing refs — not just the first one it encounters.
-    // Files are restored immediately after the result arrives.
+    // try/finally guarantees restore even if invokeDeployWithRetry throws unexpectedly —
+    // without this, a mid-deploy exception leaves files in the masked state and every
+    // subsequent iteration reads masked content as "original", silently deleting real blocks.
     const savedContents = maskActiveItems(activeItems, whitelist);
-    // eslint-disable-next-line no-await-in-loop
-    const deployResult = await invokeDeployWithRetry(
-      log,
-      activeItems,
-      targetOrg,
-      deployErrorsFile,
-      timeoutMins,
-      maxRetries,
-      verbose
-    );
-    restoreItems(savedContents);
+    let deployResult: DeployResult | null = null;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      deployResult = await invokeDeployWithRetry(
+        log,
+        activeItems,
+        targetOrg,
+        deployErrorsFile,
+        timeoutMins,
+        maxRetries,
+        verbose
+      );
+    } finally {
+      restoreItems(savedContents);
+    }
 
     if (!deployResult) {
       log('Batch deploy failed after all retry attempts.');
