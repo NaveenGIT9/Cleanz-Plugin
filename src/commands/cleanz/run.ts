@@ -84,6 +84,7 @@ type WhitelistMap = {
   objects: string[];
   flows: string[];
   layouts: string[];
+  flexipages: string[];
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -96,6 +97,7 @@ type RefType =
   | 'object'
   | 'flow'
   | 'layout'
+  | 'flexipage'
   | 'namespace'
   | 'userPermission'
   | 'objectFlag'; // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
@@ -266,6 +268,9 @@ function removeObjectPermissionFromXml(xmlContent: string, name: string): { upda
 }
 function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'flowAccesses', 'flow', name);
+}
+function removeProfileActionOverrideFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'profileActionOverrides', 'content', name);
 }
 function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   // Profiles store layout refs in <layoutAssignments> blocks keyed by <layout>.
@@ -917,6 +922,18 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     removeFn: removeLayoutAssignmentFromXml,
     displayTag: '[Layout]',
   },
+  {
+    patterns: [
+      /The (.+?) Lightning page doesn't exist or isn't valid/i,
+      /no FlexiPage named (.+?) found/i,
+      /Entity of type 'FlexiPage' named '(.+?)' cannot be found/i,
+    ],
+    label: 'flexipage',
+    refType: 'flexipage',
+    whitelistKey: 'flexipages',
+    removeFn: removeProfileActionOverrideFromXml,
+    displayTag: '[FlexiPage]',
+  },
 ];
 
 // ===============================================================
@@ -1335,6 +1352,7 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   for (const fl of whitelist.flows) xml = removeFlowAccessFromXml(xml, fl).updated;
   for (const a of whitelist.apps) xml = removeApplicationVisibilityFromXml(xml, a).updated;
   for (const l of whitelist.layouts) xml = removeLayoutAssignmentFromXml(xml, l).updated;
+  for (const fp of whitelist.flexipages) xml = removeProfileActionOverrideFromXml(xml, fp).updated;
   return xml;
 }
 
@@ -1760,6 +1778,7 @@ export default class DeployAndFix extends SfCommand<void> {
       objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
       flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
       layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout').map((i) => i.n))].sort(),
+      flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage').map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
