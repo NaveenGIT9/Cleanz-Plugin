@@ -247,7 +247,7 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   log('\nRemoved refs detail:');
   if (fixedPermSets.length > 0) {
     log('\nPERMISSION SETS');
-    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedPermSets), [20, 45, 60]));
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedPermSets), [15, 35, 45]));
   }
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
