@@ -2047,15 +2047,15 @@ function getAuthenticatedOrgs(): Promise<Set<string>> {
         const raw = chunks.join('');
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: {
-            nonScratchOrgs?: Array<{ alias?: string; username?: string }>;
-            scratchOrgs?: Array<{ alias?: string; username?: string }>;
-          };
+          result?: Record<string, Array<{ alias?: string; username?: string }>>;
         };
         const valid = new Set<string>();
-        for (const org of [...(json?.result?.nonScratchOrgs ?? []), ...(json?.result?.scratchOrgs ?? [])]) {
-          if (org.alias) valid.add(org.alias);
-          if (org.username) valid.add(org.username);
+        for (const orgs of Object.values(json?.result ?? {})) {
+          if (!Array.isArray(orgs)) continue;
+          for (const org of orgs) {
+            if (org.alias) valid.add(org.alias);
+            if (org.username) valid.add(org.username);
+          }
         }
         resolve(valid);
       } catch {
