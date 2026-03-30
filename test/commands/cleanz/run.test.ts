@@ -22,6 +22,8 @@ import {
   getRootNodeName,
   maskPermSetFalsePositives,
   maskProfileFalsePositives,
+  removeProfileActionOverridesWithMissingObject,
+  removeProfileActionOverridesWithMissingRecordType,
   removeXmlBlock,
 } from '../../../src/commands/cleanz/run.js';
 
@@ -315,5 +317,152 @@ describe('formatXml', () => {
     expect(result).to.include('loginHours');
     // self-closing should not shift subsequent indent
     expect(result).not.to.include('        </Profile>');
+  });
+});
+
+// ─── Integration: realistic profile XML ──────────────────────────────────────
+// These tests use XML that mirrors real Salesforce profile/permset structure
+// and exercise the full removal logic end-to-end without mocking.
+
+const REALISTIC_PROFILE = `<?xml version="1.0" encoding="UTF-8"?>
+<Profile xmlns="http://soap.sforce.com/2006/04/metadata">
+    <classAccesses>
+        <apexClass>GoodClass</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
+        <apexClass>BadClass</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Account.Good_Field__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Account.Bad_Field__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <flowAccesses>
+        <enabled>true</enabled>
+        <flow>Good_Flow</flow>
+    </flowAccesses>
+    <flowAccesses>
+        <enabled>true</enabled>
+        <flow>Bad_Flow</flow>
+    </flowAccesses>
+    <profileActionOverrides>
+        <actionName>View</actionName>
+        <content>GoodFlexiPage</content>
+        <formFactor>Large</formFactor>
+        <pageOrSobjectType>Account</pageOrSobjectType>
+        <recordType>Account.Good_RT</recordType>
+        <type>Flexipage</type>
+    </profileActionOverrides>
+    <profileActionOverrides>
+        <actionName>View</actionName>
+        <content>BadFlexiPage</content>
+        <formFactor>Large</formFactor>
+        <pageOrSobjectType>Account</pageOrSobjectType>
+        <type>Flexipage</type>
+    </profileActionOverrides>
+    <profileActionOverrides>
+        <actionName>View</actionName>
+        <content>SomeFlexiPage</content>
+        <formFactor>Large</formFactor>
+        <pageOrSobjectType>Bad_Object__c</pageOrSobjectType>
+        <recordType>Account.Bad_RT</recordType>
+        <type>Flexipage</type>
+    </profileActionOverrides>
+    <userPermissions>
+        <enabled>true</enabled>
+        <name>ApiEnabled</name>
+    </userPermissions>
+    <userPermissions>
+        <enabled>true</enabled>
+        <name>BadPermission</name>
+    </userPermissions>
+</Profile>
+`;
+
+describe('Integration — realistic profile XML', () => {
+  it('removes only the bad classAccesses block, keeps the good one', () => {
+    const { updated, removed } = removeXmlBlock(REALISTIC_PROFILE, 'classAccesses', 'apexClass', 'BadClass');
+    expect(removed).to.be.true;
+    expect(updated).to.include('GoodClass');
+    expect(updated).not.to.include('BadClass');
+  });
+
+  it('removes only the bad fieldPermissions block, keeps the good one', () => {
+    const { updated, removed } = removeXmlBlock(REALISTIC_PROFILE, 'fieldPermissions', 'field', 'Account.Bad_Field__c');
+    expect(removed).to.be.true;
+    expect(updated).to.include('Account.Good_Field__c');
+    expect(updated).not.to.include('Account.Bad_Field__c');
+  });
+
+  it('removes only the bad flowAccesses block, keeps the good one', () => {
+    const { updated, removed } = removeXmlBlock(REALISTIC_PROFILE, 'flowAccesses', 'flow', 'Bad_Flow');
+    expect(removed).to.be.true;
+    expect(updated).to.include('Good_Flow');
+    expect(updated).not.to.include('Bad_Flow');
+  });
+
+  it('removes only the bad FlexiPage profileActionOverrides block, keeps the good one', () => {
+    const { updated, removed } = removeXmlBlock(REALISTIC_PROFILE, 'profileActionOverrides', 'content', 'BadFlexiPage');
+    expect(removed).to.be.true;
+    expect(updated).to.include('GoodFlexiPage');
+    expect(updated).not.to.include('BadFlexiPage');
+  });
+
+  it('removes only the bad userPermissions block, keeps the good one', () => {
+    const { updated, removed } = removeXmlBlock(REALISTIC_PROFILE, 'userPermissions', 'name', 'BadPermission');
+    expect(removed).to.be.true;
+    expect(updated).to.include('ApiEnabled');
+    expect(updated).not.to.include('BadPermission');
+  });
+
+  it('removeProfileActionOverridesWithMissingRecordType — removes missing RT, keeps valid RT', () => {
+    const existingRTs = new Set(['Account.Good_RT']);
+    const { updated, removedRecordTypes } = removeProfileActionOverridesWithMissingRecordType(
+      REALISTIC_PROFILE,
+      existingRTs,
+      []
+    );
+    expect(removedRecordTypes).to.include('Account.Bad_RT');
+    expect(removedRecordTypes).not.to.include('Account.Good_RT');
+    expect(updated).to.include('GoodFlexiPage'); // block with good RT stays
+    expect(updated).not.to.include('SomeFlexiPage'); // block with bad RT removed
+  });
+
+  it('removeProfileActionOverridesWithMissingRecordType — keeps RT that is whitelisted (being deployed)', () => {
+    const existingRTs = new Set<string>(); // empty — RT not in org
+    const { updated, removedRecordTypes } = removeProfileActionOverridesWithMissingRecordType(
+      REALISTIC_PROFILE,
+      existingRTs,
+      ['Account.Good_RT'] // but it IS in the promotion JSON
+    );
+    expect(removedRecordTypes).not.to.include('Account.Good_RT');
+    expect(updated).to.include('GoodFlexiPage'); // whitelisted block preserved
+  });
+
+  it('removeProfileActionOverridesWithMissingObject — removes missing custom object block, keeps standard object', () => {
+    const existingObjects = new Set<string>(); // Bad_Object__c not in org
+    const { updated, removedObjects } = removeProfileActionOverridesWithMissingObject(
+      REALISTIC_PROFILE,
+      existingObjects,
+      []
+    );
+    expect(removedObjects).to.include('Bad_Object__c');
+    // Account is a standard object (no __c) — should never be removed
+    expect(updated).to.include('Account.Good_RT'); // Account block stays
+  });
+
+  it('removeProfileActionOverridesWithMissingObject — keeps custom object that is whitelisted', () => {
+    const existingObjects = new Set<string>(); // not in org
+    const { removedObjects } = removeProfileActionOverridesWithMissingObject(REALISTIC_PROFILE, existingObjects, [
+      'Bad_Object__c',
+    ]);
+    expect(removedObjects).not.to.include('Bad_Object__c'); // whitelisted — keep it
   });
 });

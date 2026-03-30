@@ -373,7 +373,7 @@ function removeProfileActionOverrideByPageObjectFromXml(
 // Removes profileActionOverrides blocks whose <pageOrSobjectType> is a custom object that
 // does NOT exist in the org and is NOT being deployed in this promotion.
 // Standard objects (no __c suffix) are always kept — they always exist.
-function removeProfileActionOverridesWithMissingObject(
+export function removeProfileActionOverridesWithMissingObject(
   xmlContent: string,
   existingObjects: Set<string>,
   whitelistedObjects: string[]
@@ -398,7 +398,7 @@ function removeProfileActionOverridesWithMissingObject(
 // active RecordType set. Returns the updated XML and the list of invalid RT values removed.
 // Salesforce doesn't report the specific RecordType name in the error, so we query the org
 // for all active RecordTypes and surgically remove only the blocks that reference missing ones.
-function removeProfileActionOverridesWithMissingRecordType(
+export function removeProfileActionOverridesWithMissingRecordType(
   xmlContent: string,
   existingRecordTypes: Set<string>,
   whitelistedRecordTypes: string[]
