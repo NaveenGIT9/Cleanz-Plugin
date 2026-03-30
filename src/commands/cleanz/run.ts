@@ -1994,6 +1994,42 @@ async function runBatchDeploy(
 // Extracted to keep the run() method under the complexity limit.
 // ===============================================================
 
+// Returns the set of valid org aliases + usernames from sf org list.
+// Returns empty set if the CLI call fails — callers treat empty as "skip validation".
+function getAuthenticatedOrgs(): Promise<Set<string>> {
+  return new Promise((resolve) => {
+    const proc = spawn('sf', ['org', 'list', '--json'], { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve(new Set());
+    }, 15_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+          result?: {
+            nonScratchOrgs?: Array<{ alias?: string; username?: string }>;
+            scratchOrgs?: Array<{ alias?: string; username?: string }>;
+          };
+        };
+        const valid = new Set<string>();
+        for (const org of [...(json?.result?.nonScratchOrgs ?? []), ...(json?.result?.scratchOrgs ?? [])]) {
+          if (org.alias) valid.add(org.alias);
+          if (org.username) valid.add(org.username);
+        }
+        resolve(valid);
+      } catch {
+        resolve(new Set());
+      }
+    });
+  });
+}
+
 async function resolveInputs(
   log: (msg: string) => void,
   jsonPathFlag: string,
@@ -2010,11 +2046,16 @@ async function resolveInputs(
   }
   log('   JSON file found.\n');
 
-  let targetOrg = targetOrgFlag;
-  if (!targetOrg) {
+  // eslint-disable-next-line no-await-in-loop
+  const validOrgs = await getAuthenticatedOrgs();
+  const hasOrgList = validOrgs.size > 0;
+  if (!hasOrgList) log('   (Could not retrieve org list — skipping alias validation)\n');
+
+  let targetOrg = targetOrgFlag.trim();
+  while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
+    if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
     // eslint-disable-next-line no-await-in-loop
-    targetOrg = await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ');
-    targetOrg = targetOrg.trim();
+    targetOrg = (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
   return { promotionJsonPath, targetOrg };
