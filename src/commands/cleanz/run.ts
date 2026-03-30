@@ -190,6 +190,26 @@ function getRootNodeName(xmlContent: string): string {
   return match ? match[1] : 'PermissionSet';
 }
 
+function writeConclusionFile(log: (msg: string) => void, content: string, repoPath: string): void {
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: repoPath }).toString().trim();
+    const safeBranch = branch.replace(/\//g, '-');
+    const now = new Date();
+    const istMs = now.getTime() + (5 * 60 + 30) * 60 * 1000;
+    const ist = new Date(istMs);
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const ts = `${ist.getUTCFullYear()}-${pad(ist.getUTCMonth() + 1)}-${pad(ist.getUTCDate())}_${pad(
+      ist.getUTCHours()
+    )}-${pad(ist.getUTCMinutes())}-${pad(ist.getUTCSeconds())}`;
+    const fileName = `${safeBranch}-Conclusion-${ts}_IST.txt`;
+    const filePath = path.join(repoPath, fileName);
+    fs.writeFileSync(filePath, content, 'utf8');
+    log(`Conclusion file      : ${filePath}`);
+  } catch (e) {
+    log(`Could not save conclusion file: ${String(e)}`);
+  }
+}
+
 function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord[]): void {
   const fixedPermSets = summary.filter((r) => r.Type === 'PermissionSet' && r.RemovedFields);
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
@@ -2338,9 +2358,16 @@ export default class DeployAndFix extends SfCommand<void> {
       (r) => r.Status !== 'Success' && r.Status !== 'No Change' && r.Status !== 'Fixed & Committed'
     );
 
-    log('\n======================================================');
-    log('CONCLUSION');
-    log('======================================================\n');
+    // Capturing log — writes to terminal AND accumulates for the conclusion file.
+    const conclusionLines: string[] = [];
+    const clog = (msg: string): void => {
+      log(msg);
+      conclusionLines.push(msg);
+    };
+
+    clog('\n======================================================');
+    clog('CONCLUSION');
+    clog('======================================================\n');
 
     const tableHeaders = ['#', 'Type', 'Name', 'Status', 'Removed', 'Skipped'];
     const tableRows = summary.map((r, i) => [
@@ -2351,25 +2378,27 @@ export default class DeployAndFix extends SfCommand<void> {
       r.RemovedFields ? `${r.RemovedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
       r.SkippedFields ? `${r.SkippedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
     ]);
-    log(buildAsciiTable(tableHeaders, tableRows));
+    clog(buildAsciiTable(tableHeaders, tableRows));
 
-    logRemovedRefsDetail(log, summary);
+    logRemovedRefsDetail(clog, summary);
 
     if (needsAttention.length > 0) {
-      log(`\nNeeds manual attention (${needsAttention.length}):`);
+      clog(`\nNeeds manual attention (${needsAttention.length}):`);
       needsAttention.forEach((r) => {
-        log(`   - [${r.Type}] ${r.Name} — ${r.Status}`);
+        clog(`   - [${r.Type}] ${r.Name} — ${r.Status}`);
         if (r.UnhandledErrors) {
           r.UnhandledErrors.split('; ')
             .filter(Boolean)
-            .forEach((e) => log(`     Unhandled error: ${e}`));
+            .forEach((e) => clog(`     Unhandled error: ${e}`));
         }
       });
     }
 
-    log(
+    clog(
       `\nPassed clean: ${passedClean.length}  |  Fixed & committed: ${hadFixes.length}  |  Needs manual attention: ${needsAttention.length}`
     );
+
+    writeConclusionFile(log, conclusionLines.join('\n'), REPO_PATH);
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
