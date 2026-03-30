@@ -188,6 +188,41 @@ function getRootNodeName(xmlContent: string): string {
   return match ? match[1] : 'PermissionSet';
 }
 
+function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord[]): void {
+  const fixedPermSets = summary.filter((r) => r.Type === 'PermissionSet' && r.RemovedFields);
+  const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
+  if (fixedPermSets.length === 0 && fixedProfiles.length === 0) return;
+
+  log('\nRemoved refs detail:');
+  if (fixedPermSets.length > 0) {
+    log('\nPERMISSION SETS');
+    const psRows = fixedPermSets.flatMap((r) =>
+      r.RemovedFields.split('; ')
+        .filter(Boolean)
+        .map((ref) => [r.Name, ref])
+    );
+    log(buildAsciiTable(['Name', 'Removed Ref'], psRows));
+  }
+  if (fixedProfiles.length > 0) {
+    log('\nPROFILES');
+    const profileRows = fixedProfiles.flatMap((r) =>
+      r.RemovedFields.split('; ')
+        .filter(Boolean)
+        .map((ref) => [r.Name, ref])
+    );
+    log(buildAsciiTable(['Name', 'Removed Ref'], profileRows));
+  }
+}
+
+function buildAsciiTable(headers: string[], rows: string[][]): string {
+  const allRows = [headers, ...rows];
+  const colWidths = headers.map((_, colIdx) => Math.max(...allRows.map((row) => (row[colIdx] ?? '').length)));
+  const sep = '+' + colWidths.map((w) => '-'.repeat(w + 2)).join('+') + '+';
+  const formatRow = (cells: string[]): string =>
+    '|' + cells.map((c, i) => ` ${(c ?? '').padEnd(colWidths[i])} `).join('|') + '|';
+  return [sep, formatRow(headers), sep, ...rows.map(formatRow), sep].join('\n');
+}
+
 // ===============================================================
 // XML BLOCK REMOVERS
 // ===============================================================
@@ -2276,26 +2311,29 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log('\n======================================================');
     log('CONCLUSION');
-    log('======================================================');
+    log('======================================================\n');
 
-    log(`\nPassed without any errors (${passedClean.length}):`);
-    if (passedClean.length === 0) {
-      log('   (none)');
-    } else {
-      passedClean.forEach((r) => log(`   - [${r.Type}] ${r.Name}`));
-    }
+    const tableHeaders = ['#', 'Type', 'Name', 'Status', 'Removed', 'Skipped'];
+    const tableRows = summary.map((r, i) => [
+      String(i + 1),
+      r.Type === 'PermissionSet' ? 'PermSet' : 'Profile',
+      r.Name,
+      r.Status,
+      r.RemovedFields ? `${r.RemovedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
+      r.SkippedFields ? `${r.SkippedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
+    ]);
+    log(buildAsciiTable(tableHeaders, tableRows));
 
-    log(`\nHad missing refs — fixed and committed (${hadFixes.length}):`);
-    if (hadFixes.length === 0) {
-      log('   (none)');
-    } else {
-      hadFixes.forEach((r) => log(`   - [${r.Type}] ${r.Name}: removed ${r.RemovedFields}`));
-    }
+    logRemovedRefsDetail(log, summary);
 
     if (needsAttention.length > 0) {
       log(`\nNeeds manual attention (${needsAttention.length}):`);
-      needsAttention.forEach((r) => log(`   - [${r.Type}] ${r.Name}: ${r.Status}`));
+      needsAttention.forEach((r) => log(`   - [${r.Type}] ${r.Name} — ${r.Status}`));
     }
+
+    log(
+      `\nPassed clean: ${passedClean.length}  |  Fixed & committed: ${hadFixes.length}  |  Needs manual attention: ${needsAttention.length}`
+    );
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
