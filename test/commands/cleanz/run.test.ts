@@ -17,6 +17,7 @@
 import { expect } from 'chai';
 import {
   buildAsciiTable,
+  deduplicateXmlBlocks,
   formatXml,
   getRootNodeName,
   maskPermSetFalsePositives,
@@ -206,6 +207,94 @@ describe('maskPermSetFalsePositives', () => {
     );
     const result = maskPermSetFalsePositives(multi);
     expect(result).not.to.include('<customMetadataTypeAccesses>');
+  });
+});
+
+// ─── deduplicateXmlBlocks ────────────────────────────────────────────────────
+
+describe('deduplicateXmlBlocks', () => {
+  it('removes a duplicate fieldPermissions block', () => {
+    const xml =
+      [
+        '    <fieldPermissions>',
+        '        <editable>true</editable>',
+        '        <field>Account.My_Field__c</field>',
+        '        <readable>true</readable>',
+        '    </fieldPermissions>',
+        '    <fieldPermissions>',
+        '        <editable>false</editable>',
+        '        <field>Account.My_Field__c</field>',
+        '        <readable>true</readable>',
+        '    </fieldPermissions>',
+      ].join('\n') + '\n';
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(1);
+    // first occurrence kept, second removed
+    expect((updated.match(/Account\.My_Field__c/g) ?? []).length).to.equal(1);
+  });
+
+  it('keeps unique blocks untouched', () => {
+    const xml =
+      [
+        '    <classAccesses>',
+        '        <apexClass>ClassA</apexClass>',
+        '        <enabled>true</enabled>',
+        '    </classAccesses>',
+        '    <classAccesses>',
+        '        <apexClass>ClassB</apexClass>',
+        '        <enabled>true</enabled>',
+        '    </classAccesses>',
+      ].join('\n') + '\n';
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(0);
+    expect(updated).to.equal(xml);
+  });
+
+  it('removes duplicate userPermissions', () => {
+    const xml =
+      [
+        '    <userPermissions>',
+        '        <enabled>true</enabled>',
+        '        <name>ApiEnabled</name>',
+        '    </userPermissions>',
+        '    <userPermissions>',
+        '        <enabled>false</enabled>',
+        '        <name>ApiEnabled</name>',
+        '    </userPermissions>',
+      ].join('\n') + '\n';
+    const { removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(1);
+  });
+
+  it('handles multiple different duplicate types in one file', () => {
+    const xml =
+      [
+        '    <flowAccesses>',
+        '        <enabled>true</enabled>',
+        '        <flow>Flow1</flow>',
+        '    </flowAccesses>',
+        '    <flowAccesses>',
+        '        <enabled>true</enabled>',
+        '        <flow>Flow1</flow>',
+        '    </flowAccesses>',
+        '    <pageAccesses>',
+        '        <apexPage>Page1</apexPage>',
+        '        <enabled>true</enabled>',
+        '    </pageAccesses>',
+        '    <pageAccesses>',
+        '        <apexPage>Page1</apexPage>',
+        '        <enabled>true</enabled>',
+        '    </pageAccesses>',
+      ].join('\n') + '\n';
+    const { removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(2);
+  });
+
+  it('returns removedCount=0 and unchanged xml when no duplicates', () => {
+    const xml = '<PermissionSet></PermissionSet>';
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(0);
+    expect(updated).to.equal(xml);
   });
 });
 

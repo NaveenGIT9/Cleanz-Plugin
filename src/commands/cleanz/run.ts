@@ -1761,6 +1761,97 @@ export function maskPermSetFalsePositives(xmlContent: string): string {
   );
 }
 
+// ===============================================================
+// DEDUPLICATION
+// Block types where duplication is unambiguous: each entry should
+// appear at most once for a given key value. layoutAssignments and
+// profileActionOverrides are intentionally excluded — both can have
+// multiple valid blocks for the same object/page (different recordType
+// or formFactor), so keying on a single field would be incorrect.
+// ===============================================================
+
+const DEDUP_BLOCKS: Array<{ blockTag: string; keyTag: string }> = [
+  { blockTag: 'fieldPermissions', keyTag: 'field' },
+  { blockTag: 'classAccesses', keyTag: 'apexClass' },
+  { blockTag: 'pageAccesses', keyTag: 'apexPage' },
+  { blockTag: 'tabVisibilities', keyTag: 'tab' },
+  { blockTag: 'tabSettings', keyTag: 'tab' },
+  { blockTag: 'objectPermissions', keyTag: 'object' },
+  { blockTag: 'applicationVisibilities', keyTag: 'application' },
+  { blockTag: 'flowAccesses', keyTag: 'flow' },
+  { blockTag: 'userPermissions', keyTag: 'name' },
+  { blockTag: 'recordTypeVisibilities', keyTag: 'recordType' },
+  { blockTag: 'customMetadataTypeAccesses', keyTag: 'name' },
+  { blockTag: 'categoryGroupVisibilities', keyTag: 'dataCategoryGroup' },
+];
+
+export function deduplicateXmlBlocks(xmlContent: string): { updated: string; removedCount: number } {
+  let updated = xmlContent;
+  let removedCount = 0;
+
+  for (const { blockTag, keyTag } of DEDUP_BLOCKS) {
+    const seen = new Set<string>();
+    const escapedBlock = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+    const innerPattern = `(?:(?!<${escapedBlock}>)[\\s\\S])*?`;
+    const blockRegex = new RegExp(
+      `[ \\t]*<${escapedBlock}>${innerPattern}<${keyTag}>([^<]*)</${keyTag}>${innerPattern}</${escapedBlock}>[ \\t]*\\r?\\n?`,
+      'g'
+    );
+    updated = updated.replace(blockRegex, (match: string, keyValue: string) => {
+      const key = keyValue.trim();
+      if (seen.has(key)) {
+        removedCount++;
+        return '';
+      }
+      seen.add(key);
+      return match;
+    });
+  }
+
+  return { updated, removedCount };
+}
+
+function runDeduplicationPrePass(
+  log: (msg: string) => void,
+  batchItems: BatchItem[],
+  repoPath: string,
+  dryRun: boolean
+): void {
+  log('\n--- Deduplication Pre-Pass ---');
+  const modifiedFiles: string[] = [];
+
+  for (const item of batchItems) {
+    if (!fs.existsSync(item.filePath)) continue;
+    const xml = fs.readFileSync(item.filePath, 'utf8');
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    if (removedCount > 0) {
+      log(`   [Dedup] ${item.itemName}: removed ${removedCount} duplicate block(s)`);
+      saveXmlClean(updated, item.filePath, getRootNodeName(xml));
+      modifiedFiles.push(item.filePath);
+    }
+  }
+
+  if (modifiedFiles.length === 0) {
+    log('   [Dedup] No duplicate blocks found.\n');
+    return;
+  }
+
+  log(`   [Dedup] Fixed ${modifiedFiles.length} file(s).`);
+  if (dryRun) {
+    log('   [Dedup] Dry run — skipped commit.\n');
+    return;
+  }
+  try {
+    for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
+    execSync(`git commit -m "Dedup: remove duplicate XML blocks from ${modifiedFiles.length} file(s)"`, {
+      cwd: repoPath,
+    });
+    log('   [Dedup] Committed deduplication fixes.\n');
+  } catch {
+    log('   [Dedup] Commit failed or nothing new to stage.\n');
+  }
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
@@ -2347,6 +2438,8 @@ export default class DeployAndFix extends SfCommand<void> {
         done: false,
       })),
     ];
+
+    runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
 
     log('\n######################################################');
     log(`  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${profiles.length} Profile(s)`);
