@@ -151,7 +151,7 @@ function prompt(question: string): Promise<string> {
 // XML FORMATTING & SAVING
 // ===============================================================
 
-function formatXml(xml: string): string {
+export function formatXml(xml: string): string {
   let formatted = '';
   let indent = 0;
   const lines = xml.replace(/>\s*</g, '>\n<').split('\n');
@@ -185,7 +185,7 @@ function saveXmlClean(xmlContent: string, filePath: string, metadataType: string
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
-function getRootNodeName(xmlContent: string): string {
+export function getRootNodeName(xmlContent: string): string {
   const match = /<(\w+)\s+xmlns=/i.exec(xmlContent) ?? /<(\w+)>/i.exec(xmlContent);
   return match ? match[1] : 'PermissionSet';
 }
@@ -256,7 +256,7 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   }
 }
 
-function buildAsciiTable(headers: string[], rows: string[][]): string {
+export function buildAsciiTable(headers: string[], rows: string[][]): string {
   const allRows = [headers, ...rows];
   const colWidths = headers.map((_, colIdx) => Math.max(...allRows.map((row) => (row[colIdx] ?? '').length)));
   const sep = '+' + colWidths.map((w) => '-'.repeat(w + 2)).join('+') + '+';
@@ -283,7 +283,7 @@ function removeFieldPermissionsFromXml(
   return { updated, removed: updated !== xmlContent };
 }
 
-function removeXmlBlock(
+export function removeXmlBlock(
   xmlContent: string,
   blockTag: string,
   keyTag: string,
@@ -1460,7 +1460,8 @@ function sweepOtherFiles(
   refs: RemovedRef[],
   skipPaths: Set<string>,
   allFilePaths: string[],
-  repoPath: string
+  repoPath: string,
+  dryRun: boolean
 ): void {
   if (refs.length === 0) return;
 
@@ -1512,6 +1513,10 @@ function sweepOtherFiles(
   }
 
   const refLabels = refs.map((r) => r.label).join(', ');
+  if (dryRun) {
+    log(`   [Sweep] Dry run — skipped commit for ${modifiedFiles.length} file(s).`);
+    return;
+  }
   try {
     for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
     execSync(`git commit -m "Cross-file sweep: remove [${refLabels}] from ${modifiedFiles.length} other file(s)"`, {
@@ -1723,7 +1728,7 @@ function maskStandardApps(xmlContent: string): string {
   );
 }
 
-function maskProfileFalsePositives(xmlContent: string): string {
+export function maskProfileFalsePositives(xmlContent: string): string {
   // Mask several block types from profiles before each dry-run.
   // Copado real deployments only enforce flowAccesses, userPermissions, and
   // profileActionOverrides — all other sections are either stripped by Copado
@@ -1745,7 +1750,7 @@ function maskProfileFalsePositives(xmlContent: string): string {
   return xml;
 }
 
-function maskPermSetFalsePositives(xmlContent: string): string {
+export function maskPermSetFalsePositives(xmlContent: string): string {
   // customMetadataTypeAccesses deploys successfully in Copado even with unknown CMT names
   // (confirmed via real deployment testing on profiles). Same behaviour applies to permission
   // sets — mask before dry-run so it does not consume the one-error-per-component slot.
@@ -1819,22 +1824,24 @@ function sweepPerItemRefs(
   log: (msg: string) => void,
   perItemRefs: Map<string, RemovedRef[]>,
   allFilePaths: string[],
-  repoPath: string
+  repoPath: string,
+  dryRun: boolean
 ): void {
   for (const [sourceFilePath, refs] of perItemRefs) {
-    sweepOtherFiles(log, refs, new Set([sourceFilePath]), allFilePaths, repoPath);
+    sweepOtherFiles(log, refs, new Set([sourceFilePath]), allFilePaths, repoPath, dryRun);
   }
 }
 
 function markPassedItems(
   log: (msg: string) => void,
   activeItems: BatchItem[],
-  failuresByItem: Map<string, ComponentFailure[]>
+  failuresByItem: Map<string, ComponentFailure[]>,
+  dryRun: boolean
 ): void {
   for (const item of activeItems) {
     if ((failuresByItem.get(item.itemName) ?? []).length === 0) {
       log(`   [${item.itemName}] No failures this iteration — passed.`);
-      item.status = item.allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
+      item.status = item.allRemovedFields.length > 0 ? (dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed') : 'Success';
       item.done = true;
     }
   }
@@ -1847,7 +1854,8 @@ async function processItemsInIteration(
   whitelist: WhitelistMap,
   targetOrg: string,
   repoPath: string,
-  verbose: boolean
+  verbose: boolean,
+  dryRun: boolean
 ): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean }> {
   const vlog: (msg: string) => void = verbose ? log : (): void => {};
   // Track refs per source file so the sweep skips only the source file, not all modified files.
@@ -1917,17 +1925,22 @@ async function processItemsInIteration(
     perItemRefs.set(item.filePath, removedRefs);
     saveXmlClean(updatedXml, item.filePath, rootNode);
 
-    try {
-      execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-      execSync(
-        `git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`,
-        { cwd: repoPath }
-      );
-      log(`   Committed changes for: ${item.itemName}`);
-      item.status = 'Fixed & Committed';
-    } catch {
-      log(`   Nothing to commit or commit failed for: ${item.itemName}`);
-      item.status = 'Commit Failed';
+    if (dryRun) {
+      log(`   Dry run — skipped commit for: ${item.itemName}`);
+      item.status = 'Fixed (Dry Run)';
+    } else {
+      try {
+        execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+        execSync(
+          `git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`,
+          { cwd: repoPath }
+        );
+        log(`   Committed changes for: ${item.itemName}`);
+        item.status = 'Fixed & Committed';
+      } catch {
+        log(`   Nothing to commit or commit failed for: ${item.itemName}`);
+        item.status = 'Commit Failed';
+      }
     }
   }
 
@@ -1955,7 +1968,8 @@ async function runBatchDeploy(
   totalDeploys: TotalDeploys,
   timeoutMins: number,
   maxRetries: number,
-  verbose: boolean
+  verbose: boolean,
+  dryRun: boolean
 ): Promise<SummaryRecord[]> {
   validateBatchItems(log, batchItems);
 
@@ -2053,7 +2067,7 @@ async function runBatchDeploy(
 
     consecutiveEmptyRetries = 0;
     const failuresByItem = routeFailuresToItems(failures, activeItems);
-    markPassedItems(log, activeItems, failuresByItem);
+    markPassedItems(log, activeItems, failuresByItem, dryRun);
 
     // eslint-disable-next-line no-await-in-loop
     const { perItemRefs, anyProgress } = await processItemsInIteration(
@@ -2063,7 +2077,8 @@ async function runBatchDeploy(
       whitelist,
       targetOrg,
       repoPath,
-      verbose
+      verbose,
+      dryRun
     );
 
     if (!anyProgress && batchItems.some((i) => !i.done)) {
@@ -2078,7 +2093,7 @@ async function runBatchDeploy(
     // Sweep each item's removed refs to ALL other files except that item's own file.
     // This ensures e.g. Profile B gets swept even if it was also modified this iteration
     // for a different error — it would otherwise be missed if we skipped all modified files.
-    sweepPerItemRefs(log, perItemRefs, allFilePaths, repoPath);
+    sweepPerItemRefs(log, perItemRefs, allFilePaths, repoPath, dryRun);
   }
 
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
@@ -2190,11 +2205,17 @@ export default class DeployAndFix extends SfCommand<void> {
       summary: messages.getMessage('flags.verbose.summary'),
       default: false,
     }),
+    'dry-run': Flags.boolean({
+      char: 'd',
+      summary: messages.getMessage('flags.dry-run.summary'),
+      default: false,
+    }),
   };
 
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
     const verbose = flags.verbose;
+    const dryRun = flags['dry-run'];
     const log = (msg: string): void => {
       this.log(msg);
     };
@@ -2203,6 +2224,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\n======================================================');
     log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
     log('======================================================\n');
+    if (dryRun) log('*** DRY RUN MODE — files will be modified but NO commits will be made ***\n');
 
     // eslint-disable-next-line no-await-in-loop
     const { promotionJsonPath, targetOrg } = await resolveInputs(
@@ -2343,7 +2365,8 @@ export default class DeployAndFix extends SfCommand<void> {
       totalDeploys,
       DEPLOY_TIMEOUT_MINS,
       MAX_RETRIES,
-      verbose
+      verbose,
+      dryRun
     );
 
     // ================= FINAL SUMMARY =================
@@ -2432,26 +2455,29 @@ export default class DeployAndFix extends SfCommand<void> {
 
     // ================= SQUASH ALL SCRIPT COMMITS =================
     // Collapse every commit made by this script into a single clean commit.
-    try {
-      const currentHead = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
-      if (currentHead === startingCommit) {
-        log('\nNo commits were made — nothing to squash.');
-      } else {
-        // Count files actually changed between starting commit and now (before reset).
-        const changedFiles = execSync(`git diff --name-only ${startingCommit} HEAD`, { cwd: REPO_PATH })
-          .toString()
-          .trim()
-          .split('\n')
-          .filter(Boolean);
-        execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
-        const allRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
-        const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
-        execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
-        log(`\nSquashed all script commits into one: "${squashMsg}"`);
+    if (dryRun) {
+      log('\nDry run — no commits were made, skipping squash.');
+    } else
+      try {
+        const currentHead = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
+        if (currentHead === startingCommit) {
+          log('\nNo commits were made — nothing to squash.');
+        } else {
+          // Count files actually changed between starting commit and now (before reset).
+          const changedFiles = execSync(`git diff --name-only ${startingCommit} HEAD`, { cwd: REPO_PATH })
+            .toString()
+            .trim()
+            .split('\n')
+            .filter(Boolean);
+          execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
+          const allRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
+          const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
+          execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
+          log(`\nSquashed all script commits into one: "${squashMsg}"`);
+        }
+      } catch (e) {
+        log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
       }
-    } catch (e) {
-      log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
-    }
 
     const elapsedMs = Date.now() - startTime;
     const elapsedMins = Math.floor(elapsedMs / 60_000);

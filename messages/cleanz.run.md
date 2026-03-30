@@ -22,3 +22,7 @@ Target org username or alias.
 # flags.verbose.summary
 
 Print all individual deployment error details (useful for debugging).
+
+# flags.dry-run.summary
+
+Modify files to remove bad refs but skip all git commits (preview mode).
