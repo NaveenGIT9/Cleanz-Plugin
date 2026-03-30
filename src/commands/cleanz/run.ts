@@ -1899,7 +1899,9 @@ async function processItemsInIteration(
       unhandledErrors,
     } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
     const removedRefs = [...nsRefs, ...rtRefs, ...objRefs, ...perFailureRefs];
-    item.allRemovedFields.push(...removedRefs.map((r) => r.label));
+    for (const ref of removedRefs) {
+      if (!item.allRemovedFields.includes(ref.label)) item.allRemovedFields.push(ref.label);
+    }
     for (const e of unhandledErrors) {
       if (!item.allUnhandledErrors.includes(e)) item.allUnhandledErrors.push(e);
     }
