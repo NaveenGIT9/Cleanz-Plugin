@@ -61,6 +61,7 @@ type SummaryRecord = {
   Status: string;
   RemovedFields: string;
   SkippedFields: string;
+  UnhandledErrors: string;
 };
 
 type TotalDeploys = { value: number };
@@ -72,6 +73,7 @@ type BatchItem = {
   status: string;
   allRemovedFields: string[];
   allSkippedFields: string[];
+  allUnhandledErrors: string[];
   done: boolean;
 };
 
@@ -1317,10 +1319,11 @@ function processFailures(
   allSkippedFields: string[],
   metadataType: string,
   verbose: boolean
-): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[] } {
+): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[]; unhandledErrors: string[] } {
   let updatedXml = xmlContent;
   const removedRefs: RemovedRef[] = [];
   const skippedFields: string[] = [];
+  const unhandledErrors: string[] = [];
   const vlog: (msg: string) => void = verbose ? log : (): void => {};
 
   vlog(`   [DEBUG] Total failures this iteration: ${failures.length}`);
@@ -1398,9 +1401,10 @@ function processFailures(
     }
 
     log(`   Skipping unhandled error: ${err}`);
+    unhandledErrors.push(err);
   }
 
-  return { xmlContent: updatedXml, removedRefs, skippedFields };
+  return { xmlContent: updatedXml, removedRefs, skippedFields, unhandledErrors };
 }
 
 // ===============================================================
@@ -1852,9 +1856,13 @@ async function processItemsInIteration(
       xmlContent: updatedXml,
       removedRefs: perFailureRefs,
       skippedFields,
+      unhandledErrors,
     } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
     const removedRefs = [...nsRefs, ...rtRefs, ...objRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
+    for (const e of unhandledErrors) {
+      if (!item.allUnhandledErrors.includes(e)) item.allUnhandledErrors.push(e);
+    }
 
     if (removedRefs.length === 0) {
       item.status =
@@ -2039,6 +2047,7 @@ async function runBatchDeploy(
     Status: item.status,
     RemovedFields: item.allRemovedFields.join('; '),
     SkippedFields: item.allSkippedFields.join('; '),
+    UnhandledErrors: item.allUnhandledErrors.join('; '),
   }));
 }
 
@@ -2260,6 +2269,7 @@ export default class DeployAndFix extends SfCommand<void> {
         status: 'No Change',
         allRemovedFields: [] as string[],
         allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
         done: false,
       })),
       ...profiles.map((n) => ({
@@ -2269,6 +2279,7 @@ export default class DeployAndFix extends SfCommand<void> {
         status: 'No Change',
         allRemovedFields: [] as string[],
         allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
         done: false,
       })),
     ];
@@ -2346,7 +2357,14 @@ export default class DeployAndFix extends SfCommand<void> {
 
     if (needsAttention.length > 0) {
       log(`\nNeeds manual attention (${needsAttention.length}):`);
-      needsAttention.forEach((r) => log(`   - [${r.Type}] ${r.Name} — ${r.Status}`));
+      needsAttention.forEach((r) => {
+        log(`   - [${r.Type}] ${r.Name} — ${r.Status}`);
+        if (r.UnhandledErrors) {
+          r.UnhandledErrors.split('; ')
+            .filter(Boolean)
+            .forEach((e) => log(`     Unhandled error: ${e}`));
+        }
+      });
     }
 
     log(
