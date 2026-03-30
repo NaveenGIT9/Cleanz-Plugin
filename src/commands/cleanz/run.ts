@@ -1121,7 +1121,7 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     refType: 'flexipage',
     whitelistKey: 'flexipages',
     removeFn: removeProfileActionOverrideFromXml,
-    displayTag: '[FlexiPage]',
+    displayTag: '[ProfileActionOverride] FlexiPage:',
   },
 ];
 
@@ -1291,7 +1291,11 @@ function processRegisteredFailure(
       return {
         handled: true,
         xmlContent: updated,
-        removedRef: { type: handler.refType, name, label: `${handler.displayTag} ${name}` },
+        removedRef: {
+          type: handler.refType,
+          name,
+          label: handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`,
+        },
       };
     }
     log(`   ${handler.label} block not found in XML: ${name} — already removed or not present.`);
