@@ -284,6 +284,39 @@ function removeProfileActionOverrideByRecordTypeFromXml(
 ): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'profileActionOverrides', 'recordType', recordTypeName);
 }
+// Removes profileActionOverrides blocks keyed by their <pageOrSobjectType> value.
+// Used during whitelist masking: if an object is in the promotion JSON (being deployed),
+// its profileActionOverrides block is masked before each dry-run.
+function removeProfileActionOverrideByPageObjectFromXml(
+  xmlContent: string,
+  objectName: string
+): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'profileActionOverrides', 'pageOrSobjectType', objectName);
+}
+// Removes profileActionOverrides blocks whose <pageOrSobjectType> is a custom object that
+// does NOT exist in the org and is NOT being deployed in this promotion.
+// Standard objects (no __c suffix) are always kept — they always exist.
+function removeProfileActionOverridesWithMissingObject(
+  xmlContent: string,
+  existingObjects: Set<string>,
+  whitelistedObjects: string[]
+): { updated: string; removedObjects: string[] } {
+  const inner = '(?:(?!<profileActionOverrides>)[\\s\\S])*?';
+  const blockRegex = new RegExp(
+    `[ \\t]*<profileActionOverrides>${inner}<pageOrSobjectType>([^<]*)</pageOrSobjectType>${inner}</profileActionOverrides>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const removedObjects: string[] = [];
+  const updated = xmlContent.replace(blockRegex, (match: string, obj: string) => {
+    const o = obj.trim();
+    if (!o.endsWith('__c')) return match; // standard object — always exists, keep
+    if (existingObjects.has(o)) return match; // exists in org — keep
+    if (whitelistedObjects.includes(o)) return match; // being deployed — keep
+    removedObjects.push(o);
+    return '';
+  });
+  return { updated, removedObjects };
+}
 // Removes profileActionOverrides blocks whose <recordType> value is NOT in the org's
 // active RecordType set. Returns the updated XML and the list of invalid RT values removed.
 // Salesforce doesn't report the specific RecordType name in the error, so we query the org
@@ -359,6 +392,8 @@ function removeObjectPermissionFlag(
 // Set entries are "SobjectType.DeveloperName" (e.g. "Contact.Sales_Rep") — the same
 // format used in profileActionOverrides <recordType> elements.
 const recordTypeCache = new Map<string, Set<string>>(); // org → Set of active "Object.DevName"
+// Keyed by org alias → object API name → exists? Populated lazily per queried object.
+const objectExistenceCache = new Map<string, Map<string, boolean>>();
 
 // Caches for namespace queries (keyed by org alias or "org:namespace")
 const namespaceCache = new Map<string, boolean>(); // "org:namespace" → installed?
@@ -443,6 +478,43 @@ async function loadExistingRecordTypes(log: (msg: string) => void, targetOrg: st
   recordTypeCache.set(targetOrg, set);
   log(`   [RT Check] Found ${set.size} active RecordType(s) in org`);
   return set;
+}
+
+// Checks which of the given custom object API names exist in the org using a targeted
+// EntityDefinition Tooling API query. Standard objects (no __c suffix) are assumed to always
+// exist and are never queried. Results are cached per org so subsequent profile files pay no
+// additional SF CLI cost. Querying EntityDefinition checks metadata existence — not data
+// access — so the deployment user's object-level permissions do not affect the result.
+async function checkObjectsExistInOrg(
+  log: (msg: string) => void,
+  targetOrg: string,
+  objectNames: string[]
+): Promise<Set<string>> {
+  if (!objectExistenceCache.has(targetOrg)) objectExistenceCache.set(targetOrg, new Map());
+  const orgCache = objectExistenceCache.get(targetOrg)!;
+
+  // Standard objects always exist — add them to result without querying.
+  const result = new Set<string>(objectNames.filter((n) => !n.endsWith('__c')));
+  const customOnes = objectNames.filter((n) => n.endsWith('__c'));
+
+  const toQuery = customOnes.filter((n) => !orgCache.has(n));
+  if (toQuery.length > 0) {
+    log(`   [Obj Check] Querying org for ${toQuery.length} custom object(s): ${toQuery.join(', ')}`);
+    const inClause = toQuery.map((n) => `'${n}'`).join(', ');
+    type ObjRec = { QualifiedApiName: string };
+    const records = await toolingQuery<ObjRec>(
+      targetOrg,
+      `"SELECT QualifiedApiName FROM EntityDefinition WHERE QualifiedApiName IN (${inClause})"`
+    );
+    const found = new Set(records.map((r) => r.QualifiedApiName));
+    for (const obj of toQuery) orgCache.set(obj, found.has(obj));
+    log(`   [Obj Check] ${found.size}/${toQuery.length} custom object(s) exist in org`);
+  }
+
+  for (const obj of customOnes) {
+    if (orgCache.get(obj)) result.add(obj);
+  }
+  return result;
 }
 
 // Loads ALL installed package namespace prefixes for an org in one query and caches the Set.
@@ -1248,6 +1320,12 @@ function processFailures(
       continue;
     }
 
+    // ── profileActionOverrides pageOrSobjectType error — handled by applyObjectPagePreCheck ──
+    if (/You must specify a page or object/i.test(err)) {
+      log('   [ProfileActionOverride] page/object error — handled by pre-check');
+      continue;
+    }
+
     // ── CustomField ───────────────────────────────────────────────
     const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
     if (fieldResult.handled) {
@@ -1469,6 +1547,58 @@ async function applyRecordTypePreCheck(
   };
 }
 
+// Fires when "You must specify a page or object" error appears for a Profile.
+// Collects all <pageOrSobjectType> values from profileActionOverrides blocks, queries the
+// org for which custom objects actually exist, and removes only blocks whose object is
+// missing AND not being deployed in this promotion. Standard objects are never removed.
+async function applyObjectPagePreCheck(
+  log: (msg: string) => void,
+  failures: ComponentFailure[],
+  xmlContent: string,
+  targetOrg: string,
+  itemName: string,
+  whitelist: WhitelistMap
+): Promise<{ xml: string; refs: RemovedRef[] }> {
+  const OBJ_ERROR = /You must specify a page or object/i;
+  if (!failures.some((f) => OBJ_ERROR.test(f.problem ?? f.error ?? ''))) return { xml: xmlContent, refs: [] };
+
+  // Extract all pageOrSobjectType values present in the file.
+  const inner = '(?:(?!<profileActionOverrides>)[\\s\\S])*?';
+  const matches = [
+    ...xmlContent.matchAll(
+      new RegExp(
+        `<profileActionOverrides>${inner}<pageOrSobjectType>([^<]*)</pageOrSobjectType>${inner}</profileActionOverrides>`,
+        'g'
+      )
+    ),
+  ];
+  const objectNames = [...new Set(matches.map((m) => m[1].trim()).filter(Boolean))];
+  if (objectNames.length === 0) return { xml: xmlContent, refs: [] };
+
+  const existingObjects = await checkObjectsExistInOrg(log, targetOrg, objectNames);
+  const { updated, removedObjects } = removeProfileActionOverridesWithMissingObject(
+    xmlContent,
+    existingObjects,
+    whitelist.objects
+  );
+  if (removedObjects.length === 0) {
+    log(`   [Obj Check] No invalid profileActionOverrides (pageOrSobjectType) found in: ${itemName}`);
+    return { xml: xmlContent, refs: [] };
+  }
+
+  log(
+    `   [Obj Check] Removed ${removedObjects.length} profileActionOverrides block(s) with missing object from: ${itemName}`
+  );
+  return {
+    xml: updated,
+    refs: removedObjects.map((o) => ({
+      type: 'recordTypeOverride' as RefType,
+      name: o,
+      label: `[ProfileActionOverride] pageOrSobjectType:${o}`,
+    })),
+  };
+}
+
 // ===============================================================
 // WHITELIST MASKING
 // Before each dry-run deploy, temporarily strip whitelisted entries
@@ -1490,6 +1620,7 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   for (const l of whitelist.layouts) xml = removeLayoutAssignmentFromXml(xml, l).updated;
   for (const fp of whitelist.flexipages) xml = removeProfileActionOverrideFromXml(xml, fp).updated;
   for (const rt of whitelist.recordTypes) xml = removeProfileActionOverrideByRecordTypeFromXml(xml, rt).updated;
+  for (const o of whitelist.objects) xml = removeProfileActionOverrideByPageObjectFromXml(xml, o).updated;
   return xml;
 }
 
@@ -1511,12 +1642,12 @@ function maskStandardApps(xmlContent: string): string {
 
 function maskProfileFalsePositives(xmlContent: string): string {
   // Mask several block types from profiles before each dry-run.
-  // Copado real deployments only enforce flowAccesses and userPermissions —
-  // all other sections are either stripped by Copado TRIM or cause
-  // unpredictable "insufficient access rights" errors (categoryGroupVisibilities)
-  // that cannot be detected upfront. Stripping these prevents them from
-  // consuming the one-error-per-component slot and blocking flow/userPerm
-  // discovery. The original XML is restored immediately after each dry-run.
+  // Copado real deployments only enforce flowAccesses, userPermissions, and
+  // profileActionOverrides — all other sections are either stripped by Copado
+  // TRIM or deploy successfully even with unknown values (customMetadataTypeAccesses)
+  // or cause unpredictable errors (categoryGroupVisibilities) that cannot be
+  // detected upfront. Stripping these prevents them from consuming the
+  // one-error-per-component slot. The original XML is restored after each dry-run.
   let xml = xmlContent;
   xml = xml.replace(/[ \t]*<applicationVisibilities>[\s\S]*?<\/applicationVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>[ \t]*\r?\n?/g, '');
@@ -1527,6 +1658,7 @@ function maskProfileFalsePositives(xmlContent: string): string {
   xml = xml.replace(/[ \t]*<recordTypeVisibilities>[\s\S]*?<\/recordTypeVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g, '');
   return xml;
 }
 
@@ -1654,12 +1786,21 @@ async function processItemsInIteration(
       item.itemName,
       whitelist
     );
+    // eslint-disable-next-line no-await-in-loop
+    const { xml: objXml, refs: objRefs } = await applyObjectPagePreCheck(
+      log,
+      itemFailures,
+      rtXml,
+      targetOrg,
+      item.itemName,
+      whitelist
+    );
     const {
       xmlContent: updatedXml,
       removedRefs: perFailureRefs,
       skippedFields,
-    } = processFailures(log, itemFailures, rtXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
-    const removedRefs = [...nsRefs, ...rtRefs, ...perFailureRefs];
+    } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
+    const removedRefs = [...nsRefs, ...rtRefs, ...objRefs, ...perFailureRefs];
     item.allRemovedFields.push(...removedRefs.map((r) => r.label));
 
     if (removedRefs.length === 0) {
