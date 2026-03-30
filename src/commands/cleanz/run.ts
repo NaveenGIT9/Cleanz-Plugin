@@ -202,7 +202,10 @@ function writeConclusionFile(log: (msg: string) => void, content: string, repoPa
       ist.getUTCHours()
     )}-${pad(ist.getUTCMinutes())}-${pad(ist.getUTCSeconds())}`;
     const fileName = `${safeBranch}-Conclusion-${ts}_IST.txt`;
-    const filePath = path.join(repoPath, fileName);
+    const driveRoot = path.parse(repoPath).root; // e.g. "D:\"
+    const outputDir = path.join(driveRoot, 'CleanzConclusionErrors');
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
+    const filePath = path.join(outputDir, fileName);
     fs.writeFileSync(filePath, content, 'utf8');
     log(`Conclusion file      : ${filePath}`);
   } catch (e) {
