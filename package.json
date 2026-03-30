@@ -15,6 +15,7 @@
     "@salesforce/cli-plugins-testkit": "^5.3.41",
     "@salesforce/dev-scripts": "^11.0.4",
     "@salesforce/plugin-command-reference": "^3.1.79",
+    "c8": "^11.0.0",
     "eslint-plugin-sf-plugin": "^1.20.33",
     "oclif": "^4.22.59",
     "ts-node": "^10.9.2",
@@ -143,7 +144,7 @@
       ]
     },
     "test:only": {
-      "command": "nyc mocha \"test/**/*.test.ts\"",
+      "command": "c8 mocha \"test/**/*.test.ts\"",
       "env": {
         "FORCE_COLOR": "2"
       },
@@ -153,7 +154,7 @@
         "**/tsconfig.json",
         ".mocha*",
         "!*.nut.ts",
-        ".nycrc"
+        ".c8rc.json"
       ],
       "output": []
     },
