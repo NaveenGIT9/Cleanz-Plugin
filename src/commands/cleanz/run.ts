@@ -833,7 +833,7 @@ async function invokeDeployWithRetry(
     await waitForQueueToClear(log, targetOrg, MAX_QUEUE_WAIT_MINS);
 
     // eslint-disable-next-line no-await-in-loop
-    const procResult = await runDeployProcess(items, targetOrg, outputFile, timeoutMins, verbose);
+    const procResult = await runDeployProcess(log, items, targetOrg, outputFile, timeoutMins, verbose);
 
     if (procResult === 'timeout') {
       log(`   Deploy timed out after ${timeoutMins} min(s). Retrying after backoff...`);
@@ -909,6 +909,7 @@ async function invokeDeployWithRetry(
 }
 
 function runDeployProcess(
+  log: (msg: string) => void,
   items: Array<{ metadataType: string; itemName: string }>,
   targetOrg: string,
   outputFile: string,
@@ -948,12 +949,22 @@ function runDeployProcess(
     proc.stdout.pipe(outputStream);
     proc.stderr.pipe(outputStream);
 
+    const deployStart = Date.now();
+    const progressTimer = setInterval(() => {
+      const elapsed = Date.now() - deployStart;
+      const mins = Math.floor(elapsed / 60_000);
+      const secs = Math.floor((elapsed % 60_000) / 1000);
+      log(`   Still deploying... ${mins}m ${secs}s elapsed (timeout: ${timeoutMins}m)`);
+    }, 30_000);
+
     const timer = setTimeout(() => {
+      clearInterval(progressTimer);
       proc.kill();
       resolve('timeout');
     }, timeoutMins * 60 * 1000);
 
     proc.on('close', () => {
+      clearInterval(progressTimer);
       clearTimeout(timer);
       outputStream.end();
       resolve('ok');
@@ -1010,6 +1021,7 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
 async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string, maxWaitMins = 30): Promise<void> {
   const POLL_MS = 30_000;
   const deadline = Date.now() + maxWaitMins * 60_000;
+  const queueStart = Date.now();
 
   // eslint-disable-next-line no-await-in-loop
   let count = await queryDeployQueueCount(targetOrg);
@@ -1021,7 +1033,12 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
     await sleep(POLL_MS);
     // eslint-disable-next-line no-await-in-loop
     count = await queryDeployQueueCount(targetOrg);
-    if (count > 0) log(`   [Queue] Still ${count} active deployment(s). Waiting 30s...`);
+    if (count > 0) {
+      const elapsed = Date.now() - queueStart;
+      const mins = Math.floor(elapsed / 60_000);
+      const secs = Math.floor((elapsed % 60_000) / 1000);
+      log(`   [Queue] Still ${count} active deployment(s). Waiting 30s... (${mins}m ${secs}s elapsed)`);
+    }
   }
 
   if (count === 0) {
