@@ -197,10 +197,27 @@ function writeConclusionFile(log: (msg: string) => void, content: string, repoPa
     const now = new Date();
     const istMs = now.getTime() + (5 * 60 + 30) * 60 * 1000;
     const ist = new Date(istMs);
-    const pad = (n: number): string => String(n).padStart(2, '0');
-    const ts = `${ist.getUTCFullYear()}-${pad(ist.getUTCMonth() + 1)}-${pad(ist.getUTCDate())}_${pad(
-      ist.getUTCHours()
-    )}-${pad(ist.getUTCMinutes())}-${pad(ist.getUTCSeconds())}`;
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    const month = months[ist.getUTCMonth()];
+    const day = ist.getUTCDate();
+    const hours24 = ist.getUTCHours();
+    const hours12 = hours24 % 12 || 12;
+    const minutes = String(ist.getUTCMinutes()).padStart(2, '0');
+    const ampm = hours24 >= 12 ? 'PM' : 'AM';
+    const ts = `${month}-${day}-${hours12}-${minutes}-${ampm}`;
     const fileName = `${safeBranch}-Conclusion-${ts}_IST.txt`;
     const driveRoot = path.parse(repoPath).root; // e.g. "D:\"
     const outputDir = path.join(driveRoot, 'CleanzConclusionErrors');
