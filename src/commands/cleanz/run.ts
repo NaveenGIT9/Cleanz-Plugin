@@ -1701,6 +1701,17 @@ function maskProfileFalsePositives(xmlContent: string): string {
   return xml;
 }
 
+function maskPermSetFalsePositives(xmlContent: string): string {
+  // customMetadataTypeAccesses deploys successfully in Copado even with unknown CMT names
+  // (confirmed via real deployment testing on profiles). Same behaviour applies to permission
+  // sets — mask before dry-run so it does not consume the one-error-per-component slot.
+  // Original XML is restored after each dry-run via try/finally.
+  return xmlContent.replace(
+    /[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g,
+    ''
+  );
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
@@ -1710,6 +1721,9 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     masked = maskStandardApps(masked);
     if (item.filePath.endsWith('.profile-meta.xml')) {
       masked = maskProfileFalsePositives(masked);
+    }
+    if (item.filePath.endsWith('.permissionset-meta.xml')) {
+      masked = maskPermSetFalsePositives(masked);
     }
     saved.set(item.filePath, orig);
     if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
