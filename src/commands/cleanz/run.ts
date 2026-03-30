@@ -60,6 +60,7 @@ type SummaryRecord = {
   Name: string;
   Status: string;
   RemovedFields: string;
+  RemovedErrors: string;
   SkippedFields: string;
   UnhandledErrors: string;
 };
@@ -71,7 +72,7 @@ type BatchItem = {
   itemName: string;
   filePath: string;
   status: string;
-  allRemovedFields: string[];
+  allRemovedFields: Array<{ label: string; error: string }>;
   allSkippedFields: string[];
   allUnhandledErrors: string[];
   done: boolean;
@@ -111,6 +112,7 @@ type RemovedRef = {
   name: string;
   label: string; // display string e.g. "Account.Name" or "[Class] MyClass"
   meta?: string; // extra data — used by 'objectFlag' to carry the XML element name (e.g. "viewAllRecords")
+  deployError?: string; // the Salesforce error message that triggered this removal
 };
 
 // Result returned by each failure-handler function.
@@ -235,34 +237,55 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
   if (fixedPermSets.length === 0 && fixedProfiles.length === 0) return;
 
+  const buildRows = (records: SummaryRecord[]): string[][] =>
+    records.flatMap((r) => {
+      const labels = r.RemovedFields.split('; ').filter(Boolean);
+      const errors = r.RemovedErrors ? r.RemovedErrors.split('; ') : [];
+      return labels.map((label, i) => [r.Name, label, errors[i] ?? '']);
+    });
+
   log('\nRemoved refs detail:');
   if (fixedPermSets.length > 0) {
     log('\nPERMISSION SETS');
-    const psRows = fixedPermSets.flatMap((r) =>
-      r.RemovedFields.split('; ')
-        .filter(Boolean)
-        .map((ref) => [r.Name, ref])
-    );
-    log(buildAsciiTable(['Name', 'Removed Ref'], psRows));
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedPermSets), [20, 45, 60]));
   }
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
-    const profileRows = fixedProfiles.flatMap((r) =>
-      r.RemovedFields.split('; ')
-        .filter(Boolean)
-        .map((ref) => [r.Name, ref])
-    );
-    log(buildAsciiTable(['Name', 'Removed Ref'], profileRows));
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedProfiles), [20, 45, 60]));
   }
 }
 
-export function buildAsciiTable(headers: string[], rows: string[][]): string {
-  const allRows = [headers, ...rows];
+function wrapText(text: string, maxWidth: number): string[] {
+  if (text.length <= maxWidth) return [text];
+  const lines: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxWidth) {
+    let breakAt = remaining.lastIndexOf(' ', maxWidth);
+    if (breakAt <= 0) breakAt = maxWidth;
+    lines.push(remaining.slice(0, breakAt).trimEnd());
+    remaining = remaining.slice(breakAt).trimStart();
+  }
+  if (remaining) lines.push(remaining);
+  return lines;
+}
+
+export function buildAsciiTable(headers: string[], rows: string[][], maxColWidths?: number[]): string {
+  // Expand rows: cells exceeding maxColWidths are split into continuation lines.
+  const expandedRows: string[][] = rows.flatMap((row) => {
+    const wrappedCells = row.map((cell, colIdx) => {
+      const max = maxColWidths?.[colIdx];
+      return max && cell.length > max ? wrapText(cell, max) : [cell];
+    });
+    const maxLines = Math.max(...wrappedCells.map((c) => c.length));
+    return Array.from({ length: maxLines }, (_, lineIdx) => wrappedCells.map((lines) => lines[lineIdx] ?? ''));
+  });
+
+  const allRows = [headers, ...expandedRows];
   const colWidths = headers.map((_, colIdx) => Math.max(...allRows.map((row) => (row[colIdx] ?? '').length)));
   const sep = '+' + colWidths.map((w) => '-'.repeat(w + 2)).join('+') + '+';
   const formatRow = (cells: string[]): string =>
     '|' + cells.map((c, i) => ` ${(c ?? '').padEnd(colWidths[i])} `).join('|') + '|';
-  return [sep, formatRow(headers), sep, ...rows.map(formatRow), sep].join('\n');
+  return [sep, formatRow(headers), sep, ...expandedRows.map(formatRow), sep].join('\n');
 }
 
 // ===============================================================
@@ -1206,7 +1229,7 @@ function processFieldFailure(
     return {
       handled: true,
       xmlContent: updated,
-      removedRef: { type: 'field', name: missingField, label: missingField },
+      removedRef: { type: 'field', name: missingField, label: missingField, deployError: errorMessage },
     };
   }
   log(`   Field not found in XML: ${missingField} — already removed or not present.`);
@@ -1229,7 +1252,12 @@ function processUserPermissionFailure(
     return {
       handled: true,
       xmlContent: updated,
-      removedRef: { type: 'userPermission', name: permName, label: `[UserPerm] ${permName}` },
+      removedRef: {
+        type: 'userPermission',
+        name: permName,
+        label: `[UserPerm] ${permName}`,
+        deployError: errorMessage,
+      },
     };
   }
   log(`   userPermissions block not found in XML: ${permName} — already removed or not present.`);
@@ -1280,6 +1308,7 @@ function processUserLicenseFailure(
         name: objectName,
         label: `[UserLicense] ${permLabel} ${objectName}`,
         meta: flagElement,
+        deployError: errorMessage,
       },
     };
   }
@@ -1337,6 +1366,7 @@ function processRegisteredFailure(
           type: handler.refType,
           name,
           label: handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`,
+          deployError: errorMessage,
         },
       };
     }
@@ -1565,7 +1595,12 @@ async function applyNamespacePreCheck(
       const { updated, removed } = bulkRemoveNamespaceRefs(xml, ns);
       if (removed) {
         xml = updated;
-        refs.push({ type: 'namespace', name: ns, label: `[NS:${ns}] bulk-removed` });
+        refs.push({
+          type: 'namespace',
+          name: ns,
+          label: `[NS:${ns}] bulk-removed`,
+          deployError: failure.problem ?? failure.error ?? '',
+        });
         log(`   [NS Bulk] Removed ALL ${ns}__ refs from ${itemName} in one pass`);
       }
     } else {
@@ -1580,7 +1615,12 @@ async function applyNamespacePreCheck(
       const objResult = removeNsObjectsNotInOrg(xml, ns, existingObjects);
       if (objResult.removed) xml = objResult.updated;
       if (fieldResult.removed || objResult.removed) {
-        refs.push({ type: 'namespace', name: ns, label: `[NS:${ns}] smart-removed missing` });
+        refs.push({
+          type: 'namespace',
+          name: ns,
+          label: `[NS:${ns}] smart-removed missing`,
+          deployError: failure.problem ?? failure.error ?? '',
+        });
         log(`   [NS Smart] Removed missing ${ns}__ fields/objects from ${itemName} (package installed, version diff)`);
       }
     }
@@ -1631,6 +1671,7 @@ async function applyRecordTypePreCheck(
       type: 'recordTypeOverride' as RefType,
       name: rt,
       label: `[ProfileActionOverride] RecordType:${rt}`,
+      deployError: 'The value you specified for RecordType is invalid',
     })),
   };
 }
@@ -1683,6 +1724,7 @@ async function applyObjectPagePreCheck(
       type: 'recordTypeOverride' as RefType,
       name: o,
       label: `[ProfileActionOverride] pageOrSobjectType:${o}`,
+      deployError: 'You must specify a page or object',
     })),
   };
 }
@@ -1999,7 +2041,9 @@ async function processItemsInIteration(
     } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
     const removedRefs = [...nsRefs, ...rtRefs, ...objRefs, ...perFailureRefs];
     for (const ref of removedRefs) {
-      if (!item.allRemovedFields.includes(ref.label)) item.allRemovedFields.push(ref.label);
+      if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
+        item.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
+      }
     }
     for (const e of unhandledErrors) {
       if (!item.allUnhandledErrors.includes(e)) item.allUnhandledErrors.push(e);
@@ -2193,7 +2237,8 @@ async function runBatchDeploy(
     Type: item.metadataType,
     Name: item.itemName,
     Status: item.status,
-    RemovedFields: item.allRemovedFields.join('; '),
+    RemovedFields: item.allRemovedFields.map((r) => r.label).join('; '),
+    RemovedErrors: item.allRemovedFields.map((r) => r.error).join('; '),
     SkippedFields: item.allSkippedFields.join('; '),
     UnhandledErrors: item.allUnhandledErrors.join('; '),
   }));
@@ -2422,7 +2467,7 @@ export default class DeployAndFix extends SfCommand<void> {
         itemName: n,
         filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
         status: 'No Change',
-        allRemovedFields: [] as string[],
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
@@ -2432,7 +2477,7 @@ export default class DeployAndFix extends SfCommand<void> {
         itemName: n,
         filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
         status: 'No Change',
-        allRemovedFields: [] as string[],
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
@@ -2539,8 +2584,10 @@ export default class DeployAndFix extends SfCommand<void> {
     writeConclusionFile(log, conclusionLines.join('\n'), REPO_PATH);
 
     const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
-    const csvHeader = 'Type,Name,Status,RemovedFields,SkippedFields';
-    const csvRows = summary.map((r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.SkippedFields}"`);
+    const csvHeader = 'Type,Name,Status,RemovedFields,RemovedErrors,SkippedFields';
+    const csvRows = summary.map(
+      (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.RemovedErrors}","${r.SkippedFields}"`
+    );
     fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
     log(`Summary CSV saved to : ${csvPath}`);

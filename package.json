@@ -61,7 +61,6 @@
   },
   "repository": "salesforcecli/plugin-cleanz",
   "scripts": {
-    "prebuild": "eslint --fix src/commands/cleanz/run.ts src/commands/hello/world.ts src/index.ts test/commands/hello/world.nut.ts test/commands/hello/world.test.ts test/commands/cleanz/run.test.ts",
     "build": "wireit",
     "clean": "sf-clean",
     "clean-all": "sf-clean all",
@@ -72,6 +71,7 @@
     "link-check": "wireit",
     "lint": "wireit",
     "postpack": "sf-clean --ignore-signing-artifacts",
+    "prebuild": "eslint --fix src/commands/cleanz/run.ts src/commands/hello/world.ts src/index.ts test/commands/hello/world.nut.ts test/commands/hello/world.test.ts test/commands/cleanz/run.test.ts",
     "prepack": "sf-prepack",
     "prepare": "sf-install",
     "test": "wireit",
@@ -154,7 +154,7 @@
         "**/tsconfig.json",
         ".mocha*",
         "!*.nut.ts",
-        ".c8rc.json"
+        ".nycrc"
       ],
       "output": []
     },
