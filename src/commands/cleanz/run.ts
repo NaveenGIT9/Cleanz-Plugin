@@ -251,7 +251,7 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   }
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
-    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedProfiles), [20, 45, 60]));
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedProfiles), [15, 35, 45]));
   }
 }
 
