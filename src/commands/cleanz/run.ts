@@ -1627,9 +1627,17 @@ async function applyNamespacePreCheck(
       const existingFields = await fetchNsExistingFields(log, targetOrg, ns);
       // eslint-disable-next-line no-await-in-loop
       const existingObjects = await fetchNsExistingObjects(log, targetOrg, ns);
-      const fieldResult = removeNsFieldsNotInOrg(xml, ns, existingFields);
+
+      // Augment with whitelisted fields/objects so items being deployed in this
+      // promotion are never removed even if they don't exist in the org yet.
+      const safeFields = new Set(existingFields);
+      for (const f of whitelist.fields) safeFields.add(f);
+      const safeObjects = new Set(existingObjects);
+      for (const o of whitelist.objects) safeObjects.add(o);
+
+      const fieldResult = removeNsFieldsNotInOrg(xml, ns, safeFields);
       if (fieldResult.removed) xml = fieldResult.updated;
-      const objResult = removeNsObjectsNotInOrg(xml, ns, existingObjects);
+      const objResult = removeNsObjectsNotInOrg(xml, ns, safeObjects);
       if (objResult.removed) xml = objResult.updated;
       if (fieldResult.removed || objResult.removed) {
         refs.push({
