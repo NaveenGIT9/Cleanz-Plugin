@@ -128,6 +128,7 @@ type FailureResult = {
 
 const REPO_PATH = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
 const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsets');
+const MUTING_PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'mutingpermissionsets');
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
@@ -234,8 +235,9 @@ function writeConclusionFile(log: (msg: string) => void, content: string, repoPa
 
 function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord[]): void {
   const fixedPermSets = summary.filter((r) => r.Type === 'PermissionSet' && r.RemovedFields);
+  const fixedMutingPermSets = summary.filter((r) => r.Type === 'MutingPermissionSet' && r.RemovedFields);
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
-  if (fixedPermSets.length === 0 && fixedProfiles.length === 0) return;
+  if (fixedPermSets.length === 0 && fixedMutingPermSets.length === 0 && fixedProfiles.length === 0) return;
 
   const buildRows = (records: SummaryRecord[]): string[][] =>
     records.flatMap((r) => {
@@ -248,6 +250,10 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   if (fixedPermSets.length > 0) {
     log('\nPERMISSION SETS');
     log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedPermSets), [15, 35, 45]));
+  }
+  if (fixedMutingPermSets.length > 0) {
+    log('\nMUTING PERMISSION SETS');
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedMutingPermSets), [15, 35, 45]));
   }
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
@@ -1929,7 +1935,7 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     if (item.filePath.endsWith('.profile-meta.xml')) {
       masked = maskProfileFalsePositives(masked);
     }
-    if (item.filePath.endsWith('.permissionset-meta.xml')) {
+    if (item.filePath.endsWith('.permissionset-meta.xml') || item.filePath.endsWith('.mutingpermissionset-meta.xml')) {
       masked = maskPermSetFalsePositives(masked);
     }
     saved.set(item.filePath, orig);
@@ -2020,10 +2026,20 @@ async function processItemsInIteration(
   const perItemRefs = new Map<string, RemovedRef[]>();
   let anyProgress = false;
 
+  const PSG_LOCK = /permission set group is updating/i;
+
   for (const item of activeItems) {
     if (item.done) continue;
     const itemFailures = failuresByItem.get(item.itemName) ?? [];
     if (itemFailures.length === 0) continue;
+
+    // PSG lock — group is recalculating. Mark done and skip; re-run after Copado re-deploys.
+    if (itemFailures.some((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''))) {
+      log(`   [${item.itemName}] Permission set group is updating — skipping, re-run after group update completes.`);
+      item.status = 'Skipped - PSG Updating';
+      item.done = true;
+      continue;
+    }
 
     log(`\n   [${item.itemName}] ${itemFailures.length} failure(s):`);
     itemFailures.forEach((f, i) => vlog(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
@@ -2399,6 +2415,9 @@ export default class DeployAndFix extends SfCommand<void> {
     const promotionData = JSON.parse(fs.readFileSync(promotionJsonPath, 'utf8')) as PromotionItem[];
 
     const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
+    const mutingPermSets = [
+      ...new Set(promotionData.filter((i) => i.t === 'MutingPermissionSet').map((i) => i.n)),
+    ].sort();
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
     const whitelist: WhitelistMap = {
@@ -2417,6 +2436,7 @@ export default class DeployAndFix extends SfCommand<void> {
     // Build full file path list upfront — sweepOtherFiles needs this.
     const allFilePaths: string[] = [
       ...permSets.map((ps) => path.join(PS_BASE_PATH, `${ps}.permissionset-meta.xml`)),
+      ...mutingPermSets.map((mps) => path.join(MUTING_PS_BASE_PATH, `${mps}.mutingpermissionset-meta.xml`)),
       ...profiles.map((p) => path.join(PROFILE_BASE_PATH, `${p}.profile-meta.xml`)),
     ];
 
@@ -2428,6 +2448,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('======================================================');
     log(`Target Org              : ${targetOrg}`);
     log(`Permission Sets         : ${permSets.length} found in JSON`);
+    log(`Muting Permission Sets  : ${mutingPermSets.length} found in JSON`);
     log(`Profiles                : ${profiles.length} found in JSON`);
     log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
     log(`  - CustomFields        : ${whitelist.fields.length}`);
@@ -2447,6 +2468,12 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log('\nPermission Sets to process:');
     permSets.forEach((ps) => log(`   - ${ps}`));
+    log('\nMuting Permission Sets to process:');
+    if (mutingPermSets.length > 0) {
+      mutingPermSets.forEach((mps) => log(`   - ${mps}`));
+    } else {
+      log('   (none)');
+    }
     log('\nProfiles to process:');
     profiles.forEach((p) => log(`   - ${p}`));
 
@@ -2485,12 +2512,22 @@ export default class DeployAndFix extends SfCommand<void> {
 
     const totalDeploys: TotalDeploys = { value: 0 };
 
-    // Build one BatchItem per permset + profile — all deployed together each iteration.
+    // Build one BatchItem per permset + muting permset + profile — all deployed together each iteration.
     const batchItems: BatchItem[] = [
       ...permSets.map((n) => ({
         metadataType: 'PermissionSet',
         itemName: n,
         filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
+        status: 'No Change',
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
+        done: false,
+      })),
+      ...mutingPermSets.map((n) => ({
+        metadataType: 'MutingPermissionSet',
+        itemName: n,
+        filePath: path.join(MUTING_PS_BASE_PATH, `${n}.mutingpermissionset-meta.xml`),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allSkippedFields: [] as string[],
@@ -2512,7 +2549,9 @@ export default class DeployAndFix extends SfCommand<void> {
     runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
 
     log('\n######################################################');
-    log(`  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${profiles.length} Profile(s)`);
+    log(
+      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${profiles.length} Profile(s)`
+    );
     log('######################################################');
 
     // eslint-disable-next-line no-await-in-loop
@@ -2540,6 +2579,17 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nPERMISSION SETS:');
     summary
       .filter((r) => r.Type === 'PermissionSet')
+      .forEach((r) =>
+        log(
+          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+            r.SkippedFields || 'none'
+          }`
+        )
+      );
+
+    log('\nMUTING PERMISSION SETS:');
+    summary
+      .filter((r) => r.Type === 'MutingPermissionSet')
       .forEach((r) =>
         log(
           `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
@@ -2580,7 +2630,7 @@ export default class DeployAndFix extends SfCommand<void> {
     const tableHeaders = ['#', 'Type', 'Name', 'Status', 'Removed', 'Skipped'];
     const tableRows = summary.map((r, i) => [
       String(i + 1),
-      r.Type === 'PermissionSet' ? 'PermSet' : 'Profile',
+      r.Type === 'PermissionSet' ? 'PermSet' : r.Type === 'MutingPermissionSet' ? 'MutingPS' : 'Profile',
       r.Name,
       r.Status,
       r.RemovedFields ? `${r.RemovedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
