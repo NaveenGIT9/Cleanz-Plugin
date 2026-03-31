@@ -2506,10 +2506,6 @@ export default class DeployAndFix extends SfCommand<void> {
     // eslint-disable-next-line no-await-in-loop
     await loadInstalledNamespaces(targetOrg);
 
-    // Record the current HEAD so we can squash all script commits into one at the end.
-    const startingCommit = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
-    log(`   Starting commit: ${startingCommit.substring(0, 8)}`);
-
     const totalDeploys: TotalDeploys = { value: 0 };
 
     // Build one BatchItem per permset + muting permset + profile — all deployed together each iteration.
@@ -2547,6 +2543,11 @@ export default class DeployAndFix extends SfCommand<void> {
     ];
 
     runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
+
+    // Record HEAD after dedup so the final squash only covers missing-ref removal commits,
+    // not the dedup commit — keeping dedup and ref-removal history separate.
+    const startingCommit = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
+    log(`   Starting commit (post-dedup): ${startingCommit.substring(0, 8)}`);
 
     log('\n######################################################');
     log(
