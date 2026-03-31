@@ -132,7 +132,7 @@ const MUTING_PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default',
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
-const DEPLOY_TIMEOUT_MINS = 12;
+const DEPLOY_TIMEOUT_MINS = 25;
 const MAX_RETRIES = 3;
 const MAX_QUEUE_WAIT_MINS = 60; // wait up to 60 min for active Copado deployments to finish
 
