@@ -504,8 +504,6 @@ const objectExistenceCache = new Map<string, Map<string, boolean>>();
 // Caches for namespace queries (keyed by org alias or "org:namespace")
 const namespaceCache = new Map<string, boolean>(); // "org:namespace" → installed?
 const installedNsCache = new Map<string, Set<string>>(); // org → Set of all installed namespace prefixes
-const nsFieldsCache = new Map<string, Set<string>>(); // "org:namespace" → "Object.Field__c" that exist
-const nsObjectsCache = new Map<string, Set<string>>(); // "org:namespace" → "Object__c" that exist
 
 // Salesforce built-in prefixes that look like namespace prefixes but are NOT managed packages.
 // These must never be passed to the namespace installer check or bulk-removed.
@@ -654,97 +652,6 @@ async function checkNamespaceInstalled(
   namespaceCache.set(key, installed);
   log(`   [NS Check] ${namespace}: ${installed ? 'installed' : 'NOT installed — bulk-removing all refs'}`);
   return installed;
-}
-
-// Fetch all field FQNs ("Object.Namespace__Field__c") that exist in the org for this namespace.
-// Used when the package IS installed but may be on an older version lacking some fields.
-// Returns null if the query fails or times out — callers must skip removal on null to avoid
-// incorrectly removing fields when we simply couldn't confirm what exists.
-async function fetchNsExistingFields(
-  log: (msg: string) => void,
-  targetOrg: string,
-  namespace: string
-): Promise<Set<string> | null> {
-  const key = `${targetOrg}:${namespace}`;
-  if (nsFieldsCache.has(key)) return nsFieldsCache.get(key)!;
-
-  log(`   [NS Check] Querying org for all ${namespace}__ fields that exist...`);
-  type FieldRec = { QualifiedApiName: string; EntityDefinition: { QualifiedApiName: string } };
-  const query = `"SELECT QualifiedApiName, EntityDefinition.QualifiedApiName FROM FieldDefinition WHERE NamespacePrefix = '${namespace}'"`;
-  const records = await toolingQuery<FieldRec>(targetOrg, query);
-  if (records.length === 0) {
-    log(
-      `   [NS Check] ${namespace}: query returned 0 fields — possible timeout or empty package. Skipping smart removal.`
-    );
-    return null; // do NOT cache — allow retry next iteration
-  }
-  const set = new Set(records.map((r) => `${r.EntityDefinition?.QualifiedApiName}.${r.QualifiedApiName}`));
-  nsFieldsCache.set(key, set);
-  log(`   [NS Check] ${namespace}: ${set.size} field(s) exist in this org`);
-  return set;
-}
-
-// Fetch all object API names ("Namespace__Object__c") that exist in the org for this namespace.
-// Returns null if the query fails or times out — callers must skip removal on null.
-async function fetchNsExistingObjects(
-  log: (msg: string) => void,
-  targetOrg: string,
-  namespace: string
-): Promise<Set<string> | null> {
-  const key = `${targetOrg}:${namespace}`;
-  if (nsObjectsCache.has(key)) return nsObjectsCache.get(key)!;
-
-  log(`   [NS Check] Querying org for all ${namespace}__ objects that exist...`);
-  type ObjRec = { QualifiedApiName: string };
-  const query = `"SELECT QualifiedApiName FROM EntityDefinition WHERE NamespacePrefix = '${namespace}'"`;
-  const records = await toolingQuery<ObjRec>(targetOrg, query);
-  if (records.length === 0) {
-    log(
-      `   [NS Check] ${namespace}: query returned 0 objects — possible timeout or empty package. Skipping smart removal.`
-    );
-    return null; // do NOT cache — allow retry next iteration
-  }
-  const set = new Set(records.map((r) => r.QualifiedApiName));
-  nsObjectsCache.set(key, set);
-  log(`   [NS Check] ${namespace}: ${set.size} object(s) exist in this org`);
-  return set;
-}
-
-// Remove fieldPermissions for namespace fields NOT present in the org (smart diff).
-function removeNsFieldsNotInOrg(
-  xmlContent: string,
-  namespace: string,
-  existingFields: Set<string> // Set of "Object.Namespace__Field__c"
-): { updated: string; removed: boolean } {
-  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
-  // Capture the full "Object.Namespace__Field__c" value inside <field>...</field>
-  const regex = new RegExp(
-    `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*(\\w+\\.${ns}__[\\w]+)[ \\t]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
-    'g'
-  );
-  const updated = xmlContent.replace(regex, (match: string, fqn: string) =>
-    existingFields.has(fqn.trim()) ? match : ''
-  );
-  return { updated, removed: updated !== xmlContent };
-}
-
-// Remove objectPermissions for namespace objects NOT present in the org (smart diff).
-function removeNsObjectsNotInOrg(
-  xmlContent: string,
-  namespace: string,
-  existingObjects: Set<string>
-): { updated: string; removed: boolean } {
-  const ns = namespace.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
-  const regex = new RegExp(
-    `[ \\t]*<objectPermissions>${inner}<object>[ \\t]*(${ns}__[\\w]+)[ \\t]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
-    'g'
-  );
-  const updated = xmlContent.replace(regex, (match: string, objName: string) =>
-    existingObjects.has(objName.trim()) ? match : ''
-  );
-  return { updated, removed: updated !== xmlContent };
 }
 
 function removeBlocksWithNamespace(xml: string, blockTag: string, keyTag: string, namespace: string): string {
@@ -1601,41 +1508,6 @@ function sweepOtherFiles(
 // Extracted to keep invokeProcessMetadataItem under the complexity limit.
 // ===============================================================
 
-async function applyNsSmartRemoval(
-  log: (msg: string) => void,
-  xml: string,
-  ns: string,
-  whitelist: WhitelistMap,
-  targetOrg: string,
-  itemName: string,
-  deployError: string
-): Promise<{ xml: string; ref: RemovedRef | null }> {
-  const existingFields = await fetchNsExistingFields(log, targetOrg, ns);
-  const existingObjects = await fetchNsExistingObjects(log, targetOrg, ns);
-
-  // null means query timed out — skip to avoid false removals.
-  if (existingFields === null || existingObjects === null) {
-    log(`   [NS Smart] ${ns}: skipping — could not confirm org field/object list (query may have timed out)`);
-    return { xml, ref: null };
-  }
-
-  const safeFields = new Set(existingFields);
-  for (const f of whitelist.fields) safeFields.add(f);
-  const safeObjects = new Set(existingObjects);
-  for (const o of whitelist.objects) safeObjects.add(o);
-
-  const fieldResult = removeNsFieldsNotInOrg(xml, ns, safeFields);
-  if (fieldResult.removed) xml = fieldResult.updated;
-  const objResult = removeNsObjectsNotInOrg(xml, ns, safeObjects);
-  if (objResult.removed) xml = objResult.updated;
-
-  if (fieldResult.removed || objResult.removed) {
-    log(`   [NS Smart] Removed missing ${ns}__ fields/objects from ${itemName} (package installed, version diff)`);
-    return { xml, ref: { type: 'namespace', name: ns, label: `[NS:${ns}] smart-removed missing`, deployError } };
-  }
-  return { xml, ref: null };
-}
-
 async function applyNamespacePreCheck(
   log: (msg: string) => void,
   failures: ComponentFailure[],
@@ -1676,18 +1548,7 @@ async function applyNamespacePreCheck(
         log(`   [NS Bulk] Removed ALL ${ns}__ refs from ${itemName} in one pass`);
       }
     } else {
-      // eslint-disable-next-line no-await-in-loop
-      const { xml: updatedXml, ref } = await applyNsSmartRemoval(
-        log,
-        xml,
-        ns,
-        whitelist,
-        targetOrg,
-        itemName,
-        failure.problem ?? failure.error ?? ''
-      );
-      xml = updatedXml;
-      if (ref) refs.push(ref);
+      log(`   [NS Check] ${ns}: installed in org — skipping removal`);
     }
   }
 
