@@ -2023,29 +2023,29 @@ function markPassedItems(
   }
 }
 
-async function processItemsInIteration(
+type NsResult = { nsXml: string; nsRefs: RemovedRef[]; rootNode: string };
+
+// Applies namespace pre-check to all active items, stages and commits them together.
+// Returns a map of per-item NS results and the managed-refs commit hash (if any).
+async function applyManagedRefsPass(
   log: (msg: string) => void,
   activeItems: BatchItem[],
   failuresByItem: Map<string, ComponentFailure[]>,
   whitelist: WhitelistMap,
   targetOrg: string,
   repoPath: string,
-  verbose: boolean,
+  vlog: (msg: string) => void,
   dryRun: boolean
-): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean }> {
-  const vlog: (msg: string) => void = verbose ? log : (): void => {};
-  // Track refs per source file so the sweep skips only the source file, not all modified files.
-  const perItemRefs = new Map<string, RemovedRef[]>();
-  let anyProgress = false;
-
+): Promise<{ itemNsResults: Map<string, NsResult>; lastManagedRefsCommit: string | null }> {
   const PSG_LOCK = /permission set group is updating/i;
+  const itemNsResults = new Map<string, NsResult>();
+  let managedRefsStaged = false;
 
   for (const item of activeItems) {
     if (item.done) continue;
     const itemFailures = failuresByItem.get(item.itemName) ?? [];
     if (itemFailures.length === 0) continue;
 
-    // PSG lock — group is recalculating. Mark done and skip; re-run after Copado re-deploys.
     if (itemFailures.some((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''))) {
       log(`   [${item.itemName}] Permission set group is updating — skipping, re-run after group update completes.`);
       item.status = 'Skipped - PSG Updating';
@@ -2068,11 +2068,166 @@ async function processItemsInIteration(
       targetOrg,
       item.itemName
     );
+
+    itemNsResults.set(item.filePath, { nsXml, nsRefs, rootNode });
+
+    if (nsRefs.length > 0 && !dryRun) {
+      saveXmlClean(nsXml, item.filePath, rootNode);
+      try {
+        execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+        managedRefsStaged = true;
+      } catch {
+        log(`   git add failed for managed refs: ${item.itemName}`);
+      }
+    }
+  }
+
+  if (!dryRun && managedRefsStaged) {
+    const staged = [...itemNsResults.values()].filter((v) => v.nsRefs.length > 0);
+    const totalLabels = staged.flatMap((v) => v.nsRefs.map((r) => r.label));
+    const labelSummary = totalLabels.slice(0, 8).join(', ') + (totalLabels.length > 8 ? '...' : '');
+    try {
+      execSync(
+        `git commit -m "Remove managed package refs (${totalLabels.length} ref(s) in ${staged.length} file(s)): ${labelSummary}"`,
+        { cwd: repoPath }
+      );
+      const lastCommit = execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
+      log(`   Committed managed package ref removals: ${staged.length} file(s), ${totalLabels.length} ref(s)`);
+      return { itemNsResults, lastManagedRefsCommit: lastCommit };
+    } catch {
+      log('   Managed refs commit failed or nothing staged');
+    }
+  }
+
+  return { itemNsResults, lastManagedRefsCommit: null };
+}
+
+// Saves and commits (or dry-runs) the missing-ref XML for one item.
+function commitItemMissingRefs(
+  log: (msg: string) => void,
+  item: BatchItem,
+  updatedXml: string,
+  missingRefs: RemovedRef[],
+  rootNode: string,
+  repoPath: string,
+  dryRun: boolean
+): void {
+  if (dryRun) {
+    saveXmlClean(updatedXml, item.filePath, rootNode);
+    log(`   Dry run — skipped commit for: ${item.itemName}`);
+    // eslint-disable-next-line no-param-reassign
+    item.status = 'Fixed (Dry Run)';
+  } else if (missingRefs.length > 0) {
+    saveXmlClean(updatedXml, item.filePath, rootNode);
+    try {
+      execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+      execSync(
+        `git commit -m "[${item.itemName}] Auto-remove missing refs: ${missingRefs.map((r) => r.label).join(', ')}"`,
+        { cwd: repoPath }
+      );
+      log(`   Committed missing ref removals for: ${item.itemName}`);
+    } catch {
+      log(`   Nothing to commit or commit failed for: ${item.itemName}`);
+    }
+    // eslint-disable-next-line no-param-reassign
+    item.status = 'Fixed & Committed';
+  } else {
+    // Only managed refs were removed — already committed in Pass 1.
+    // eslint-disable-next-line no-param-reassign
+    item.status = 'Fixed & Committed';
+  }
+}
+
+// Marks all unfinished batch items as 'Partial / Manual Check Needed' and stops.
+function stopBatchOnNoProgress(log: (msg: string) => void, batchItems: BatchItem[]): void {
+  log('No progress this iteration. Stopping batch.');
+  for (const item of batchItems.filter((i) => !i.done)) {
+    item.status = 'Partial / Manual Check Needed';
+    item.done = true;
+  }
+}
+
+// Squashes all missing-ref commits (from squashBase to HEAD) into one clean commit.
+function squashMissingRefCommits(
+  log: (msg: string) => void,
+  squashBase: string,
+  summary: SummaryRecord[],
+  repoPath: string
+): void {
+  try {
+    const currentHead = execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
+    if (currentHead === squashBase) {
+      log('\nNo missing-ref commits to squash.');
+      return;
+    }
+    const changedFiles = execSync(`git diff --name-only ${squashBase} HEAD`, { cwd: repoPath })
+      .toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    execSync(`git reset --soft ${squashBase}`, { cwd: repoPath });
+    const missingRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
+    const squashMsg = `Auto-fix: remove ${missingRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
+    execSync(`git commit -m "${squashMsg}"`, { cwd: repoPath });
+    log(`\nSquashed missing-ref commits into one: "${squashMsg}"`);
+  } catch (e) {
+    log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
+  }
+}
+
+async function processItemsInIteration(
+  log: (msg: string) => void,
+  activeItems: BatchItem[],
+  failuresByItem: Map<string, ComponentFailure[]>,
+  whitelist: WhitelistMap,
+  targetOrg: string,
+  repoPath: string,
+  verbose: boolean,
+  dryRun: boolean
+): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean; lastManagedRefsCommit: string | null }> {
+  const vlog: (msg: string) => void = verbose ? log : (): void => {};
+  // Track refs per source file so the sweep skips only the source file, not all modified files.
+  const perItemRefs = new Map<string, RemovedRef[]>();
+  let anyProgress = false;
+
+  // ── Pass 1: Namespace / managed-package pre-check ────────────────────────
+  // Apply to ALL active items first and commit them ONCE before any missing-ref
+  // commits — this gives a clean 4-commit git history.
+  // eslint-disable-next-line no-await-in-loop
+  const { itemNsResults, lastManagedRefsCommit } = await applyManagedRefsPass(
+    log,
+    activeItems,
+    failuresByItem,
+    whitelist,
+    targetOrg,
+    repoPath,
+    vlog,
+    dryRun
+  );
+
+  // ── Pass 2: Missing-ref removals (per item) ───────────────────────────────
+  for (const item of activeItems) {
+    if (item.done) continue;
+    const itemFailures = failuresByItem.get(item.itemName) ?? [];
+    if (itemFailures.length === 0) continue;
+
+    const nsResult = itemNsResults.get(item.filePath);
+    const baseXml = nsResult?.nsXml ?? fs.readFileSync(item.filePath, 'utf8');
+    const nsRefs = nsResult?.nsRefs ?? [];
+    const rootNode = nsResult?.rootNode ?? getRootNodeName(baseXml);
+
+    for (const ref of nsRefs) {
+      if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
+        item.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
+        item.allRemovedRefs.push(ref);
+      }
+    }
+
     // eslint-disable-next-line no-await-in-loop
     const { xml: rtXml, refs: rtRefs } = await applyRecordTypePreCheck(
       log,
       itemFailures,
-      nsXml,
+      baseXml,
       targetOrg,
       item.itemName,
       whitelist
@@ -2092,10 +2247,11 @@ async function processItemsInIteration(
       skippedFields,
       unhandledErrors,
     } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
-    const managedRefs = nsRefs; // namespace / managed package removals
-    const missingRefs = [...rtRefs, ...objRefs, ...perFailureRefs]; // standard missing ref removals
-    const removedRefs = [...managedRefs, ...missingRefs];
-    for (const ref of removedRefs) {
+
+    const missingRefs = [...rtRefs, ...objRefs, ...perFailureRefs];
+    const removedRefs = [...nsRefs, ...missingRefs];
+
+    for (const ref of missingRefs) {
       if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
         item.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
         item.allRemovedRefs.push(ref);
@@ -2114,49 +2270,10 @@ async function processItemsInIteration(
 
     anyProgress = true;
     perItemRefs.set(item.filePath, removedRefs);
-
-    if (dryRun) {
-      saveXmlClean(updatedXml, item.filePath, rootNode);
-      log(`   Dry run — skipped commit for: ${item.itemName}`);
-      item.status = 'Fixed (Dry Run)';
-    } else {
-      // Commit managed package ref removals separately from missing ref removals
-      // so git history clearly shows which type of fix was applied.
-      if (managedRefs.length > 0) {
-        saveXmlClean(nsXml, item.filePath, rootNode);
-        try {
-          execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-          execSync(
-            `git commit -m "[${item.itemName}] Remove managed package refs: ${managedRefs
-              .map((r) => r.label)
-              .join(', ')}"`,
-            { cwd: repoPath }
-          );
-          log(`   Committed managed package ref removals for: ${item.itemName}`);
-        } catch {
-          log(`   Commit failed for managed package refs: ${item.itemName}`);
-        }
-      }
-      if (missingRefs.length > 0) {
-        saveXmlClean(updatedXml, item.filePath, rootNode);
-        try {
-          execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-          execSync(
-            `git commit -m "[${item.itemName}] Auto-remove missing refs: ${missingRefs
-              .map((r) => r.label)
-              .join(', ')}"`,
-            { cwd: repoPath }
-          );
-          log(`   Committed missing ref removals for: ${item.itemName}`);
-        } catch {
-          log(`   Nothing to commit or commit failed for: ${item.itemName}`);
-        }
-      }
-      item.status = 'Fixed & Committed';
-    }
+    commitItemMissingRefs(log, item, updatedXml, missingRefs, rootNode, repoPath, dryRun);
   }
 
-  return { perItemRefs, anyProgress };
+  return { perItemRefs, anyProgress, lastManagedRefsCommit };
 }
 
 // ===============================================================
@@ -2182,12 +2299,13 @@ async function runBatchDeploy(
   maxRetries: number,
   verbose: boolean,
   dryRun: boolean
-): Promise<SummaryRecord[]> {
+): Promise<{ summary: SummaryRecord[]; lastManagedRefsCommit: string | null }> {
   validateBatchItems(log, batchItems);
 
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
   let iteration = 0;
+  let overallLastManagedRefsCommit: string | null = null;
   const deployErrorsFile = path.join(repoPath, 'deploy_errors_batch.json');
 
   while (iteration < maxIterations) {
@@ -2282,7 +2400,7 @@ async function runBatchDeploy(
     markPassedItems(log, activeItems, failuresByItem, dryRun);
 
     // eslint-disable-next-line no-await-in-loop
-    const { perItemRefs, anyProgress } = await processItemsInIteration(
+    const { perItemRefs, anyProgress, lastManagedRefsCommit } = await processItemsInIteration(
       log,
       activeItems,
       failuresByItem,
@@ -2293,12 +2411,10 @@ async function runBatchDeploy(
       dryRun
     );
 
+    if (lastManagedRefsCommit) overallLastManagedRefsCommit = lastManagedRefsCommit;
+
     if (!anyProgress && batchItems.some((i) => !i.done)) {
-      log('No progress this iteration. Stopping batch.');
-      for (const item of batchItems.filter((i) => !i.done)) {
-        item.status = 'Partial / Manual Check Needed';
-        item.done = true;
-      }
+      stopBatchOnNoProgress(log, batchItems);
       break;
     }
 
@@ -2310,7 +2426,7 @@ async function runBatchDeploy(
 
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
 
-  return batchItems.map((item) => ({
+  const summary: SummaryRecord[] = batchItems.map((item) => ({
     Type: item.metadataType,
     Name: item.itemName,
     Status: item.status,
@@ -2319,6 +2435,7 @@ async function runBatchDeploy(
     SkippedFields: item.allSkippedFields.join('; '),
     UnhandledErrors: item.allUnhandledErrors.join('; '),
   }));
+  return { summary, lastManagedRefsCommit: overallLastManagedRefsCommit };
 }
 
 // ===============================================================
@@ -2595,7 +2712,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('######################################################');
 
     // eslint-disable-next-line no-await-in-loop
-    const summary = await runBatchDeploy(
+    const { summary, lastManagedRefsCommit } = await runBatchDeploy(
       log,
       batchItems,
       targetOrg,
@@ -2610,9 +2727,6 @@ export default class DeployAndFix extends SfCommand<void> {
       verbose,
       dryRun
     );
-
-    // ================= REPO-WIDE SWEEP =================
-    repoWideSweep(log, collectBatchRefs(batchItems), new Set(allFilePaths), REPO_PATH, dryRun);
 
     // ================= FINAL SUMMARY =================
     log('\n======================================================');
@@ -2711,31 +2825,20 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Summary CSV saved to : ${csvPath}`);
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
 
-    // ================= SQUASH ALL SCRIPT COMMITS =================
-    // Collapse every commit made by this script into a single clean commit.
+    // ================= SQUASH MISSING-REF COMMITS =================
+    // Squash only the per-item missing-ref commits into one clean commit.
+    // Managed-ref commits (before squashBase) are preserved as-is.
+    // Repo-wide sweep runs AFTER squash so it stays as a separate commit.
+    const squashBase = lastManagedRefsCommit ?? startingCommit;
     if (dryRun) {
       log('\nDry run — no commits were made, skipping squash.');
-    } else
-      try {
-        const currentHead = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
-        if (currentHead === startingCommit) {
-          log('\nNo commits were made — nothing to squash.');
-        } else {
-          // Count files actually changed between starting commit and now (before reset).
-          const changedFiles = execSync(`git diff --name-only ${startingCommit} HEAD`, { cwd: REPO_PATH })
-            .toString()
-            .trim()
-            .split('\n')
-            .filter(Boolean);
-          execSync(`git reset --soft ${startingCommit}`, { cwd: REPO_PATH });
-          const allRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
-          const squashMsg = `Auto-fix: remove ${allRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
-          execSync(`git commit -m "${squashMsg}"`, { cwd: REPO_PATH });
-          log(`\nSquashed all script commits into one: "${squashMsg}"`);
-        }
-      } catch (e) {
-        log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
-      }
+    } else {
+      squashMissingRefCommits(log, squashBase, summary, REPO_PATH);
+    }
+
+    // ================= REPO-WIDE SWEEP =================
+    // Runs after the squash so it appears as a clean separate commit at the end.
+    repoWideSweep(log, collectBatchRefs(batchItems), new Set(allFilePaths), REPO_PATH, dryRun);
 
     const elapsedMs = Date.now() - startTime;
     const elapsedMins = Math.floor(elapsedMs / 60_000);
