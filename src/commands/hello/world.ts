@@ -18,7 +18,7 @@ import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
 import { Messages } from '@salesforce/core';
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
-const messages = Messages.loadMessages('@salesforce/plugin-cleanz', 'hello.world');
+const messages = Messages.loadMessages('@NaveenGIT9/plugin-cleanz', 'hello.world');
 
 export type HelloWorldResult = {
   name: string;

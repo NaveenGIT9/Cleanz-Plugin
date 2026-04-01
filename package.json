@@ -1,8 +1,8 @@
 {
-  "name": "@salesforce/plugin-cleanz",
+  "name": "@NaveenGIT9/plugin-cleanz",
   "description": "Cleanz",
   "version": "1.0.0",
-  "author": "Salesforce",
+  "author": "NaveenGIT9",
   "bugs": "https://github.com/forcedotcom/cli/issues",
   "dependencies": {
     "@oclif/core": "^4",
@@ -83,7 +83,8 @@
     "version": "oclif readme"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://npm.pkg.github.com"
   },
   "wireit": {
     "build": {
