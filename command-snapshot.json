@@ -5,7 +5,7 @@
     "flagAliases": [],
     "flagChars": ["d", "j", "t", "v"],
     "flags": ["dry-run", "flags-dir", "json", "json-path", "target-org", "verbose"],
-    "plugin": "@salesforce/plugin-cleanz"
+    "plugin": "@NaveenGIT9/plugin-cleanz"
   },
   {
     "alias": [],
@@ -13,6 +13,6 @@
     "flagAliases": [],
     "flagChars": ["n"],
     "flags": ["flags-dir", "json", "name"],
-    "plugin": "@salesforce/plugin-cleanz"
+    "plugin": "@NaveenGIT9/plugin-cleanz"
   }
 ]
