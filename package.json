@@ -55,6 +55,9 @@
     "topics": {
       "hello": {
         "description": "Commands to say hello."
+      },
+      "cleanz": {
+        "description": "Commands to clean up Salesforce permission sets and profiles."
       }
     },
     "flexibleTaxonomy": true

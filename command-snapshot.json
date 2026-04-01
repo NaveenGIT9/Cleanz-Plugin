@@ -1,6 +1,14 @@
 [
   {
     "alias": [],
+    "command": "cleanz:run",
+    "flagAliases": [],
+    "flagChars": ["d", "j", "t", "v"],
+    "flags": ["dry-run", "flags-dir", "json", "json-path", "target-org", "verbose"],
+    "plugin": "@salesforce/plugin-cleanz"
+  },
+  {
+    "alias": [],
     "command": "hello:world",
     "flagAliases": [],
     "flagChars": ["n"],
