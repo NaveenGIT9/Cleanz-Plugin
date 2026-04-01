@@ -73,6 +73,7 @@ type BatchItem = {
   filePath: string;
   status: string;
   allRemovedFields: Array<{ label: string; error: string }>;
+  allRemovedRefs: RemovedRef[]; // full ref objects for repo-wide sweep
   allSkippedFields: string[];
   allUnhandledErrors: string[];
   done: boolean;
@@ -1503,6 +1504,122 @@ function sweepOtherFiles(
   }
 }
 
+function collectBatchRefs(batchItems: BatchItem[]): RemovedRef[] {
+  const seen = new Set<string>();
+  const refs: RemovedRef[] = [];
+  for (const item of batchItems) {
+    for (const ref of item.allRemovedRefs) {
+      if (!seen.has(ref.label)) {
+        seen.add(ref.label);
+        refs.push(ref);
+      }
+    }
+  }
+  return refs;
+}
+
+// ===============================================================
+// REPO-WIDE SWEEP
+// After all JSON batch items are fixed, sweep every permset/profile
+// in the entire repo (outside the batch) and make ONE commit.
+// ===============================================================
+
+function repoWideSweep(
+  log: (msg: string) => void,
+  allRemovedRefs: RemovedRef[],
+  batchFilePaths: Set<string>,
+  repoPath: string,
+  dryRun: boolean
+): void {
+  if (allRemovedRefs.length === 0) return;
+
+  // Collect ALL permset/profile/mutingpermset files in the repo.
+  const psDir = path.join(repoPath, 'force-app', 'main', 'default', 'permissionsets');
+  const mpsDir = path.join(repoPath, 'force-app', 'main', 'default', 'mutingpermissionsets');
+  const profileDir = path.join(repoPath, 'force-app', 'main', 'default', 'profiles');
+
+  const collectFiles = (dir: string, ext: string): string[] => {
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(ext))
+      .map((f) => path.join(dir, f));
+  };
+
+  const repoFiles = [
+    ...collectFiles(psDir, '.permissionset-meta.xml'),
+    ...collectFiles(mpsDir, '.mutingpermissionset-meta.xml'),
+    ...collectFiles(profileDir, '.profile-meta.xml'),
+  ].filter((f) => !batchFilePaths.has(f)); // exclude files already in the batch
+
+  if (repoFiles.length === 0) {
+    log('\n   [Repo Sweep] No files outside the batch to sweep.');
+    return;
+  }
+
+  log(`\n--- Repo-Wide Sweep (${repoFiles.length} file(s) outside batch) ---`);
+  const modifiedFiles: string[] = [];
+  const removedRefLabels = new Set<string>();
+
+  for (const filePath of repoFiles) {
+    if (!fs.existsSync(filePath)) continue;
+    let xml = fs.readFileSync(filePath, 'utf8');
+    let fileModified = false;
+    const isProfile = filePath.endsWith('.profile-meta.xml');
+
+    for (const ref of allRemovedRefs) {
+      if (isProfile && PROFILE_SKIPPED_REF_TYPES.has(ref.type)) continue;
+      let result: { updated: string; removed: boolean };
+      if (ref.type === 'namespace') {
+        result = bulkRemoveNamespaceRefs(xml, ref.name);
+      } else if (ref.type === 'field') {
+        result = removeFieldPermissionsFromXml(xml, ref.name);
+      } else if (ref.type === 'userPermission') {
+        result = removeUserPermissionFromXml(xml, ref.name);
+      } else if (ref.type === 'objectFlag') {
+        if (!ref.meta) continue;
+        result = removeObjectPermissionFlag(xml, ref.name, ref.meta);
+      } else {
+        const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
+        if (!handler) continue;
+        result = handler.removeFn(xml, ref.name);
+      }
+      if (result.removed) {
+        xml = result.updated;
+        fileModified = true;
+        removedRefLabels.add(ref.label);
+        log(`   [Repo Sweep] Removed ${ref.label} from ${path.basename(filePath)}`);
+      }
+    }
+
+    if (fileModified) {
+      saveXmlClean(xml, filePath, getRootNodeName(xml));
+      modifiedFiles.push(filePath);
+    }
+  }
+
+  if (modifiedFiles.length === 0) {
+    log('   [Repo Sweep] No outside files contained these missing references.');
+    return;
+  }
+
+  log(`   [Repo Sweep] Cleaned ${modifiedFiles.length} file(s) outside the batch.`);
+  if (dryRun) {
+    log('   [Repo Sweep] Dry run — skipped commit.');
+    return;
+  }
+  try {
+    for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
+    execSync(
+      `git commit -m "Repo-wide sweep: remove ${removedRefLabels.size} missing ref(s) from ${modifiedFiles.length} file(s) outside promotion batch"`,
+      { cwd: repoPath }
+    );
+    log(`   [Repo Sweep] Committed repo-wide cleanup across ${modifiedFiles.length} file(s).`);
+  } catch {
+    log('   [Repo Sweep] Commit failed or nothing new to stage.');
+  }
+}
+
 // ===============================================================
 // NAMESPACE PRE-CHECK
 // Extracted to keep invokeProcessMetadataItem under the complexity limit.
@@ -1981,6 +2098,7 @@ async function processItemsInIteration(
     for (const ref of removedRefs) {
       if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
         item.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
+        item.allRemovedRefs.push(ref);
       }
     }
     for (const e of unhandledErrors) {
@@ -2434,6 +2552,7 @@ export default class DeployAndFix extends SfCommand<void> {
         filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
@@ -2444,6 +2563,7 @@ export default class DeployAndFix extends SfCommand<void> {
         filePath: path.join(MUTING_PS_BASE_PATH, `${n}.mutingpermissionset-meta.xml`),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
@@ -2454,6 +2574,7 @@ export default class DeployAndFix extends SfCommand<void> {
         filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
@@ -2489,6 +2610,9 @@ export default class DeployAndFix extends SfCommand<void> {
       verbose,
       dryRun
     );
+
+    // ================= REPO-WIDE SWEEP =================
+    repoWideSweep(log, collectBatchRefs(batchItems), new Set(allFilePaths), REPO_PATH, dryRun);
 
     // ================= FINAL SUMMARY =================
     log('\n======================================================');
