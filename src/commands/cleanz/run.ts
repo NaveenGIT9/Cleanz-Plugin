@@ -658,11 +658,13 @@ async function checkNamespaceInstalled(
 
 // Fetch all field FQNs ("Object.Namespace__Field__c") that exist in the org for this namespace.
 // Used when the package IS installed but may be on an older version lacking some fields.
+// Returns null if the query fails or times out — callers must skip removal on null to avoid
+// incorrectly removing fields when we simply couldn't confirm what exists.
 async function fetchNsExistingFields(
   log: (msg: string) => void,
   targetOrg: string,
   namespace: string
-): Promise<Set<string>> {
+): Promise<Set<string> | null> {
   const key = `${targetOrg}:${namespace}`;
   if (nsFieldsCache.has(key)) return nsFieldsCache.get(key)!;
 
@@ -670,6 +672,12 @@ async function fetchNsExistingFields(
   type FieldRec = { QualifiedApiName: string; EntityDefinition: { QualifiedApiName: string } };
   const query = `"SELECT QualifiedApiName, EntityDefinition.QualifiedApiName FROM FieldDefinition WHERE NamespacePrefix = '${namespace}'"`;
   const records = await toolingQuery<FieldRec>(targetOrg, query);
+  if (records.length === 0) {
+    log(
+      `   [NS Check] ${namespace}: query returned 0 fields — possible timeout or empty package. Skipping smart removal.`
+    );
+    return null; // do NOT cache — allow retry next iteration
+  }
   const set = new Set(records.map((r) => `${r.EntityDefinition?.QualifiedApiName}.${r.QualifiedApiName}`));
   nsFieldsCache.set(key, set);
   log(`   [NS Check] ${namespace}: ${set.size} field(s) exist in this org`);
@@ -677,11 +685,12 @@ async function fetchNsExistingFields(
 }
 
 // Fetch all object API names ("Namespace__Object__c") that exist in the org for this namespace.
+// Returns null if the query fails or times out — callers must skip removal on null.
 async function fetchNsExistingObjects(
   log: (msg: string) => void,
   targetOrg: string,
   namespace: string
-): Promise<Set<string>> {
+): Promise<Set<string> | null> {
   const key = `${targetOrg}:${namespace}`;
   if (nsObjectsCache.has(key)) return nsObjectsCache.get(key)!;
 
@@ -689,6 +698,12 @@ async function fetchNsExistingObjects(
   type ObjRec = { QualifiedApiName: string };
   const query = `"SELECT QualifiedApiName FROM EntityDefinition WHERE NamespacePrefix = '${namespace}'"`;
   const records = await toolingQuery<ObjRec>(targetOrg, query);
+  if (records.length === 0) {
+    log(
+      `   [NS Check] ${namespace}: query returned 0 objects — possible timeout or empty package. Skipping smart removal.`
+    );
+    return null; // do NOT cache — allow retry next iteration
+  }
   const set = new Set(records.map((r) => r.QualifiedApiName));
   nsObjectsCache.set(key, set);
   log(`   [NS Check] ${namespace}: ${set.size} object(s) exist in this org`);
@@ -1586,6 +1601,41 @@ function sweepOtherFiles(
 // Extracted to keep invokeProcessMetadataItem under the complexity limit.
 // ===============================================================
 
+async function applyNsSmartRemoval(
+  log: (msg: string) => void,
+  xml: string,
+  ns: string,
+  whitelist: WhitelistMap,
+  targetOrg: string,
+  itemName: string,
+  deployError: string
+): Promise<{ xml: string; ref: RemovedRef | null }> {
+  const existingFields = await fetchNsExistingFields(log, targetOrg, ns);
+  const existingObjects = await fetchNsExistingObjects(log, targetOrg, ns);
+
+  // null means query timed out — skip to avoid false removals.
+  if (existingFields === null || existingObjects === null) {
+    log(`   [NS Smart] ${ns}: skipping — could not confirm org field/object list (query may have timed out)`);
+    return { xml, ref: null };
+  }
+
+  const safeFields = new Set(existingFields);
+  for (const f of whitelist.fields) safeFields.add(f);
+  const safeObjects = new Set(existingObjects);
+  for (const o of whitelist.objects) safeObjects.add(o);
+
+  const fieldResult = removeNsFieldsNotInOrg(xml, ns, safeFields);
+  if (fieldResult.removed) xml = fieldResult.updated;
+  const objResult = removeNsObjectsNotInOrg(xml, ns, safeObjects);
+  if (objResult.removed) xml = objResult.updated;
+
+  if (fieldResult.removed || objResult.removed) {
+    log(`   [NS Smart] Removed missing ${ns}__ fields/objects from ${itemName} (package installed, version diff)`);
+    return { xml, ref: { type: 'namespace', name: ns, label: `[NS:${ns}] smart-removed missing`, deployError } };
+  }
+  return { xml, ref: null };
+}
+
 async function applyNamespacePreCheck(
   log: (msg: string) => void,
   failures: ComponentFailure[],
@@ -1614,7 +1664,6 @@ async function applyNamespacePreCheck(
     // eslint-disable-next-line no-await-in-loop
     const installed = await checkNamespaceInstalled(log, targetOrg, ns);
     if (!installed) {
-      // Package absent — strip every reference to this namespace in one pass.
       const { updated, removed } = bulkRemoveNamespaceRefs(xml, ns);
       if (removed) {
         xml = updated;
@@ -1627,33 +1676,18 @@ async function applyNamespacePreCheck(
         log(`   [NS Bulk] Removed ALL ${ns}__ refs from ${itemName} in one pass`);
       }
     } else {
-      // Package installed but may be an older version — query the org for what actually
-      // exists and remove only the refs that are missing (smart diff).
       // eslint-disable-next-line no-await-in-loop
-      const existingFields = await fetchNsExistingFields(log, targetOrg, ns);
-      // eslint-disable-next-line no-await-in-loop
-      const existingObjects = await fetchNsExistingObjects(log, targetOrg, ns);
-
-      // Augment with whitelisted fields/objects so items being deployed in this
-      // promotion are never removed even if they don't exist in the org yet.
-      const safeFields = new Set(existingFields);
-      for (const f of whitelist.fields) safeFields.add(f);
-      const safeObjects = new Set(existingObjects);
-      for (const o of whitelist.objects) safeObjects.add(o);
-
-      const fieldResult = removeNsFieldsNotInOrg(xml, ns, safeFields);
-      if (fieldResult.removed) xml = fieldResult.updated;
-      const objResult = removeNsObjectsNotInOrg(xml, ns, safeObjects);
-      if (objResult.removed) xml = objResult.updated;
-      if (fieldResult.removed || objResult.removed) {
-        refs.push({
-          type: 'namespace',
-          name: ns,
-          label: `[NS:${ns}] smart-removed missing`,
-          deployError: failure.problem ?? failure.error ?? '',
-        });
-        log(`   [NS Smart] Removed missing ${ns}__ fields/objects from ${itemName} (package installed, version diff)`);
-      }
+      const { xml: updatedXml, ref } = await applyNsSmartRemoval(
+        log,
+        xml,
+        ns,
+        whitelist,
+        targetOrg,
+        itemName,
+        failure.problem ?? failure.error ?? ''
+      );
+      xml = updatedXml;
+      if (ref) refs.push(ref);
     }
   }
 
@@ -2080,7 +2114,9 @@ async function processItemsInIteration(
       skippedFields,
       unhandledErrors,
     } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
-    const removedRefs = [...nsRefs, ...rtRefs, ...objRefs, ...perFailureRefs];
+    const managedRefs = nsRefs; // namespace / managed package removals
+    const missingRefs = [...rtRefs, ...objRefs, ...perFailureRefs]; // standard missing ref removals
+    const removedRefs = [...managedRefs, ...missingRefs];
     for (const ref of removedRefs) {
       if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
         item.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
@@ -2099,24 +2135,45 @@ async function processItemsInIteration(
 
     anyProgress = true;
     perItemRefs.set(item.filePath, removedRefs);
-    saveXmlClean(updatedXml, item.filePath, rootNode);
 
     if (dryRun) {
+      saveXmlClean(updatedXml, item.filePath, rootNode);
       log(`   Dry run — skipped commit for: ${item.itemName}`);
       item.status = 'Fixed (Dry Run)';
     } else {
-      try {
-        execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-        execSync(
-          `git commit -m "[${item.itemName}] Auto-remove missing: ${removedRefs.map((r) => r.label).join(', ')}"`,
-          { cwd: repoPath }
-        );
-        log(`   Committed changes for: ${item.itemName}`);
-        item.status = 'Fixed & Committed';
-      } catch {
-        log(`   Nothing to commit or commit failed for: ${item.itemName}`);
-        item.status = 'Commit Failed';
+      // Commit managed package ref removals separately from missing ref removals
+      // so git history clearly shows which type of fix was applied.
+      if (managedRefs.length > 0) {
+        saveXmlClean(nsXml, item.filePath, rootNode);
+        try {
+          execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+          execSync(
+            `git commit -m "[${item.itemName}] Remove managed package refs: ${managedRefs
+              .map((r) => r.label)
+              .join(', ')}"`,
+            { cwd: repoPath }
+          );
+          log(`   Committed managed package ref removals for: ${item.itemName}`);
+        } catch {
+          log(`   Commit failed for managed package refs: ${item.itemName}`);
+        }
       }
+      if (missingRefs.length > 0) {
+        saveXmlClean(updatedXml, item.filePath, rootNode);
+        try {
+          execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+          execSync(
+            `git commit -m "[${item.itemName}] Auto-remove missing refs: ${missingRefs
+              .map((r) => r.label)
+              .join(', ')}"`,
+            { cwd: repoPath }
+          );
+          log(`   Committed missing ref removals for: ${item.itemName}`);
+        } catch {
+          log(`   Nothing to commit or commit failed for: ${item.itemName}`);
+        }
+      }
+      item.status = 'Fixed & Committed';
     }
   }
 
