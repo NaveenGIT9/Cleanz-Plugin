@@ -2479,21 +2479,46 @@ function getAuthenticatedOrgs(): Promise<Set<string>> {
   });
 }
 
+// Parses a package.xml and returns PromotionItem[] in the same shape as promotion.json.
+function parsePackageXml(xmlContent: string): PromotionItem[] {
+  const items: PromotionItem[] = [];
+  const typeBlocks = xmlContent.match(/<types>[\s\S]*?<\/types>/g) ?? [];
+  for (const block of typeBlocks) {
+    const nameMatch = block.match(/<name>(.*?)<\/name>/);
+    if (!nameMatch) continue;
+    const metaType = nameMatch[1].trim();
+    const members = [...block.matchAll(/<members>(.*?)<\/members>/g)].map((m) => m[1].trim());
+    for (const member of members) {
+      items.push({ t: metaType, n: member });
+    }
+  }
+  return items;
+}
+
+// Reads and parses either a Copado promotion.json or a package.xml into PromotionItem[].
+function loadInputFile(log: (msg: string) => void, inputFilePath: string): PromotionItem[] {
+  const isXml = path.extname(inputFilePath).toLowerCase() === '.xml';
+  log(`Loading ${isXml ? 'package.xml' : 'promotion JSON'}...`);
+  const fileContent = fs.readFileSync(inputFilePath, 'utf8');
+  return isXml ? parsePackageXml(fileContent) : (JSON.parse(fileContent) as PromotionItem[]);
+}
+
 async function resolveInputs(
   log: (msg: string) => void,
   jsonPathFlag: string,
   targetOrgFlag: string
-): Promise<{ promotionJsonPath: string; targetOrg: string }> {
-  let promotionJsonPath = jsonPathFlag;
-  while (!promotionJsonPath || !fs.existsSync(promotionJsonPath)) {
-    if (promotionJsonPath) log('   File not found at that path. Please try again.\n');
+): Promise<{ inputFilePath: string; targetOrg: string }> {
+  let inputFilePath = jsonPathFlag;
+  while (!inputFilePath || !fs.existsSync(inputFilePath)) {
+    if (inputFilePath) log('   File not found at that path. Please try again.\n');
     // eslint-disable-next-line no-await-in-loop
-    promotionJsonPath = await prompt(
-      'Enter full path to your Copado Promotion JSON\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json)\n> '
+    inputFilePath = await prompt(
+      'Enter full path to your Copado Promotion JSON or package.xml\n   (e.g. C:\\Users\\YourName\\Desktop\\promotion.json  OR  ...\\package.xml)\n> '
     );
-    promotionJsonPath = promotionJsonPath.replace(/^"|"$/g, '').trim();
+    inputFilePath = inputFilePath.replace(/^"|"$/g, '').trim();
   }
-  log('   JSON file found.\n');
+  const ext = path.extname(inputFilePath).toLowerCase();
+  log(`   ${ext === '.xml' ? 'package.xml' : 'JSON'} file found.\n`);
 
   // eslint-disable-next-line no-await-in-loop
   const validOrgs = await getAuthenticatedOrgs();
@@ -2507,7 +2532,7 @@ async function resolveInputs(
     targetOrg = (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
-  return { promotionJsonPath, targetOrg };
+  return { inputFilePath, targetOrg };
 }
 
 // ===============================================================
@@ -2557,15 +2582,10 @@ export default class DeployAndFix extends SfCommand<void> {
     if (dryRun) log('*** DRY RUN MODE — files will be modified but NO commits will be made ***\n');
 
     // eslint-disable-next-line no-await-in-loop
-    const { promotionJsonPath, targetOrg } = await resolveInputs(
-      log,
-      flags['json-path'] ?? '',
-      flags['target-org'] ?? ''
-    );
+    const { inputFilePath, targetOrg } = await resolveInputs(log, flags['json-path'] ?? '', flags['target-org'] ?? '');
 
-    // ================= LOAD & PARSE JSON =================
-    log('Loading promotion JSON...');
-    const promotionData = JSON.parse(fs.readFileSync(promotionJsonPath, 'utf8')) as PromotionItem[];
+    // ================= LOAD & PARSE INPUT FILE =================
+    const promotionData = loadInputFile(log, inputFilePath);
 
     const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
     const mutingPermSets = [
