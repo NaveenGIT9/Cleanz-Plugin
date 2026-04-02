@@ -918,21 +918,18 @@ function sleep(ms: number): Promise<void> {
 // finish before retrying we avoid flooding the queue.
 // ===============================================================
 
-type DeployQueueRecord = {
-  Id: string;
-  Status: string;
-  NumberComponentsDeployed: number;
-  NumberComponentsTotal: number;
-};
-
-// Returns the count of deployments that are still deploying components
-// (i.e. NOT yet in the test-only phase). Deployments where all components
-// are deployed but tests are still running are treated as clear — our
-// check-only validation can safely run in parallel with test execution.
+// Queries the Tooling API DeployRequest object to count active
+// (Pending / InProgress) deployments in the org — including any
+// Copado promotions that are currently in flight.
+// We wait until the count reaches 0 before submitting our own
+// CheckOnly (dry-run) validation, which prevents our job from
+// sitting in the queue behind a long-running Copado deployment.
+// It also handles our own stale dry-runs: when --wait 10 expires
+// the job is still InProgress in the org; by waiting for it to
+// finish before retrying we avoid flooding the queue.
 function queryDeployQueueCount(targetOrg: string): Promise<number> {
   return new Promise((resolve) => {
-    const query =
-      "\"SELECT Id, Status, NumberComponentsDeployed, NumberComponentsTotal FROM DeployRequest WHERE Status IN ('Pending','InProgress')\"";
+    const query = "\"SELECT Id FROM DeployRequest WHERE Status IN ('Pending','InProgress')\"";
     const args = ['data', 'query', '--query', query, '--use-tooling-api', '--target-org', targetOrg, '--json'];
     const proc = spawn('sf', args, { shell: true });
     const chunks: string[] = [];
@@ -948,15 +945,9 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
         const raw = chunks.join('');
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: { records?: DeployQueueRecord[] };
+          result?: { totalSize?: number };
         };
-        const records = json?.result?.records ?? [];
-        // Only block on deployments still deploying components.
-        // If all components are deployed (test-only phase), treat as clear.
-        const blockingCount = records.filter(
-          (r) => !(r.NumberComponentsDeployed > 0 && r.NumberComponentsDeployed >= r.NumberComponentsTotal)
-        ).length;
-        return resolve(blockingCount);
+        resolve(json?.result?.totalSize ?? 0);
       } catch {
         resolve(0); // If query fails, assume clear and proceed
       }
@@ -973,9 +964,7 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
   let count = await queryDeployQueueCount(targetOrg);
   if (count === 0) return;
 
-  log(
-    `   [Queue] ${count} active deployment(s) still deploying components. Waiting for component deploy to finish (test-only phase is OK to overlap)...`
-  );
+  log(`   [Queue] ${count} active deployment(s) in org (Copado or previous dry-run). Waiting for queue to clear...`);
   while (count > 0 && Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     await sleep(POLL_MS);
