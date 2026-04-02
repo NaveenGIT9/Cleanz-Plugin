@@ -5,6 +5,7 @@ package-lock.json
 
 # never checkin npm config
 .npmrc
+.npmrc.publish
 
 # debug logs
 npm-error.log
