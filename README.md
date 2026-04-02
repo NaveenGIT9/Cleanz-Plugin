@@ -107,6 +107,80 @@ sf plugins
 
 <!-- commands -->
 
+- [`sf cleanz run`](#sf-cleanz-run)
+- [`sf hello world`](#sf-hello-world)
+
+## `sf cleanz run`
+
+Automated Permission Set and Profile deploy and fix.
+
+```
+USAGE
+  $ sf cleanz run [--json] [--flags-dir <value>] [-j <value>] [-t <value>] [-v] [-d]
+
+FLAGS
+  -d, --dry-run             Modify files to remove bad refs but skip all git commits (preview mode).
+  -j, --json-path=<value>   Full path to your Copado Promotion JSON file.
+  -t, --target-org=<value>  Target org username or alias.
+  -v, --verbose             Print all individual deployment error details (useful for debugging).
+
+GLOBAL FLAGS
+  --flags-dir=<value>  Import flag values from a directory.
+  --json               Format output as json.
+
+DESCRIPTION
+  Automated Permission Set and Profile deploy and fix.
+
+  Reads a Copado Promotion JSON, dry-runs deploys, and auto-removes missing custom field references from Permission Sets
+  and Profiles.
+
+EXAMPLES
+  $ sf cleanz run
+
+  $ sf cleanz run --json-path C:\Users\YourName\Desktop\promotion.json --target-org myOrg
+```
+
+_See code: [src/commands/cleanz/run.ts](https://github.com/salesforcecli/plugin-cleanz/blob/v1.0.1/src/commands/cleanz/run.ts)_
+
+## `sf hello world`
+
+Say hello.
+
+```
+USAGE
+  $ sf hello world [--json] [--flags-dir <value>] [-n <value>]
+
+FLAGS
+  -n, --name=<value>  [default: World] The name of the person you'd like to say hello to.
+
+GLOBAL FLAGS
+  --flags-dir=<value>  Import flag values from a directory.
+  --json               Format output as json.
+
+DESCRIPTION
+  Say hello.
+
+  Say hello either to the world or someone you know.
+
+EXAMPLES
+  Say hello to the world:
+
+    $ sf hello world
+
+  Say hello to someone you know:
+
+    $ sf hello world --name Astro
+
+FLAG DESCRIPTIONS
+  -n, --name=<value>  The name of the person you'd like to say hello to.
+
+    This person can be anyone in the world!
+```
+
+_See code: [src/commands/hello/world.ts](https://github.com/salesforcecli/plugin-cleanz/blob/v1.0.1/src/commands/hello/world.ts)_
+
+<!-- commandsstop -->
+
 - [`sf hello world`](#sf-hello-world)
 
 ## `sf hello world`
