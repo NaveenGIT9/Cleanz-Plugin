@@ -31,6 +31,7 @@ const messages = Messages.loadMessages('@NaveenGIT9/plugin-cleanz', 'cleanz.run'
 type PromotionItem = {
   t: string;
   n: string;
+  a?: string; // operation: "Add" | "Retrieve" — only present in Copado JSON, not package.xml
 };
 
 type DeployResult = {
@@ -2601,17 +2602,21 @@ export default class DeployAndFix extends SfCommand<void> {
     ].sort();
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
+    // Only ADD operations are whitelisted — Retrieve-only components are not being deployed
+    // in this package, so if they cause errors they can be safely removed.
+    // For package.xml (no "a" field), treat all entries as Add (preserve existing behavior).
+    const isAdd = (i: PromotionItem): boolean => !i.a || i.a.toLowerCase() === 'add';
     const whitelist: WhitelistMap = {
-      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField').map((i) => i.n))].sort(),
-      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication').map((i) => i.n))].sort(),
-      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass').map((i) => i.n))].sort(),
-      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage').map((i) => i.n))].sort(),
-      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab').map((i) => i.n))].sort(),
-      objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject').map((i) => i.n))].sort(),
-      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow').map((i) => i.n))].sort(),
-      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout').map((i) => i.n))].sort(),
-      flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage').map((i) => i.n))].sort(),
-      recordTypes: [...new Set(promotionData.filter((i) => i.t === 'RecordType').map((i) => i.n))].sort(),
+      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField' && isAdd(i)).map((i) => i.n))].sort(),
+      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication' && isAdd(i)).map((i) => i.n))].sort(),
+      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass' && isAdd(i)).map((i) => i.n))].sort(),
+      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage' && isAdd(i)).map((i) => i.n))].sort(),
+      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab' && isAdd(i)).map((i) => i.n))].sort(),
+      objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject' && isAdd(i)).map((i) => i.n))].sort(),
+      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow' && isAdd(i)).map((i) => i.n))].sort(),
+      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout' && isAdd(i)).map((i) => i.n))].sort(),
+      flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage' && isAdd(i)).map((i) => i.n))].sort(),
+      recordTypes: [...new Set(promotionData.filter((i) => i.t === 'RecordType' && isAdd(i)).map((i) => i.n))].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
