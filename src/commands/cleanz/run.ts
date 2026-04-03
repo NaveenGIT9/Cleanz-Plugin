@@ -766,7 +766,9 @@ async function invokeDeployWithRetry(
     const procResult = await runDeployProcess(log, items, targetOrg, outputFile, timeoutMins, verbose);
 
     if (procResult === 'timeout') {
-      log(`   Deploy timed out after ${timeoutMins} min(s). Retrying after backoff...`);
+      log(
+        `   Deploy timed out after ${timeoutMins} min(s) (attempt ${attempt}/${MAX_TOTAL_ATTEMPTS}). Retrying after backoff...`
+      );
       // eslint-disable-next-line no-await-in-loop
       await sleep(getBackoffMs(attempt));
       continue;
@@ -2334,8 +2336,10 @@ async function runBatchDeploy(
       break;
     }
 
+    const fixedSoFar = batchItems.filter((i) => i.done && i.allRemovedFields.length > 0).length;
+    const totalItems = batchItems.length;
     log(
-      `\n--- Batch Iteration ${iteration} | Active: ${activeItems.length} | Total Deploys: ${totalDeploys.value} / ${maxTotalDeploys} ---`
+      `\n--- Batch Iteration ${iteration} | Active: ${activeItems.length} | Fixed: ${fixedSoFar}/${totalItems} | Total Deploys: ${totalDeploys.value} / ${maxTotalDeploys} ---`
     );
     log('Running batch dry-run deploy...');
 
@@ -2454,7 +2458,9 @@ async function runBatchDeploy(
 
 // Returns the set of valid org aliases + usernames from sf org list.
 // Returns empty set if the CLI call fails — callers treat empty as "skip validation".
-function getAuthenticatedOrgs(): Promise<Set<string>> {
+type OrgEntry = { alias?: string; username?: string };
+
+function getAuthenticatedOrgs(): Promise<{ valid: Set<string>; entries: OrgEntry[] }> {
   return new Promise((resolve) => {
     const proc = spawn('sf', ['org', 'list', '--json'], { shell: true });
     const chunks: string[] = [];
@@ -2462,7 +2468,7 @@ function getAuthenticatedOrgs(): Promise<Set<string>> {
     proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
     const timer = setTimeout(() => {
       proc.kill();
-      resolve(new Set());
+      resolve({ valid: new Set(), entries: [] });
     }, 15_000);
     proc.on('close', () => {
       clearTimeout(timer);
@@ -2470,19 +2476,21 @@ function getAuthenticatedOrgs(): Promise<Set<string>> {
         const raw = chunks.join('');
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: Record<string, Array<{ alias?: string; username?: string }>>;
+          result?: Record<string, OrgEntry[]>;
         };
         const valid = new Set<string>();
+        const entries: OrgEntry[] = [];
         for (const orgs of Object.values(json?.result ?? {})) {
           if (!Array.isArray(orgs)) continue;
           for (const org of orgs) {
             if (org.alias) valid.add(org.alias);
             if (org.username) valid.add(org.username);
+            entries.push(org);
           }
         }
-        resolve(valid);
+        resolve({ valid, entries });
       } catch {
-        resolve(new Set());
+        resolve({ valid: new Set(), entries: [] });
       }
     });
   });
@@ -2530,9 +2538,19 @@ async function resolveInputs(
   log(`   ${ext === '.xml' ? 'package.xml' : 'JSON'} file found.\n`);
 
   // eslint-disable-next-line no-await-in-loop
-  const validOrgs = await getAuthenticatedOrgs();
+  const { valid: validOrgs, entries: orgEntries } = await getAuthenticatedOrgs();
   const hasOrgList = validOrgs.size > 0;
-  if (!hasOrgList) log('   (Could not retrieve org list — skipping alias validation)\n');
+  if (!hasOrgList) {
+    log('   (Could not retrieve org list — skipping alias validation)\n');
+  } else {
+    log('   Authenticated orgs:');
+    orgEntries.forEach((o) => {
+      const alias = o.alias ? `${o.alias}` : '';
+      const user = o.username ? `(${o.username})` : '';
+      log(`      - ${alias} ${user}`.trimEnd());
+    });
+    log('');
+  }
 
   let targetOrg = targetOrgFlag.trim();
   while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
@@ -2834,12 +2852,21 @@ export default class DeployAndFix extends SfCommand<void> {
       clog(`\nNeeds manual attention (${needsAttention.length}):`);
       needsAttention.forEach((r) => {
         clog(`   - [${r.Type}] ${r.Name} — ${r.Status}`);
-        if (r.UnhandledErrors) {
-          r.UnhandledErrors.split('; ')
-            .filter(Boolean)
-            .forEach((e) => clog(`     Unhandled error: ${e}`));
-        }
       });
+    }
+
+    const itemsWithUnhandled = summary.filter((r) => r.UnhandledErrors);
+    if (itemsWithUnhandled.length > 0) {
+      clog('\n------------------------------------------------------');
+      clog('UNHANDLED ERRORS — These need manual fixes in the XML:');
+      clog('------------------------------------------------------');
+      itemsWithUnhandled.forEach((r) => {
+        clog(`\n   [${r.Type}] ${r.Name}:`);
+        r.UnhandledErrors.split('; ')
+          .filter(Boolean)
+          .forEach((e) => clog(`      ! ${e}`));
+      });
+      clog('');
     }
 
     clog(
