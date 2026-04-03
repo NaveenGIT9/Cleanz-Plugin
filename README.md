@@ -31,7 +31,7 @@ Normally you would open each file, find the bad reference, delete it, and redepl
 ## Install
 
 ```bash
-sf plugins install @NaveenGIT9/plugin-cleanz
+sf plugins install @naveengit9/plugin-cleanz
 ```
 
 To update to the latest version:

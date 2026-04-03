@@ -5,7 +5,7 @@
     "flagAliases": [],
     "flagChars": ["d", "j", "t", "v"],
     "flags": ["dry-run", "flags-dir", "json", "json-path", "target-org", "verbose"],
-    "plugin": "@NaveenGIT9/plugin-cleanz"
+    "plugin": "@naveengit9/plugin-cleanz"
   },
   {
     "alias": [],
@@ -13,6 +13,6 @@
     "flagAliases": [],
     "flagChars": ["n"],
     "flags": ["flags-dir", "json", "name"],
-    "plugin": "@NaveenGIT9/plugin-cleanz"
+    "plugin": "@naveengit9/plugin-cleanz"
   }
 ]

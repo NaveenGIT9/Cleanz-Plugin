@@ -22,7 +22,7 @@ import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
 import { Messages } from '@salesforce/core';
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
-const messages = Messages.loadMessages('@NaveenGIT9/plugin-cleanz', 'cleanz.run');
+const messages = Messages.loadMessages('@naveengit9/plugin-cleanz', 'cleanz.run');
 
 // ===============================================================
 // TYPES
