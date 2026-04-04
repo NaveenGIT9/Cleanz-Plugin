@@ -91,6 +91,7 @@ type WhitelistMap = {
   layouts: string[];
   flexipages: string[];
   recordTypes: string[]; // "Object.DeveloperName" — profileActionOverrides blocks referencing these are kept
+  customMetadataTypes: string[]; // "ApiName__mdt" — customMetadataTypeAccesses blocks referencing these are kept
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -107,7 +108,8 @@ type RefType =
   | 'namespace'
   | 'userPermission'
   | 'objectFlag' // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
-  | 'recordTypeOverride'; // profileActionOverrides block with an invalid <recordType> reference
+  | 'recordTypeOverride' // profileActionOverrides block with an invalid <recordType> reference
+  | 'customMetadataType'; // customMetadataTypeAccesses block referencing a missing __mdt type
 
 type RemovedRef = {
   type: RefType;
@@ -457,6 +459,12 @@ function removeLayoutAssignmentFromXml(xmlContent: string, name: string): { upda
 }
 function removeUserPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'userPermissions', 'name', name);
+}
+function removeCustomMetadataTypeAccessFromXml(
+  xmlContent: string,
+  name: string
+): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'customMetadataTypeAccesses', 'name', name);
 }
 
 // Removes a single <flagElement>true</flagElement> line from the objectPermissions block
@@ -1093,6 +1101,16 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     whitelistKey: 'tabs',
     removeFn: removeTabSettingFromXml,
     displayTag: '[Tab]',
+  },
+  {
+    // Must be before the 'object' handler — both match "no CustomObject named X found"
+    // but __mdt types need <customMetadataTypeAccesses> removed, not <objectPermissions>.
+    patterns: [/In field: customMetadataType - no CustomObject named (.+?) found/i],
+    label: 'customMetadataType',
+    refType: 'customMetadataType',
+    whitelistKey: 'customMetadataTypes',
+    removeFn: removeCustomMetadataTypeAccessFromXml,
+    displayTag: '[CustomMetadata]',
   },
   {
     patterns: [
@@ -1805,6 +1823,7 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   for (const fp of whitelist.flexipages) xml = removeProfileActionOverrideFromXml(xml, fp).updated;
   for (const rt of whitelist.recordTypes) xml = removeProfileActionOverrideByRecordTypeFromXml(xml, rt).updated;
   for (const o of whitelist.objects) xml = removeProfileActionOverrideByPageObjectFromXml(xml, o).updated;
+  for (const cmt of whitelist.customMetadataTypes) xml = removeCustomMetadataTypeAccessFromXml(xml, cmt).updated;
   return xml;
 }
 
@@ -1846,15 +1865,11 @@ export function maskProfileFalsePositives(xmlContent: string): string {
   return xml;
 }
 
-export function maskPermSetFalsePositives(xmlContent: string): string {
-  // customMetadataTypeAccesses deploys successfully in Copado even with unknown CMT names
-  // (confirmed via real deployment testing on profiles). Same behaviour applies to permission
-  // sets — mask before dry-run so it does not consume the one-error-per-component slot.
-  // Original XML is restored after each dry-run via try/finally.
-  return xmlContent.replace(
-    /[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g,
-    ''
-  );
+export function maskPermSetFalsePositives(_xmlContent: string): string {
+  // Reserved for future permission-set-specific masking.
+  // customMetadataTypeAccesses is NOT masked here — missing __mdt references DO cause real
+  // deployment failures and are now handled by the customMetadataType METADATA_HANDLER.
+  return _xmlContent;
 }
 
 // ===============================================================
@@ -2635,6 +2650,19 @@ export default class DeployAndFix extends SfCommand<void> {
       layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout' && isAdd(i)).map((i) => i.n))].sort(),
       flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage' && isAdd(i)).map((i) => i.n))].sort(),
       recordTypes: [...new Set(promotionData.filter((i) => i.t === 'RecordType' && isAdd(i)).map((i) => i.n))].sort(),
+      // CustomMetadata type definitions appear as CustomObject with __mdt suffix.
+      // Individual CMT records appear as CustomMetadata with "TypeName__mdt.RecordName" format.
+      customMetadataTypes: [
+        ...new Set([
+          ...promotionData.filter((i) => i.t === 'CustomObject' && isAdd(i) && i.n.endsWith('__mdt')).map((i) => i.n),
+          ...promotionData
+            .filter((i) => i.t === 'CustomMetadata' && isAdd(i))
+            .map((i) => {
+              const dot = i.n.indexOf('.');
+              return dot >= 0 ? i.n.substring(0, dot) : i.n;
+            }),
+        ]),
+      ].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
@@ -2665,6 +2693,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`  - Layouts             : ${whitelist.layouts.length}`);
     log(`  - FlexiPages          : ${whitelist.flexipages.length}`);
     log(`  - RecordTypes         : ${whitelist.recordTypes.length}`);
+    log(`  - CustomMetadataTypes : ${whitelist.customMetadataTypes.length}`);
     log(`Max per item            : ${MAX_ITERATIONS} iterations`);
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
