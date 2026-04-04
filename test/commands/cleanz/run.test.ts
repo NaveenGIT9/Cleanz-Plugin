@@ -187,6 +187,9 @@ describe('maskProfileFalsePositives', () => {
 // ─── maskPermSetFalsePositives ───────────────────────────────────────────────
 
 describe('maskPermSetFalsePositives', () => {
+  // maskPermSetFalsePositives is intentionally a no-op for permission sets.
+  // customMetadataTypeAccesses errors are real deployment failures and are handled
+  // by the METADATA_HANDLERS loop — they must NOT be masked before dry-run.
   const permSet = [
     '<PermissionSet>',
     '    <classAccesses><apexClass>Foo</apexClass></classAccesses>',
@@ -195,20 +198,22 @@ describe('maskPermSetFalsePositives', () => {
     '</PermissionSet>',
   ].join('\n');
 
-  it('strips customMetadataTypeAccesses only', () => {
+  it('returns XML unchanged — all blocks preserved for error detection', () => {
     const result = maskPermSetFalsePositives(permSet);
-    expect(result).not.to.include('<customMetadataTypeAccesses>');
+    expect(result).to.equal(permSet);
+    expect(result).to.include('<customMetadataTypeAccesses>');
     expect(result).to.include('<classAccesses>');
     expect(result).to.include('<fieldPermissions>');
   });
 
-  it('strips multiple customMetadataTypeAccesses blocks', () => {
+  it('preserves multiple customMetadataTypeAccesses blocks', () => {
     const multi = permSet.replace(
       '<fieldPermissions>',
       '<customMetadataTypeAccesses><name>Another__mdt</name></customMetadataTypeAccesses>\n    <fieldPermissions>'
     );
     const result = maskPermSetFalsePositives(multi);
-    expect(result).not.to.include('<customMetadataTypeAccesses>');
+    expect(result).to.equal(multi);
+    expect(result).to.include('<customMetadataTypeAccesses>');
   });
 });
 
