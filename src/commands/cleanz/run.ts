@@ -2495,9 +2495,13 @@ function getAuthenticatedOrgs(): Promise<{ valid: Set<string>; entries: OrgEntry
         };
         const valid = new Set<string>();
         const entries: OrgEntry[] = [];
+        const seenUsernames = new Set<string>();
         for (const orgs of Object.values(json?.result ?? {})) {
           if (!Array.isArray(orgs)) continue;
           for (const org of orgs) {
+            const key = org.username ?? org.alias ?? '';
+            if (!key || seenUsernames.has(key)) continue;
+            seenUsernames.add(key);
             if (org.alias) valid.add(org.alias);
             if (org.username) valid.add(org.username);
             entries.push(org);
