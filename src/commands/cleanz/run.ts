@@ -92,6 +92,8 @@ type WhitelistMap = {
   flexipages: string[];
   recordTypes: string[]; // "Object.DeveloperName" — profileActionOverrides blocks referencing these are kept
   customMetadataTypes: string[]; // "ApiName__mdt" — customMetadataTypeAccesses blocks referencing these are kept
+  customPermissions: string[]; // "ApiName" — customPermissions blocks referencing these are kept
+  recordTypeVisibilities: string[]; // "Object.DeveloperName" — recordTypeVisibilities blocks referencing these are kept
 };
 
 // Carries enough info to remove a ref from ANY other file in the batch.
@@ -109,7 +111,9 @@ type RefType =
   | 'userPermission'
   | 'objectFlag' // a specific boolean flag inside an objectPermissions block (e.g. viewAllRecords)
   | 'recordTypeOverride' // profileActionOverrides block with an invalid <recordType> reference
-  | 'customMetadataType'; // customMetadataTypeAccesses block referencing a missing __mdt type
+  | 'customMetadataType' // customMetadataTypeAccesses block referencing a missing __mdt type
+  | 'customPermission' // customPermissions block referencing a missing CustomPermission
+  | 'recordTypeVisibility'; // recordTypeVisibilities block referencing a missing RecordType
 
 type RemovedRef = {
   type: RefType;
@@ -465,6 +469,12 @@ function removeCustomMetadataTypeAccessFromXml(
   name: string
 ): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'customMetadataTypeAccesses', 'name', name);
+}
+function removeCustomPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'customPermissions', 'name', name);
+}
+function removeRecordTypeVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'recordTypeVisibilities', 'recordType', name);
 }
 
 // Removes a single <flagElement>true</flagElement> line from the objectPermissions block
@@ -1123,6 +1133,24 @@ const METADATA_HANDLERS: MetadataHandler[] = [
     whitelistKey: 'objects',
     removeFn: removeObjectPermissionFromXml,
     displayTag: '[Object]',
+  },
+  {
+    patterns: [/In field: customPermission - no CustomPermission named (.+?) found/i],
+    label: 'customPermission',
+    refType: 'customPermission',
+    whitelistKey: 'customPermissions',
+    removeFn: removeCustomPermissionFromXml,
+    displayTag: '[CustomPermission]',
+  },
+  {
+    // PermissionSet recordTypeVisibilities — distinct from profileActionOverrides RecordType pre-check.
+    // Error: "In field: recordType - no RecordType named Object.DevName found"
+    patterns: [/In field: recordType - no RecordType named (.+?) found/i],
+    label: 'recordTypeVisibility',
+    refType: 'recordTypeVisibility',
+    whitelistKey: 'recordTypeVisibilities',
+    removeFn: removeRecordTypeVisibilityFromXml,
+    displayTag: '[RecordTypeVisibility]',
   },
   {
     patterns: [
@@ -1824,6 +1852,8 @@ function maskWhitelistedEntries(xmlContent: string, whitelist: WhitelistMap): st
   for (const rt of whitelist.recordTypes) xml = removeProfileActionOverrideByRecordTypeFromXml(xml, rt).updated;
   for (const o of whitelist.objects) xml = removeProfileActionOverrideByPageObjectFromXml(xml, o).updated;
   for (const cmt of whitelist.customMetadataTypes) xml = removeCustomMetadataTypeAccessFromXml(xml, cmt).updated;
+  for (const cp of whitelist.customPermissions) xml = removeCustomPermissionFromXml(xml, cp).updated;
+  for (const rtv of whitelist.recordTypeVisibilities) xml = removeRecordTypeVisibilityFromXml(xml, rtv).updated;
   return xml;
 }
 
@@ -2667,6 +2697,12 @@ export default class DeployAndFix extends SfCommand<void> {
             }),
         ]),
       ].sort(),
+      customPermissions: [
+        ...new Set(promotionData.filter((i) => i.t === 'CustomPermission' && isAdd(i)).map((i) => i.n)),
+      ].sort(),
+      recordTypeVisibilities: [
+        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isAdd(i)).map((i) => i.n)),
+      ].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
@@ -2698,6 +2734,8 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`  - FlexiPages          : ${whitelist.flexipages.length}`);
     log(`  - RecordTypes         : ${whitelist.recordTypes.length}`);
     log(`  - CustomMetadataTypes : ${whitelist.customMetadataTypes.length}`);
+    log(`  - CustomPermissions   : ${whitelist.customPermissions.length}`);
+    log(`  - RecordTypeVis       : ${whitelist.recordTypeVisibilities.length}`);
     log(`Max per item            : ${MAX_ITERATIONS} iterations`);
     log(`Global deploy cap       : ${MAX_TOTAL_DEPLOYS} total deploys`);
     log(`Deploy timeout          : ${DEPLOY_TIMEOUT_MINS} min(s) per attempt`);
