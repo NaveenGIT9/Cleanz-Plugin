@@ -716,6 +716,8 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
   xml = removeBlocksWithNamespace(xml, 'flowAccesses', 'flow', namespace);
   xml = removeBlocksWithNamespace(xml, 'applicationVisibilities', 'application', namespace);
   xml = removeBlocksWithNamespace(xml, 'profileActionOverrides', 'content', namespace);
+  xml = removeBlocksWithNamespace(xml, 'customMetadataTypeAccesses', 'name', namespace);
+  xml = removeBlocksWithNamespace(xml, 'customPermissions', 'name', namespace);
 
   return { updated: xml, removed: xml !== xmlContent };
 }
@@ -1513,7 +1515,8 @@ function sweepOtherFiles(
     const isProfile = filePath.endsWith('.profile-meta.xml');
     for (const ref of refs) {
       // Don't sweep refs into Profile files that Copado real deployments ignore.
-      // Only flows and userPermissions actually fail on profiles during deployment.
+      // Flows, userPermissions, and profileActionOverrides are the ref types that actually
+      // fail on profiles during real deployment — all others are Copado TRIM false positives.
       if (isProfile && PROFILE_SKIPPED_REF_TYPES.has(ref.type)) continue;
       let result: { updated: string; removed: boolean };
       if (ref.type === 'namespace') {
@@ -1927,6 +1930,7 @@ const DEDUP_BLOCKS: Array<{ blockTag: string; keyTag: string }> = [
   { blockTag: 'userPermissions', keyTag: 'name' },
   { blockTag: 'recordTypeVisibilities', keyTag: 'recordType' },
   { blockTag: 'customMetadataTypeAccesses', keyTag: 'name' },
+  { blockTag: 'customPermissions', keyTag: 'name' },
   { blockTag: 'categoryGroupVisibilities', keyTag: 'dataCategoryGroup' },
 ];
 
@@ -2615,6 +2619,25 @@ async function resolveInputs(
   return { inputFilePath, targetOrg };
 }
 
+// Prints the detailed whitelist breakdown to the log.
+// Extracted to keep run() under the ESLint complexity limit — each `|| 'none'` counts as +1.
+function logWhitelistDetails(log: (msg: string) => void, whitelist: WhitelistMap): void {
+  log('\nWhitelisted items (will never be removed):');
+  log('  Fields            : ' + (whitelist.fields.join(', ') || 'none'));
+  log('  Apps              : ' + (whitelist.apps.join(', ') || 'none'));
+  log('  Classes           : ' + (whitelist.classes.join(', ') || 'none'));
+  log('  Pages             : ' + (whitelist.pages.join(', ') || 'none'));
+  log('  Tabs              : ' + (whitelist.tabs.join(', ') || 'none'));
+  log('  Objects           : ' + (whitelist.objects.join(', ') || 'none'));
+  log('  Flows             : ' + (whitelist.flows.join(', ') || 'none'));
+  log('  Layouts           : ' + (whitelist.layouts.join(', ') || 'none'));
+  log('  FlexiPages        : ' + (whitelist.flexipages.join(', ') || 'none'));
+  log('  RecordTypes       : ' + (whitelist.recordTypes.join(', ') || 'none'));
+  log('  CMT Types         : ' + (whitelist.customMetadataTypes.join(', ') || 'none'));
+  log('  CustomPermissions : ' + (whitelist.customPermissions.join(', ') || 'none'));
+  log('  RecordTypeVis     : ' + (whitelist.recordTypeVisibilities.join(', ') || 'none'));
+}
+
 // ===============================================================
 // SF PLUGIN COMMAND
 // ===============================================================
@@ -2756,17 +2779,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nProfiles to process:');
     profiles.forEach((p) => log(`   - ${p}`));
 
-    log('\nWhitelisted items (will never be removed):');
-    log('  Fields   : ' + (whitelist.fields.join(', ') || 'none'));
-    log('  Apps     : ' + (whitelist.apps.join(', ') || 'none'));
-    log('  Classes  : ' + (whitelist.classes.join(', ') || 'none'));
-    log('  Pages    : ' + (whitelist.pages.join(', ') || 'none'));
-    log('  Tabs     : ' + (whitelist.tabs.join(', ') || 'none'));
-    log('  Objects  : ' + (whitelist.objects.join(', ') || 'none'));
-    log('  Flows       : ' + (whitelist.flows.join(', ') || 'none'));
-    log('  Layouts     : ' + (whitelist.layouts.join(', ') || 'none'));
-    log('  FlexiPages  : ' + (whitelist.flexipages.join(', ') || 'none'));
-    log('  RecordTypes : ' + (whitelist.recordTypes.join(', ') || 'none'));
+    logWhitelistDetails(log, whitelist);
 
     log('');
     // eslint-disable-next-line no-await-in-loop
