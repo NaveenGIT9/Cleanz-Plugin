@@ -1047,6 +1047,9 @@ const PROFILE_SKIPPED_REF_TYPES = new Set<RefType>([
   'tab',
   'objectFlag',
   'recordTypeOverride',
+  'customMetadataType', // Copado TRIM strips customMetadataTypeAccesses from profiles
+  'customPermission', // confirmed: Copado TRIM strips customPermissions from profiles
+  'recordTypeVisibility', // Copado TRIM strips recordTypeVisibilities from profiles
 ]);
 
 // ===============================================================
@@ -1892,6 +1895,7 @@ export function maskProfileFalsePositives(xmlContent: string): string {
   xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<customPermissions>[\s\S]*?<\/customPermissions>[ \t]*\r?\n?/g, ''); // confirmed: Copado TRIM strips these
   return xml;
 }
 
