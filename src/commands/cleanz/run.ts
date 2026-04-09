@@ -72,6 +72,7 @@ type BatchItem = {
   metadataType: string;
   itemName: string;
   filePath: string;
+  operation: 'ADD' | 'FULL'; // ADD = delta commit, FULL = entire file committed
   status: string;
   allRemovedFields: Array<{ label: string; error: string }>;
   allRemovedRefs: RemovedRef[]; // full ref objects for repo-wide sweep
@@ -1364,7 +1365,20 @@ function processRegisteredFailure(
         log(`   [Profile] Skipping ${handler.label} (not enforced by Copado deployment): ${name}`);
         return { handled: true, xmlContent };
       }
-      log(`   [Profile] Standard/Big object error — treating as real (not a false positive): ${name}`);
+      log(`   [Profile FULL] Standard/Big object error detected — checking ADD whitelist before removal: ${name}`);
+    }
+
+    // Explicit ADD-whitelist guard for standard and big object refs (FULL operation — Profile and
+    // PermissionSet). If the object is present in the promotion JSON as an ADD operation it will
+    // exist in the org after deployment, so the permission is valid — skip removal.
+    if (isStandardOrBigObjectRef(handler.refType, name)) {
+      if (whitelist.objects.includes(name)) {
+        log(`   [FULL] Skipping [Object] ${name} — present in promotion as ADD, will exist in org after deploy`);
+        skippedFields.push(`[Object] ${name}`);
+        allSkippedFields.push(`[Object] ${name}`);
+        return { handled: true, xmlContent };
+      }
+      log(`   [FULL] [Object] ${name} not in ADD whitelist — confirmed absent from org, proceeding with removal`);
     }
 
     if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
@@ -1900,7 +1914,7 @@ function maskStandardApps(xmlContent: string): string {
   );
 }
 
-export function maskProfileFalsePositives(xmlContent: string): string {
+export function maskProfileFalsePositives(xmlContent: string, isFull = false): string {
   // Mask several block types from profiles before each dry-run.
   // Copado real deployments only enforce flowAccesses, userPermissions, and
   // profileActionOverrides — all other sections are either stripped by Copado
@@ -1908,13 +1922,32 @@ export function maskProfileFalsePositives(xmlContent: string): string {
   // or cause unpredictable errors (categoryGroupVisibilities) that cannot be
   // detected upfront. Stripping these prevents them from consuming the
   // one-error-per-component slot. The original XML is restored after each dry-run.
+  //
+  // FULL vs ADD distinction for objectPermissions:
+  //   ADD  — Copado TRIM strips ALL object permissions before the real deploy, so mask them all.
+  //   FULL — Copado TRIM only strips __c/__mdt object permissions. Standard objects and big
+  //          objects (__b) that don't exist in the org cause hard deployment errors that Copado
+  //          does NOT clean. Keep those unmasked so the dry-run detects and removes them.
   let xml = xmlContent;
   xml = xml.replace(/[ \t]*<applicationVisibilities>[\s\S]*?<\/applicationVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
-  xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
+  if (isFull) {
+    // FULL: only mask __c and __mdt object permissions — keep standard and __b exposed.
+    const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+    xml = xml.replace(
+      new RegExp(
+        `[ \\t]*<objectPermissions>${inner}<object>[^<]*(?:__c|__mdt)[^<]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      ''
+    );
+  } else {
+    // ADD: mask ALL object permissions (Copado TRIM handles all of them for ADD profiles).
+    xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
+  }
   xml = xml.replace(/[ \t]*<recordTypeVisibilities>[\s\S]*?<\/recordTypeVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
@@ -1923,11 +1956,25 @@ export function maskProfileFalsePositives(xmlContent: string): string {
   return xml;
 }
 
-export function maskPermSetFalsePositives(_xmlContent: string): string {
-  // Reserved for future permission-set-specific masking.
-  // customMetadataTypeAccesses is NOT masked here — missing __mdt references DO cause real
-  // deployment failures and are now handled by the customMetadataType METADATA_HANDLER.
-  return _xmlContent;
+export function maskPermSetFalsePositives(xmlContent: string, isFull = false): string {
+  // customMetadataTypeAccesses is NOT masked — missing __mdt references cause real deployment
+  // failures and are handled by the customMetadataType METADATA_HANDLER.
+  //
+  // FULL operation: Copado TRIM strips __c/__mdt object permissions from permission sets before
+  // the real deploy, so mask those to avoid false positives consuming the one-error-per-component
+  // slot. Standard and __b object permissions are NOT stripped by Copado and cause hard errors —
+  // keep them exposed so the dry-run detects and removes them.
+  // ADD operation: no masking needed (existing behaviour).
+  if (!isFull) return xmlContent;
+
+  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+  return xmlContent.replace(
+    new RegExp(
+      `[ \\t]*<objectPermissions>${inner}<object>[^<]*(?:__c|__mdt)[^<]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+      'g'
+    ),
+    ''
+  );
 }
 
 // ===============================================================
@@ -1989,10 +2036,10 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     let masked = maskWhitelistedEntries(orig, whitelist);
     masked = maskStandardApps(masked);
     if (item.filePath.endsWith('.profile-meta.xml')) {
-      masked = maskProfileFalsePositives(masked);
+      masked = maskProfileFalsePositives(masked, item.operation === 'FULL');
     }
     if (item.filePath.endsWith('.permissionset-meta.xml') || item.filePath.endsWith('.mutingpermissionset-meta.xml')) {
-      masked = maskPermSetFalsePositives(masked);
+      masked = maskPermSetFalsePositives(masked, item.operation === 'FULL');
     }
     saved.set(item.filePath, orig);
     if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
@@ -2549,6 +2596,13 @@ function parsePackageXml(xmlContent: string): PromotionItem[] {
   return items;
 }
 
+// Returns 'FULL' when the Copado JSON marks this item with operation "Full" (entire file
+// committed), or 'ADD' for delta commits and package.xml entries (no "a" field).
+function getItemOperation(promotionData: PromotionItem[], metadataType: string, name: string): 'ADD' | 'FULL' {
+  const item = promotionData.find((i) => i.t === metadataType && i.n === name);
+  return item?.a?.toLowerCase() === 'full' ? 'FULL' : 'ADD';
+}
+
 // Reads and parses either a Copado promotion.json or a package.xml into PromotionItem[].
 function loadInputFile(log: (msg: string) => void, inputFilePath: string): PromotionItem[] {
   const isXml = path.extname(inputFilePath).toLowerCase() === '.xml';
@@ -2749,15 +2803,17 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Max retries             : ${MAX_RETRIES} per deploy call`);
 
     log('\nPermission Sets to process:');
-    permSets.forEach((ps) => log(`   - ${ps}`));
+    permSets.forEach((ps) => log(`   - ${ps} [${getItemOperation(promotionData, 'PermissionSet', ps)}]`));
     log('\nMuting Permission Sets to process:');
     if (mutingPermSets.length > 0) {
-      mutingPermSets.forEach((mps) => log(`   - ${mps}`));
+      mutingPermSets.forEach((mps) =>
+        log(`   - ${mps} [${getItemOperation(promotionData, 'MutingPermissionSet', mps)}]`)
+      );
     } else {
       log('   (none)');
     }
     log('\nProfiles to process:');
-    profiles.forEach((p) => log(`   - ${p}`));
+    profiles.forEach((p) => log(`   - ${p} [${getItemOperation(promotionData, 'Profile', p)}]`));
 
     logWhitelistDetails(log, whitelist);
 
@@ -2786,6 +2842,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'PermissionSet',
         itemName: n,
         filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
+        operation: getItemOperation(promotionData, 'PermissionSet', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -2797,6 +2854,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'MutingPermissionSet',
         itemName: n,
         filePath: path.join(MUTING_PS_BASE_PATH, `${n}.mutingpermissionset-meta.xml`),
+        operation: getItemOperation(promotionData, 'MutingPermissionSet', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -2808,6 +2866,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'Profile',
         itemName: n,
         filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
+        operation: getItemOperation(promotionData, 'Profile', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
