@@ -1035,11 +1035,13 @@ function shouldSkip(
   return false;
 }
 
-// Ref types that Copado real deployments do NOT enforce for Profile files.
-// Only flows, userPermissions, and profileActionOverrides actually fail on profiles
-// during deployment. Used in both the sweep guard and the processRegisteredFailure safety net.
+// Ref types that are false positives for ALL Profile deployments (ADD and FULL).
+// ADD profiles: Copado only enforces flowAccesses, userPermissions, and profileActionOverrides.
+// FULL profiles: Copado only enforces standard/big object objectPermissions — everything else
+//   (including flows, userPermissions, profileActionOverrides) is masked before dry-run.
+// Used in both the sweep guard and the processRegisteredFailure safety net.
 // 'recordTypeOverride' is excluded from the sweep because each profile will hit the error
-// independently and be fixed by applyRecordTypePreCheck (no sweep needed).
+// independently and be fixed by applyRecordTypePreCheck (no sweep needed for ADD profiles).
 const PROFILE_SKIPPED_REF_TYPES = new Set<RefType>([
   'app',
   'class',
@@ -1352,7 +1354,7 @@ function processRegisteredFailure(
       return { handled: true, xmlContent };
     }
 
-    // Safety net: skip non-flow/non-userPerm types for Profiles.
+    // Safety net: skip false-positive types for Profiles.
     // maskProfileFalsePositives strips these before dry-run so they should never
     // reach here, but guard anyway in case masking is incomplete.
     //
@@ -1915,13 +1917,18 @@ function maskStandardApps(xmlContent: string): string {
 }
 
 export function maskProfileFalsePositives(xmlContent: string, isFull = false): string {
-  // Mask several block types from profiles before each dry-run.
-  // Copado real deployments only enforce flowAccesses, userPermissions, and
-  // profileActionOverrides — all other sections are either stripped by Copado
-  // TRIM or deploy successfully even with unknown values (customMetadataTypeAccesses)
-  // or cause unpredictable errors (categoryGroupVisibilities) that cannot be
-  // detected upfront. Stripping these prevents them from consuming the
-  // one-error-per-component slot. The original XML is restored after each dry-run.
+  // Mask block types that are false positives for profiles before each dry-run.
+  // The original XML is restored after each dry-run.
+  //
+  // ADD profiles: Copado real deployments only enforce flowAccesses, userPermissions,
+  //   and profileActionOverrides. All other sections are stripped by Copado TRIM or
+  //   cause unpredictable errors and cannot be usefully fixed. Mask everything else.
+  //
+  // FULL profiles: Copado real deployments ONLY enforce objectPermissions for standard
+  //   and big objects (no __c/__mdt suffix) that are absent from the org. Everything
+  //   else — including flowAccesses, userPermissions, and profileActionOverrides — is
+  //   also a false positive for FULL profiles and must be masked. Only standard/big
+  //   object objectPermissions remain exposed so the dry-run can detect and remove them.
   //
   // FULL vs ADD distinction for objectPermissions:
   //   ADD  — Copado TRIM strips ALL object permissions before the real deploy, so mask them all.
@@ -1935,6 +1942,10 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
   if (isFull) {
+    // FULL: mask flowAccesses, userPermissions, and profileActionOverrides — all false positives.
+    xml = xml.replace(/[ \t]*<flowAccesses>[\s\S]*?<\/flowAccesses>[ \t]*\r?\n?/g, '');
+    xml = xml.replace(/[ \t]*<userPermissions>[\s\S]*?<\/userPermissions>[ \t]*\r?\n?/g, '');
+    xml = xml.replace(/[ \t]*<profileActionOverrides>[\s\S]*?<\/profileActionOverrides>[ \t]*\r?\n?/g, '');
     // FULL: only mask __c and __mdt object permissions — keep standard and __b exposed.
     const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
     xml = xml.replace(
