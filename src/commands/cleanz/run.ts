@@ -1354,9 +1354,17 @@ function processRegisteredFailure(
     // Safety net: skip non-flow/non-userPerm types for Profiles.
     // maskProfileFalsePositives strips these before dry-run so they should never
     // reach here, but guard anyway in case masking is incomplete.
+    //
+    // Exception: 'object' errors for standard (no __c/__mdt suffix) and big objects (__b)
+    // are REAL errors that Copado does not filter. Feature-gated standard objects
+    // (e.g. AccountContactRelation) and big objects can be absent from the target org
+    // and must be removed — unless they are present in the promotion JSON as an ADD.
     if (metadataType === 'Profile' && PROFILE_SKIPPED_REF_TYPES.has(handler.refType)) {
-      log(`   [Profile] Skipping ${handler.label} (not enforced by Copado deployment): ${name}`);
-      return { handled: true, xmlContent };
+      if (!isStandardOrBigObjectRef(handler.refType, name)) {
+        log(`   [Profile] Skipping ${handler.label} (not enforced by Copado deployment): ${name}`);
+        return { handled: true, xmlContent };
+      }
+      log(`   [Profile] Standard/Big object error — treating as real (not a false positive): ${name}`);
     }
 
     if (shouldSkip(log, handler.label, name, whitelist[handler.whitelistKey], skippedFields, allSkippedFields)) {
@@ -1493,6 +1501,19 @@ function processFailures(
 // One combined git commit covers all affected files.
 // ===============================================================
 
+// Returns true for standard objects (no __c/__mdt suffix) and big objects (__b).
+// These are NOT filtered by Copado TRIM and cause real profile deploy failures.
+function isStandardOrBigObjectRef(refType: RefType, name: string): boolean {
+  return refType === 'object' && !name.endsWith('__c') && !name.endsWith('__mdt');
+}
+
+// Returns true when a ref should be SKIPPED (not swept) for a Profile file.
+// Copado TRIM handles most ref types for profiles, EXCEPT standard/big object refs.
+// Extracted to keep sweepOtherFiles and repoWideSweep under the complexity limit.
+function isProfileSweepSkip(isProfile: boolean, refType: RefType, name: string): boolean {
+  return isProfile && PROFILE_SKIPPED_REF_TYPES.has(refType) && !isStandardOrBigObjectRef(refType, name);
+}
+
 function sweepOtherFiles(
   log: (msg: string) => void,
   refs: RemovedRef[],
@@ -1515,9 +1536,8 @@ function sweepOtherFiles(
     const isProfile = filePath.endsWith('.profile-meta.xml');
     for (const ref of refs) {
       // Don't sweep refs into Profile files that Copado real deployments ignore.
-      // Flows, userPermissions, and profileActionOverrides are the ref types that actually
-      // fail on profiles during real deployment — all others are Copado TRIM false positives.
-      if (isProfile && PROFILE_SKIPPED_REF_TYPES.has(ref.type)) continue;
+      // Exception: standard/big object refs (no __c/__mdt suffix) are real errors — sweep them too.
+      if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
       let result: { updated: string; removed: boolean };
       if (ref.type === 'namespace') {
         result = bulkRemoveNamespaceRefs(xml, ref.name);
@@ -1631,7 +1651,8 @@ function repoWideSweep(
     const isProfile = filePath.endsWith('.profile-meta.xml');
 
     for (const ref of allRemovedRefs) {
-      if (isProfile && PROFILE_SKIPPED_REF_TYPES.has(ref.type)) continue;
+      // Exception: standard/big object refs are real errors — sweep them into profiles too.
+      if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
       let result: { updated: string; removed: boolean };
       if (ref.type === 'namespace') {
         result = bulkRemoveNamespaceRefs(xml, ref.name);
@@ -1958,47 +1979,6 @@ export function deduplicateXmlBlocks(xmlContent: string): { updated: string; rem
   }
 
   return { updated, removedCount };
-}
-
-function runDeduplicationPrePass(
-  log: (msg: string) => void,
-  batchItems: BatchItem[],
-  repoPath: string,
-  dryRun: boolean
-): void {
-  log('\n--- Deduplication Pre-Pass ---');
-  const modifiedFiles: string[] = [];
-
-  for (const item of batchItems) {
-    if (!fs.existsSync(item.filePath)) continue;
-    const xml = fs.readFileSync(item.filePath, 'utf8');
-    const { updated, removedCount } = deduplicateXmlBlocks(xml);
-    if (removedCount > 0) {
-      log(`   [Dedup] ${item.itemName}: removed ${removedCount} duplicate block(s)`);
-      saveXmlClean(updated, item.filePath, getRootNodeName(xml));
-      modifiedFiles.push(item.filePath);
-    }
-  }
-
-  if (modifiedFiles.length === 0) {
-    log('   [Dedup] No duplicate blocks found.\n');
-    return;
-  }
-
-  log(`   [Dedup] Fixed ${modifiedFiles.length} file(s).`);
-  if (dryRun) {
-    log('   [Dedup] Dry run — skipped commit.\n');
-    return;
-  }
-  try {
-    for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
-    execSync(`git commit -m "Dedup: remove duplicate XML blocks from ${modifiedFiles.length} file(s)"`, {
-      cwd: repoPath,
-    });
-    log('   [Dedup] Committed deduplication fixes.\n');
-  } catch {
-    log('   [Dedup] Commit failed or nothing new to stage.\n');
-  }
 }
 
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
@@ -2837,12 +2817,17 @@ export default class DeployAndFix extends SfCommand<void> {
       })),
     ];
 
-    runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
+    // Deduplication pre-pass is intentionally skipped.
+    // Salesforce does not error on duplicate objectPermissions/PS blocks — it silently
+    // deploys the last one. Auto-removing duplicates is risky: file position does not
+    // reflect recency (a newer git-blame date can appear earlier in the file), so there
+    // is no safe way to know which block represents the intended state. Leaving duplicates
+    // in place is harmless; the developer should resolve conflicting blocks manually.
+    // runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
 
-    // Record HEAD after dedup so the final squash only covers missing-ref removal commits,
-    // not the dedup commit — keeping dedup and ref-removal history separate.
+    // Record HEAD so the final squash covers only missing-ref removal commits.
     const startingCommit = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
-    log(`   Starting commit (post-dedup): ${startingCommit.substring(0, 8)}`);
+    log(`   Starting commit: ${startingCommit.substring(0, 8)}`);
 
     log('\n######################################################');
     log(
