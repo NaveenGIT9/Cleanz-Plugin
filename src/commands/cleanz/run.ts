@@ -2039,11 +2039,24 @@ export function deduplicateXmlBlocks(xmlContent: string): { updated: string; rem
   return { updated, removedCount };
 }
 
+function readFileWithRetry(filePath: string, retries = 5, delayMs = 500): string {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return fs.readFileSync(filePath, 'utf8');
+    } catch (e) {
+      if (attempt === retries) throw e;
+      // Windows file lock after git commit (CRLF rewrite / antivirus scan) — wait and retry
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+  return fs.readFileSync(filePath, 'utf8'); // unreachable, satisfies TS
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
     if (!fs.existsSync(item.filePath)) continue;
-    const orig = fs.readFileSync(item.filePath, 'utf8');
+    const orig = readFileWithRetry(item.filePath);
     let masked = maskWhitelistedEntries(orig, whitelist);
     masked = maskStandardApps(masked);
     if (item.filePath.endsWith('.profile-meta.xml')) {
@@ -2058,9 +2071,21 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
   return saved;
 }
 
+function writeFileWithRetry(filePath: string, content: string, retries = 5, delayMs = 500): void {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      fs.writeFileSync(filePath, content, 'utf8');
+      return;
+    } catch (e) {
+      if (attempt === retries) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
+}
+
 function restoreItems(saved: Map<string, string>): void {
   for (const [filePath, content] of saved) {
-    fs.writeFileSync(filePath, content, 'utf8');
+    writeFileWithRetry(filePath, content);
   }
 }
 
