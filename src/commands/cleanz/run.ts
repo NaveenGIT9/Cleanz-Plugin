@@ -138,6 +138,7 @@ type FailureResult = {
 const REPO_PATH = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
 const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsets');
 const MUTING_PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'mutingpermissionsets');
+const PSG_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsetgroups');
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
@@ -245,8 +246,15 @@ function writeConclusionFile(log: (msg: string) => void, content: string, repoPa
 function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord[]): void {
   const fixedPermSets = summary.filter((r) => r.Type === 'PermissionSet' && r.RemovedFields);
   const fixedMutingPermSets = summary.filter((r) => r.Type === 'MutingPermissionSet' && r.RemovedFields);
+  const fixedPSGs = summary.filter((r) => r.Type === 'PermissionSetGroup' && r.RemovedFields);
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
-  if (fixedPermSets.length === 0 && fixedMutingPermSets.length === 0 && fixedProfiles.length === 0) return;
+  if (
+    fixedPermSets.length === 0 &&
+    fixedMutingPermSets.length === 0 &&
+    fixedPSGs.length === 0 &&
+    fixedProfiles.length === 0
+  )
+    return;
 
   const buildRows = (records: SummaryRecord[]): string[][] =>
     records.flatMap((r) => {
@@ -263,6 +271,10 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   if (fixedMutingPermSets.length > 0) {
     log('\nMUTING PERMISSION SETS');
     log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedMutingPermSets), [15, 35, 45]));
+  }
+  if (fixedPSGs.length > 0) {
+    log('\nPERMISSION SET GROUPS');
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedPSGs), [15, 35, 45]));
   }
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
@@ -504,6 +516,69 @@ function removeObjectPermissionFlag(
     return blockMatch;
   });
   return { updated, removed };
+}
+
+// ===============================================================
+// PERMISSION SET GROUP — ORDER / DEDUP FIX
+//
+// Salesforce enforces that all <permissionSets> elements in a PSG file must
+// appear as ONE contiguous block positioned after <label>.  If any tag lands
+// above <label> (e.g. a merge conflict resolution) Salesforce throws:
+//   "Element permissionSets is duplicated at this location in type PermissionSetGroup"
+//
+// This function:
+//   1. Collects ALL <permissionSets>...</permissionSets> lines from anywhere in the file
+//   2. Deduplicates (case-insensitive name comparison)
+//   3. Strips them all from their current positions
+//   4. Re-inserts them as one sorted block immediately after the <label> element
+// ===============================================================
+
+export function fixPsgPermissionSetsBlock(xmlContent: string): { updated: string; fixed: boolean } {
+  // Collect every <permissionSets> line (single-line tags only — Salesforce always writes them this way)
+  const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>[ \t]*\r?\n?/g;
+  const collected: string[] = [];
+  let match: RegExpExecArray | null;
+  // eslint-disable-next-line no-cond-assign
+  while ((match = tagRegex.exec(xmlContent)) !== null) {
+    collected.push(match[1].trim());
+  }
+
+  if (collected.length === 0) return { updated: xmlContent, fixed: false };
+
+  // Deduplicate — preserve first occurrence order, case-insensitive comparison
+  const seen = new Set<string>();
+  const unique = collected.filter((name) => {
+    const key = name.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Sort alphabetically (case-insensitive)
+  unique.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+  // Strip ALL existing <permissionSets> lines from the XML
+  const stripped = xmlContent.replace(tagRegex, '');
+
+  // Build the replacement block — one line per entry, indented with 4 spaces
+  const block = unique.map((name) => `    <permissionSets>${name}</permissionSets>`).join('\n') + '\n';
+
+  // Insert the block immediately after the closing </label> tag
+  const labelClose = '</label>';
+  const labelIdx = stripped.indexOf(labelClose);
+  if (labelIdx === -1) {
+    // No <label> tag found — append before the closing root tag as a fallback
+    const rootClose = stripped.lastIndexOf('</');
+    if (rootClose === -1) return { updated: xmlContent, fixed: false };
+    const updated = stripped.slice(0, rootClose) + block + stripped.slice(rootClose);
+    return { updated, fixed: true };
+  }
+
+  const insertAt = labelIdx + labelClose.length;
+  // Consume the newline that follows </label> so we don't get a blank line
+  const afterLabel = stripped[insertAt] === '\r' ? insertAt + 2 : stripped[insertAt] === '\n' ? insertAt + 1 : insertAt;
+  const updated = stripped.slice(0, afterLabel) + block + stripped.slice(afterLabel);
+  return { updated, fixed: true };
 }
 
 // ===============================================================
@@ -1458,6 +1533,25 @@ function processFailures(
       continue;
     }
 
+    // ── PermissionSetGroup duplicate/misplaced <permissionSets> ──
+    if (/Element permissionSets is duplicated at this location in type PermissionSetGroup/i.test(err)) {
+      const psgResult = fixPsgPermissionSetsBlock(updatedXml);
+      if (psgResult.fixed) {
+        log('   [PSG] Re-grouped and deduplicated <permissionSets> block after <label>');
+        updatedXml = psgResult.updated;
+        removedRefs.push({
+          type: 'field',
+          name: 'permissionSets-reorder',
+          label: '[PSG] permissionSets block reordered/deduplicated',
+          deployError: err,
+        });
+      } else {
+        log(`   [PSG] Could not fix permissionSets ordering — no <label> tag or no tags found: ${err}`);
+        unhandledErrors.push(err);
+      }
+      continue;
+    }
+
     // ── profileActionOverrides RecordType error — handled by applyRecordTypePreCheck ──
     if (/The value you specified for RecordType is invalid/i.test(err)) {
       log('   [ProfileActionOverride] RecordType error — handled by pre-check');
@@ -2065,6 +2159,7 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     if (item.filePath.endsWith('.permissionset-meta.xml') || item.filePath.endsWith('.mutingpermissionset-meta.xml')) {
       masked = maskPermSetFalsePositives(masked, item.operation === 'FULL');
     }
+    // PSG files: no false-positive masking needed — structure is simple and fixed by fixPsgPermissionSetsBlock
     saved.set(item.filePath, orig);
     if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
   }
@@ -2647,6 +2742,89 @@ function loadInputFile(log: (msg: string) => void, inputFilePath: string): Promo
   return isXml ? parsePackageXml(fileContent) : (JSON.parse(fileContent) as PromotionItem[]);
 }
 
+// ===============================================================
+// NAMESPACE PURGE (Option 2)
+// ===============================================================
+
+async function runNamespacePurge(log: (msg: string) => void): Promise<void> {
+  const namespace = (await prompt('Enter namespace to purge (e.g. TSPC): ')).trim();
+  if (!namespace) {
+    log('No namespace entered. Aborting.');
+    return;
+  }
+
+  log(`\nPurging all ${namespace}__ references from force-app/...\n`);
+
+  const forceAppPath = path.join(REPO_PATH, 'force-app');
+  if (!fs.existsSync(forceAppPath)) {
+    log(`force-app/ not found at ${forceAppPath}. Aborting.`);
+    return;
+  }
+
+  const deletedFiles: string[] = [];
+  const modifiedFiles: string[] = [];
+  const nsLower = namespace.toLowerCase();
+
+  function walkDir(dir: string): void {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkDir(fullPath);
+      } else if (entry.isFile()) {
+        const basenameLower = entry.name.toLowerCase();
+
+        // Delete files whose filename contains namespace__ (e.g. TSPC__Field__c.field-meta.xml)
+        if (basenameLower.includes(`${nsLower}__`)) {
+          fs.unlinkSync(fullPath);
+          deletedFiles.push(fullPath);
+          log(`   [DELETE] ${path.relative(REPO_PATH, fullPath)}`);
+
+          // Clean namespace references from Profiles, PermSets, PermSetGroups
+        } else if (
+          basenameLower.endsWith('.profile-meta.xml') ||
+          basenameLower.endsWith('.permissionset-meta.xml') ||
+          basenameLower.endsWith('.permissionsetgroup-meta.xml') ||
+          basenameLower.endsWith('.mutingpermissionset-meta.xml')
+        ) {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const { updated, removed } = bulkRemoveNamespaceRefs(content, namespace);
+          if (removed) {
+            fs.writeFileSync(fullPath, updated, 'utf8');
+            modifiedFiles.push(fullPath);
+            log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
+          }
+        }
+      }
+    }
+  }
+
+  walkDir(forceAppPath);
+
+  log('\n------------------------------------------------------');
+  log(`  Namespace Purge Summary — ${namespace}__`);
+  log('------------------------------------------------------');
+  log(`  Files deleted : ${deletedFiles.length}`);
+  log(`  Files cleaned : ${modifiedFiles.length}`);
+
+  if (deletedFiles.length === 0 && modifiedFiles.length === 0) {
+    log(`\nNo ${namespace}__ references found. Nothing to commit.`);
+    return;
+  }
+
+  log('\nCommitting changes...');
+  try {
+    execSync(`git -C "${REPO_PATH}" add -A`, { stdio: 'pipe' });
+    execSync(
+      `git -C "${REPO_PATH}" commit -m "chore: purge ${namespace}__ namespace references from repo\n\n${deletedFiles.length} files deleted, ${modifiedFiles.length} files cleaned."`,
+      { stdio: 'pipe' }
+    );
+    log(`✓ Committed. ${deletedFiles.length} deleted, ${modifiedFiles.length} cleaned.`);
+  } catch (e) {
+    log(`Git commit failed: ${(e as Error).message}`);
+  }
+}
+
 async function resolveInputs(
   log: (msg: string) => void,
   jsonPathFlag: string,
@@ -2750,8 +2928,18 @@ export default class DeployAndFix extends SfCommand<void> {
 
     // ================= INTERACTIVE PROMPTS =================
     log('\n======================================================');
-    log('  AUTOMATED PERMISSION SET & PROFILE DEPLOY & FIX');
+    log('  SF CLEANZ — Salesforce Metadata Cleanup Tool');
     log('======================================================\n');
+    log('  1) Validate and clean missing references');
+    log('  2) Remove specific namespace references all over repo\n');
+    // eslint-disable-next-line no-await-in-loop
+    const choice = (await prompt('Enter your choice (1 or 2): ')).trim();
+
+    if (choice === '2') {
+      await runNamespacePurge(log);
+      return;
+    }
+
     if (dryRun) log('*** DRY RUN MODE — files will be modified but NO commits will be made ***\n');
 
     // eslint-disable-next-line no-await-in-loop
@@ -2763,6 +2951,9 @@ export default class DeployAndFix extends SfCommand<void> {
     const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
     const mutingPermSets = [
       ...new Set(promotionData.filter((i) => i.t === 'MutingPermissionSet').map((i) => i.n)),
+    ].sort();
+    const permSetGroups = [
+      ...new Set(promotionData.filter((i) => i.t === 'PermissionSetGroup').map((i) => i.n)),
     ].sort();
     const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
 
@@ -2806,6 +2997,7 @@ export default class DeployAndFix extends SfCommand<void> {
     const allFilePaths: string[] = [
       ...permSets.map((ps) => path.join(PS_BASE_PATH, `${ps}.permissionset-meta.xml`)),
       ...mutingPermSets.map((mps) => path.join(MUTING_PS_BASE_PATH, `${mps}.mutingpermissionset-meta.xml`)),
+      ...permSetGroups.map((psg) => path.join(PSG_BASE_PATH, `${psg}.permissionsetgroup-meta.xml`)),
       ...profiles.map((p) => path.join(PROFILE_BASE_PATH, `${p}.profile-meta.xml`)),
     ];
 
@@ -2818,6 +3010,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Target Org              : ${targetOrg}`);
     log(`Permission Sets         : ${permSets.length} found in JSON`);
     log(`Muting Permission Sets  : ${mutingPermSets.length} found in JSON`);
+    log(`Permission Set Groups   : ${permSetGroups.length} found in JSON`);
     log(`Profiles                : ${profiles.length} found in JSON`);
     log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
     log(`  - CustomFields        : ${whitelist.fields.length}`);
@@ -2844,6 +3037,14 @@ export default class DeployAndFix extends SfCommand<void> {
     if (mutingPermSets.length > 0) {
       mutingPermSets.forEach((mps) =>
         log(`   - ${mps} [${getItemOperation(promotionData, 'MutingPermissionSet', mps)}]`)
+      );
+    } else {
+      log('   (none)');
+    }
+    log('\nPermission Set Groups to process:');
+    if (permSetGroups.length > 0) {
+      permSetGroups.forEach((psg) =>
+        log(`   - ${psg} [${getItemOperation(promotionData, 'PermissionSetGroup', psg)}]`)
       );
     } else {
       log('   (none)');
@@ -2898,6 +3099,18 @@ export default class DeployAndFix extends SfCommand<void> {
         allUnhandledErrors: [] as string[],
         done: false,
       })),
+      ...permSetGroups.map((n) => ({
+        metadataType: 'PermissionSetGroup',
+        itemName: n,
+        filePath: path.join(PSG_BASE_PATH, `${n}.permissionsetgroup-meta.xml`),
+        operation: getItemOperation(promotionData, 'PermissionSetGroup', n),
+        status: 'No Change',
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
+        allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
+        done: false,
+      })),
       ...profiles.map((n) => ({
         metadataType: 'Profile',
         itemName: n,
@@ -2926,7 +3139,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log('\n######################################################');
     log(
-      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${profiles.length} Profile(s)`
+      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${permSetGroups.length} PSG(s) + ${profiles.length} Profile(s)`
     );
     log('######################################################');
 
@@ -2974,6 +3187,17 @@ export default class DeployAndFix extends SfCommand<void> {
         )
       );
 
+    log('\nPERMISSION SET GROUPS:');
+    summary
+      .filter((r) => r.Type === 'PermissionSetGroup')
+      .forEach((r) =>
+        log(
+          `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+            r.SkippedFields || 'none'
+          }`
+        )
+      );
+
     log('\nPROFILES:');
     summary
       .filter((r) => r.Type === 'Profile')
@@ -3006,7 +3230,13 @@ export default class DeployAndFix extends SfCommand<void> {
     const tableHeaders = ['#', 'Type', 'Name', 'Status', 'Removed', 'Skipped'];
     const tableRows = summary.map((r, i) => [
       String(i + 1),
-      r.Type === 'PermissionSet' ? 'PermSet' : r.Type === 'MutingPermissionSet' ? 'MutingPS' : 'Profile',
+      r.Type === 'PermissionSet'
+        ? 'PermSet'
+        : r.Type === 'MutingPermissionSet'
+        ? 'MutingPS'
+        : r.Type === 'PermissionSetGroup'
+        ? 'PSG'
+        : 'Profile',
       r.Name,
       r.Status,
       r.RemovedFields ? `${r.RemovedFields.split('; ').filter(Boolean).length} ref(s)` : '—',
