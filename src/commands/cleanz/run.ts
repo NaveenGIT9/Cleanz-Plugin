@@ -383,6 +383,21 @@ function removeAllFieldPermissionsForObject(
   return { updated, removed: updated !== xmlContent };
 }
 
+function removeAllLayoutAssignmentsForObject(
+  xmlContent: string,
+  objectName: string
+): { updated: string; removed: boolean } {
+  const escapedObject = objectName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const innerPattern = '(?:(?!<layoutAssignments>)[\\s\\S])*?';
+  // Matches any <layoutAssignments> block whose <layout> starts with "ObjectName-"
+  const blockRegex = new RegExp(
+    `[ \\t]*<layoutAssignments>${innerPattern}<layout>[ \\t]*${escapedObject}-[^<]+[ \\t]*</layout>${innerPattern}</layoutAssignments>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const updated = xmlContent.replace(blockRegex, '');
+  return { updated, removed: updated !== xmlContent };
+}
+
 function removeObjectPermissionFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   // Remove the objectPermissions block itself
   const objectResult = removeXmlBlock(xmlContent, 'objectPermissions', 'object', name);
@@ -390,9 +405,13 @@ function removeObjectPermissionFromXml(xmlContent: string, name: string): { upda
   // Salesforce will reject even fieldPermissions for fields on a missing object,
   // so we must strip both in one pass to avoid the same error on the next iteration.
   const fieldResult = removeAllFieldPermissionsForObject(objectResult.updated, name);
+  // Also remove all layoutAssignments for this object (layout name starts with "ObjectName-").
+  // Profiles store layout refs per object — if the object is missing, its layouts are invalid too.
+  // Only applies to profiles (permsets don't have layoutAssignments).
+  const layoutResult = removeAllLayoutAssignmentsForObject(fieldResult.updated, name);
   return {
-    updated: fieldResult.updated,
-    removed: objectResult.removed || fieldResult.removed,
+    updated: layoutResult.updated,
+    removed: objectResult.removed || fieldResult.removed || layoutResult.removed,
   };
 }
 function removeFlowAccessFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
@@ -2018,43 +2037,71 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
   //   and profileActionOverrides. All other sections are stripped by Copado TRIM or
   //   cause unpredictable errors and cannot be usefully fixed. Mask everything else.
   //
-  // FULL profiles: Copado real deployments ONLY enforce objectPermissions for standard
-  //   and big objects (no __c/__mdt suffix) that are absent from the org. Everything
-  //   else — including flowAccesses, userPermissions, and profileActionOverrides — is
-  //   also a false positive for FULL profiles and must be masked. Only standard/big
-  //   object objectPermissions remain exposed so the dry-run can detect and remove them.
+  // FULL profiles — objectPermissions:
+  //   Copado TRIM strips __c/__mdt object permissions before real deploy — mask those.
+  //   Standard objects, big objects (__b), and platform events (__e) that don't exist
+  //   in the org cause hard errors Copado does NOT clean — keep them exposed.
   //
-  // FULL vs ADD distinction for objectPermissions:
-  //   ADD  — Copado TRIM strips ALL object permissions before the real deploy, so mask them all.
-  //   FULL — Copado TRIM only strips __c/__mdt object permissions. Standard objects and big
-  //          objects (__b) that don't exist in the org cause hard deployment errors that Copado
-  //          does NOT clean. Keep those unmasked so the dry-run detects and removes them.
+  // FULL profiles — fieldPermissions:
+  //   Copado TRIM strips __c field permissions before real deploy — mask those.
+  //   fieldPermissions for standard objects, big objects (__b), and platform events (__e)
+  //   are NOT stripped by Copado. Feature-gated standard objects (e.g. AccountContactRelation)
+  //   may not exist in the target org and will cause hard deployment errors — keep them
+  //   exposed so the dry-run detects and removes them.
+  //
+  // ADD profiles — fieldPermissions and objectPermissions:
+  //   Copado TRIM strips ALL of them before real deploy — mask everything.
   let xml = xmlContent;
   xml = xml.replace(/[ \t]*<applicationVisibilities>[\s\S]*?<\/applicationVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
-  xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
   if (isFull) {
     // FULL: mask flowAccesses, userPermissions, and profileActionOverrides — all false positives.
     xml = xml.replace(/[ \t]*<flowAccesses>[\s\S]*?<\/flowAccesses>[ \t]*\r?\n?/g, '');
     xml = xml.replace(/[ \t]*<userPermissions>[\s\S]*?<\/userPermissions>[ \t]*\r?\n?/g, '');
     xml = xml.replace(/[ \t]*<profileActionOverrides>[\s\S]*?<\/profileActionOverrides>[ \t]*\r?\n?/g, '');
-    // FULL: only mask __c and __mdt object permissions — keep standard and __b exposed.
-    const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+    // FULL: only mask __c/__mdt object permissions — keep standard, __b, __e exposed.
+    const objInner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
     xml = xml.replace(
       new RegExp(
-        `[ \\t]*<objectPermissions>${inner}<object>[^<]*(?:__c|__mdt)[^<]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+        `[ \\t]*<objectPermissions>${objInner}<object>[^<]*(?:__c|__mdt)[^<]*</object>${objInner}</objectPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      ''
+    );
+    // FULL: only mask __c field permissions — keep standard, __b, __e field permissions
+    // exposed so missing fields on feature-gated objects (e.g. AccountContactRelation) are caught.
+    const fieldInner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+    xml = xml.replace(
+      new RegExp(
+        `[ \\t]*<fieldPermissions>${fieldInner}<field>[^<]*__c\\.[^<]*</field>${fieldInner}</fieldPermissions>[ \\t]*\\r?\\n?`,
         'g'
       ),
       ''
     );
   } else {
-    // ADD: mask ALL object permissions (Copado TRIM handles all of them for ADD profiles).
+    // ADD: mask ALL object permissions and ALL field permissions — Copado TRIM handles them.
     xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
+    xml = xml.replace(/[ \t]*<fieldPermissions>[\s\S]*?<\/fieldPermissions>[ \t]*\r?\n?/g, '');
   }
   xml = xml.replace(/[ \t]*<recordTypeVisibilities>[\s\S]*?<\/recordTypeVisibilities>[ \t]*\r?\n?/g, '');
-  xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
+  if (isFull) {
+    // FULL: only mask __c layout assignments — keep standard, __b, __e layouts exposed
+    // so missing layouts on feature-gated objects (e.g. AccountContactRelation) are caught.
+    // Layout names follow "ObjectName-LayoutName" — mask only where ObjectName ends in __c.
+    const layoutInner = '(?:(?!<layoutAssignments>)[\\s\\S])*?';
+    xml = xml.replace(
+      new RegExp(
+        `[ \\t]*<layoutAssignments>${layoutInner}<layout>[^<]*__c-[^<]*</layout>${layoutInner}</layoutAssignments>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      ''
+    );
+  } else {
+    // ADD: mask ALL layoutAssignments — Copado TRIM handles them for ADD profiles.
+    xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
+  }
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<customPermissions>[\s\S]*?<\/customPermissions>[ \t]*\r?\n?/g, ''); // confirmed: Copado TRIM strips these
