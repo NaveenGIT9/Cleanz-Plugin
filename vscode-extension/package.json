@@ -1,0 +1,85 @@
+{
+  "name": "cleanz-vscode",
+  "displayName": "Cleanz — Salesforce Metadata Cleaner",
+  "description": "Validate and clean missing references in Salesforce metadata (Profiles, Permission Sets, PSGs)",
+  "version": "1.0.0",
+  "publisher": "NaveenGIT9",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cleanz.run",
+        "title": "Run Cleanz",
+        "icon": "$(play)"
+      },
+      {
+        "command": "cleanz.openDashboard",
+        "title": "Open Dashboard",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "cleanz.exportReport",
+        "title": "Export Report",
+        "icon": "$(export)"
+      },
+      {
+        "command": "cleanz.namespacePurge",
+        "title": "Namespace Purge",
+        "icon": "$(search)"
+      },
+      {
+        "command": "cleanz.rerunLast",
+        "title": "Re-run Last",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cleanz.abort",
+        "title": "Abort Current Run",
+        "icon": "$(stop)"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "cleanz.sidebar",
+          "name": "Cleanz"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "cleanz.run",
+          "when": "view == cleanz.sidebar",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  },
+  "__metadata": {
+    "installedTimestamp": 1776676240955,
+    "targetPlatform": "undefined",
+    "size": 209577
+  }
+}

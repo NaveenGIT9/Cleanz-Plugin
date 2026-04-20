@@ -79,6 +79,7 @@ type BatchItem = {
   allSkippedFields: string[];
   allUnhandledErrors: string[];
   done: boolean;
+  calcFailedRetries: number; // tracks CalculationFailed transient retries for PSG items
 };
 
 type WhitelistMap = {
@@ -1071,6 +1072,80 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
       }
     });
   });
+}
+
+// ===============================================================
+// PSG STATUS POLLING
+// Salesforce recalculates a PermissionSetGroup in the background
+// after each deploy. We poll until Status = Updated (success),
+// CalculationFailed (transient — re-deploy fixes it), or any other
+// terminal state (manual intervention needed).
+// ===============================================================
+
+function queryPsgStatus(targetOrg: string, psgName: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const query = `"SELECT Status FROM PermissionSetGroup WHERE DeveloperName = '${psgName}'"`;
+    const args = ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'];
+    const proc = spawn('sf', args, { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve(null);
+    }, 30_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+          result?: { records?: Array<{ Status?: string }> };
+        };
+        resolve(json?.result?.records?.[0]?.Status ?? null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function waitForPsgUpdates(
+  log: (msg: string) => void,
+  psgName: string,
+  targetOrg: string
+): Promise<'updated' | 'calc-failed' | 'failed'> {
+  const POLL_MS = 30_000;
+  const MAX_WAIT_MS = 10 * 60_000; // 10 minutes max
+  const deadline = Date.now() + MAX_WAIT_MS;
+
+  log(`   [PSG] ${psgName} — waiting for recalculation to complete...`);
+
+  while (Date.now() < deadline) {
+    // eslint-disable-next-line no-await-in-loop
+    const status = await queryPsgStatus(targetOrg, psgName);
+
+    if (status === 'Updated') {
+      log(`   [PSG] ${psgName} — status: Updated ✓`);
+      return 'updated';
+    }
+    if (status === 'CalculationFailed') {
+      log(`   [PSG] ${psgName} — status: CalculationFailed (transient — re-deploy will trigger fresh recalculation)`);
+      return 'calc-failed';
+    }
+    if (status !== 'Updating' && status !== null) {
+      log(`   [PSG] ${psgName} — status: ${status}. Manual intervention needed.`);
+      return 'failed';
+    }
+
+    const elapsed = Math.round((Date.now() - (deadline - MAX_WAIT_MS)) / 1000);
+    log(`   [PSG] ${psgName} — status: ${status ?? 'unknown'} (${elapsed}s elapsed). Checking again in 30s...`);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(POLL_MS);
+  }
+
+  log(`   [PSG] ${psgName} — timed out after 10 min waiting for recalculation.`);
+  return 'failed';
 }
 
 async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string, maxWaitMins = 30): Promise<void> {
@@ -2316,9 +2391,25 @@ async function applyManagedRefsPass(
     if (itemFailures.length === 0) continue;
 
     if (itemFailures.some((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''))) {
-      log(`   [${item.itemName}] Permission set group is updating — skipping, re-run after group update completes.`);
-      item.status = 'Skipped - PSG Updating';
-      item.done = true;
+      // eslint-disable-next-line no-await-in-loop
+      const psgResult = await waitForPsgUpdates(log, item.itemName, targetOrg);
+      if (psgResult === 'updated') {
+        // Leave item.done=false — it will be re-deployed in the next iteration
+        item.status = 'Pending';
+      } else if (psgResult === 'calc-failed') {
+        item.calcFailedRetries++;
+        if (item.calcFailedRetries <= 3) {
+          log(`   [PSG] ${item.itemName} — CalculationFailed retry ${item.calcFailedRetries}/3. Re-deploying...`);
+          item.status = 'Pending';
+        } else {
+          log(`   [PSG] ${item.itemName} — CalculationFailed after 3 retries. Giving up.`);
+          item.status = 'Skipped - PSG Calculation Failed';
+          item.done = true;
+        }
+      } else {
+        item.status = 'Skipped - PSG Update Failed';
+        item.done = true;
+      }
       continue;
     }
 
@@ -3133,6 +3224,7 @@ export default class DeployAndFix extends SfCommand<void> {
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
+        calcFailedRetries: 0,
       })),
       ...mutingPermSets.map((n) => ({
         metadataType: 'MutingPermissionSet',
@@ -3145,6 +3237,7 @@ export default class DeployAndFix extends SfCommand<void> {
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
+        calcFailedRetries: 0,
       })),
       ...permSetGroups.map((n) => ({
         metadataType: 'PermissionSetGroup',
@@ -3157,6 +3250,7 @@ export default class DeployAndFix extends SfCommand<void> {
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
+        calcFailedRetries: 0,
       })),
       ...profiles.map((n) => ({
         metadataType: 'Profile',
@@ -3169,6 +3263,7 @@ export default class DeployAndFix extends SfCommand<void> {
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
         done: false,
+        calcFailedRetries: 0,
       })),
     ];
 

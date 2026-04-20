@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Cleanz Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=D:\\plugin-cleanz\\vscode-extension"],
+      "outFiles": ["D:/plugin-cleanz/vscode-extension/out/**/*.js"],
+      "preLaunchTask": "npm: compile"
+    }
+  ]
+}
