@@ -438,11 +438,51 @@ class DashboardPanel {
           batchItems.push(...quick);
           this.postMessage({ command: 'items', items: batchItems, skipped });
         }
-      } catch {
-        /* ignore — CLI will populate items from its own output */
+        // Build whitelist tags — all non-RetrieveOnly non-PS/Profile components being deployed.
+        // These are pre-masked before validation so their refs in PermSets/Profiles are never removed.
+        const isDeployable = (i) => !i.a || !i.a.toLowerCase().startsWith('retrieve');
+        const whitelistTypes = {
+          ApexClass: 'ApexClass',
+          ApexPage: 'VF Page',
+          CustomField: 'Field',
+          CustomObject: 'Object',
+          CustomApplication: 'App',
+          CustomTab: 'Tab',
+          CustomMetadata: 'CMT',
+          Flow: 'Flow',
+          RecordType: 'RecordType',
+          Layout: 'Layout',
+          FlexiPage: 'FlexiPage',
+          CustomPermission: 'Custom Permission',
+          ApexTrigger: 'ApexTrigger',
+          LightningComponentBundle: 'LWC',
+          AuraDefinitionBundle: 'Aura',
+          StaticResource: 'Static Resource',
+          CustomLabel: 'Custom Label',
+          EmailTemplate: 'Email Template',
+          Report: 'Report',
+          Dashboard: 'Dashboard',
+          ValidationRule: 'Validation Rule',
+          WorkflowRule: 'Workflow Rule',
+        };
+        const whitelistGroups = {};
+        for (const i of raw) {
+          const label = whitelistTypes[i.t];
+          if (label && isDeployable(i)) {
+            if (!whitelistGroups[label]) whitelistGroups[label] = [];
+            whitelistGroups[label].push(i.n);
+          }
+        }
+        const whitelistTotal = Object.values(whitelistGroups).reduce((s, a) => s + a.length, 0);
+        this.postMessage({ command: 'whitelist', groups: whitelistGroups });
+        this.postMessage({ command: 'log', level: 'info', text: `Whitelist: ${whitelistTotal} components pre-loaded` });
+      } catch (e) {
+        this.postMessage({ command: 'log', level: 'err', text: `[pre-parse] ${e.message ?? e}` });
       }
     }
     // Batch-iteration tracking
+    let actualCsvPath; // captured from "Summary CSV saved to :" log line
+    let resultsSent = false; // guards against double-send if both parseLine and close handler fire
     const retriedInIteration = new Set(); // items that had refs committed this iteration
     let batchDeployStarted = false; // true after "Running batch dry-run deploy"
     const emitPhase = (phase, label, pct) => {
@@ -461,6 +501,63 @@ class DashboardPanel {
       }
       this.postMessage({ command: 'itemStatus', name, status, statusLabel, ...(refs !== undefined ? { refs } : {}) });
     };
+    // Parse CSV text and send itemStatus with authoritative ref counts for each batch item.
+    // Called from both the "Total time:" stdout handler and the close handler so counts
+    // are always updated regardless of which fires last.
+    const dispatchCsvRefCounts = (csvText) => {
+      const lines = csvText.split('\n').filter(Boolean);
+      if (lines.length < 2) return;
+      const parseCsvRow = (line) => {
+        const cols = [];
+        let cur = '',
+          inQ = false;
+        for (const ch of line) {
+          if (ch === '"') {
+            inQ = !inQ;
+          } else if (ch === ',' && !inQ) {
+            cols.push(cur);
+            cur = '';
+          } else {
+            cur += ch;
+          }
+        }
+        cols.push(cur);
+        return cols.map((s) => s.trim());
+      };
+      const headers = parseCsvRow(lines[0]);
+      const iName = headers.indexOf('Name');
+      const iRemoved = headers.indexOf('RemovedFields');
+      let csvJsonFixed = 0;
+      for (const line of lines.slice(1)) {
+        const cols = parseCsvRow(line);
+        const name = cols[iName] ?? '';
+        const removed = cols[iRemoved] ?? '';
+        const refCount = removed.trim() ? removed.split(';').filter((s) => s.trim()).length : 0;
+        csvJsonFixed += refCount;
+        const item = batchItems.find((i) => i.name === name);
+        if (item) {
+          item.refs = String(refCount);
+          this.postMessage({
+            command: 'itemStatus',
+            name,
+            status: item.status,
+            statusLabel: item.statusLabel,
+            refs: item.refs,
+          });
+        }
+      }
+      if (csvJsonFixed > 0 || jsonFixed === 0) {
+        jsonFixed = csvJsonFixed;
+        this.postMessage({
+          command: 'stats',
+          jsonFixed,
+          repoFixed,
+          deploys: deployCount,
+          warnings: warnCount,
+          attention: attnCount,
+        });
+      }
+    };
     const parseLine = (line) => {
       const t = line.trim();
       if (!t) return;
@@ -470,6 +567,36 @@ class DashboardPanel {
       if (/Running batch dry-run deploy|Attempting deploy|check.only deploy/i.test(t))
         emitPhase(2, 'Dry-run Deploy', 50);
       if (/repo.wide sweep|REPO SWEEP/i.test(t)) emitPhase(3, 'Repo Sweep', 85);
+      if (/^Total time:/i.test(t)) {
+        this.postMessage({ command: 'runDone' });
+        // Send results and per-item ref counts from inside stdout handler — most reliable point:
+        // actualCsvPath is already set ("Summary CSV saved to:" always precedes "Total time:")
+        // The close handler repeats this as a safety net.
+        const earlyPath = actualCsvPath || CLEANZ_CSV_FILE;
+        if (fs.existsSync(earlyPath)) {
+          try {
+            const earlyText = fs.readFileSync(earlyPath, 'utf8');
+            if (!resultsSent) {
+              resultsSent = true;
+              this.postMessage({ command: 'resultsReady', csv: earlyText });
+            }
+            dispatchCsvRefCounts(earlyText);
+          } catch {
+            /* ignore — close handler is a fallback */
+          }
+        }
+      }
+      const csvMatch = t.match(/Summary CSV saved to\s*:\s*(.+)/i);
+      if (csvMatch) actualCsvPath = csvMatch[1].trim();
+      // Queue / deploy sub-status — updates progress bar label and color
+      if (/\[Queue\] Waiting for queue to clear/i.test(t) || /\[Queue\] Still waiting/i.test(t))
+        this.postMessage({ command: 'deployStatus', state: 'queued' });
+      if (/\[Queue\] No active deployments/i.test(t) || /\[Queue\] Queue cleared/i.test(t))
+        this.postMessage({ command: 'deployStatus', state: 'idle' });
+      if (/Still deploying|Deploy in progress|waiting for Salesforce response/i.test(t))
+        this.postMessage({ command: 'deployStatus', state: 'deploying' });
+      if (/All remaining items passed|deployment.*succeeded|Deploy succeeded/i.test(t))
+        this.postMessage({ command: 'deployStatus', state: 'idle' });
       // Items are populated exclusively from JSON pre-parse (instant, no duplicates).
       // CLI stdout section headers are still tracked only to trigger emitItems() at the right time.
       // ── Batch deploy started → mark all non-done items as "Validating" ──
@@ -503,6 +630,26 @@ class DashboardPanel {
       if (iterMatch && batchDeployStarted) {
         batchItems.forEach((i) => {
           if (i.status === 'running' && !retriedInIteration.has(i.name)) {
+            i.status = 'clean';
+            i.statusLabel = 'Clean ✓';
+            if (i.refs === '—') i.refs = '0';
+            this.postMessage({
+              command: 'itemStatus',
+              name: i.name,
+              status: i.status,
+              statusLabel: i.statusLabel,
+              refs: i.refs,
+            });
+          }
+        });
+      }
+      // ── All items passed on the first try (no second "Batch Iteration" header fires) ──
+      // When the deploy succeeds on the first attempt, the batch loop exits immediately
+      // and no subsequent iteration header triggers the clear above. Detect the success
+      // log line and clear proactively so items don't stay stuck on "Validating".
+      if (/All remaining items passed validation/i.test(t) && batchDeployStarted) {
+        batchItems.forEach((i) => {
+          if (i.status === 'running') {
             i.status = 'clean';
             i.statusLabel = 'Clean ✓';
             if (i.refs === '—') i.refs = '0';
@@ -650,6 +797,11 @@ class DashboardPanel {
     proc.on('close', (code) => {
       // Wrap in async IIFE so we can await inside the synchronous event callback
       (async () => {
+        this.postMessage({
+          command: 'log',
+          level: 'info',
+          text: `[close] code=${code} aborted=${this._aborted} procMatch=${proc === this._currentProc}`,
+        });
         // Aborted or superseded by a newer run — recover stats from CSV + git log then bail
         if (this._aborted || proc !== this._currentProc) {
           const noActiveRun = !this._currentProc; // was set to undefined in abort handler
@@ -747,67 +899,27 @@ class DashboardPanel {
           warnings: warnCount,
           attention: attnCount,
         });
-        // Load conclusion CSV — send to Results tab AND update per-item refs accurately
-        const csvPath = CLEANZ_CSV_FILE;
+        // Load conclusion CSV — send resultsReady if not already sent, then dispatch
+        // per-item ref counts (safety net in case "Total time:" handler ran first).
+        const csvPath = actualCsvPath || CLEANZ_CSV_FILE;
+        this.postMessage({
+          command: 'log',
+          level: 'info',
+          text: `[CSV] path="${csvPath}" exists=${fs.existsSync(csvPath)} alreadySent=${resultsSent}`,
+        });
         if (fs.existsSync(csvPath)) {
           try {
             const csvText = fs.readFileSync(csvPath, 'utf8');
-            this.postMessage({ command: 'resultsReady', csv: csvText });
-            // Parse CSV to get accurate per-item ref counts
-            const csvLines = csvText.split('\n').filter(Boolean);
-            if (csvLines.length > 1) {
-              const parseCsvRow = (line) => {
-                const cols = [];
-                let cur = '',
-                  inQ = false;
-                for (const ch of line) {
-                  if (ch === '"') {
-                    inQ = !inQ;
-                  } else if (ch === ',' && !inQ) {
-                    cols.push(cur);
-                    cur = '';
-                  } else {
-                    cur += ch;
-                  }
-                }
-                cols.push(cur);
-                return cols.map((s) => s.trim());
-              };
-              const headers = parseCsvRow(csvLines[0]);
-              const iName = headers.indexOf('Name');
-              const iRemoved = headers.indexOf('RemovedFields');
-              let csvJsonFixed = 0;
-              for (const line of csvLines.slice(1)) {
-                const cols = parseCsvRow(line);
-                const name = cols[iName] ?? '';
-                const removed = cols[iRemoved] ?? '';
-                const refCount = removed.trim() ? removed.split(';').filter((s) => s.trim()).length : 0;
-                csvJsonFixed += refCount;
-                const item = batchItems.find((i) => i.name === name);
-                if (item) {
-                  item.refs = String(refCount);
-                  this.postMessage({
-                    command: 'itemStatus',
-                    name,
-                    status: item.status,
-                    statusLabel: item.statusLabel,
-                    refs: item.refs,
-                  });
-                }
-              }
-              // CSV is the authoritative source for JSON fixes — override log-based counter
-              if (csvJsonFixed > 0 || jsonFixed === 0) {
-                jsonFixed = csvJsonFixed;
-                this.postMessage({
-                  command: 'stats',
-                  jsonFixed,
-                  repoFixed,
-                  deploys: deployCount,
-                  warnings: warnCount,
-                  attention: attnCount,
-                });
-              }
+            if (!resultsSent) {
+              resultsSent = true;
+              this.postMessage({
+                command: 'log',
+                level: 'info',
+                text: `[CSV] sending resultsReady — ${csvText.split('\n').filter(Boolean).length} lines`,
+              });
+              this.postMessage({ command: 'resultsReady', csv: csvText });
             }
+            dispatchCsvRefCounts(csvText);
           } catch {
             /* ignore */
           }
@@ -817,7 +929,9 @@ class DashboardPanel {
         this.postMessage({ command: 'runComplete', exitCode: code });
         // Auto-export report — skip for namespace purge (no CSV, and old validate+fix CSV would be exported)
         if (!isNsPurge) {
-          this._exportReport(null).catch(() => {});
+          this._exportReport(null).catch(() => {
+            /* ignore export errors */
+          });
         }
       })(); // end async IIFE
     });

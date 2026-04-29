@@ -16,6 +16,7 @@
 
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
@@ -141,11 +142,48 @@ const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permi
 const MUTING_PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'mutingpermissionsets');
 const PSG_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsetgroups');
 const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
+const LAYOUT_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'layouts');
+const REPORT_TYPE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'reportTypes');
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 25;
 const MAX_RETRIES = 3;
 const MAX_QUEUE_WAIT_MINS = 60; // wait up to 60 min for active Copado deployments to finish
+
+// Core CRM standard objects that exist in every Salesforce org regardless of license.
+// objectPermissions / fieldPermissions / layoutAssignments for these are always false positives
+// in FULL dry-run validation — mask them so they don't consume the one-error-per-component slot.
+const CORE_CRM_OBJECTS = [
+  'Account',
+  'Contact',
+  'Lead',
+  'Opportunity',
+  'OpportunityLineItem',
+  'OpportunityContactRole',
+  'OpportunityTeamMember',
+  'Case',
+  'Campaign',
+  'CampaignMember',
+  'Contract',
+  'ContractLineItem',
+  'Order',
+  'OrderItem',
+  'Asset',
+  'Quote',
+  'QuoteLineItem',
+  'Product2',
+  'Pricebook2',
+  'PricebookEntry',
+  'ServiceContract',
+  'Entitlement',
+  'EntitlementContact',
+  'Task',
+  'Event',
+  'User',
+  'Territory2',
+  'ContentVersion',
+] as const;
+const CORE_CRM_ALT = CORE_CRM_OBJECTS.join('|');
 
 // ===============================================================
 // HELPERS
@@ -815,7 +853,40 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
   xml = removeBlocksWithNamespace(xml, 'customMetadataTypeAccesses', 'name', namespace);
   xml = removeBlocksWithNamespace(xml, 'customPermissions', 'name', namespace);
 
+  // After block removal, commented-out sections whose entire content was stripped
+  // leave empty comment delimiters behind (e.g. <!---->). Remove them.
+  xml = xml.replace(/[ \t]*<!--\s*-->[ \t]*\r?\n?/g, '');
+
   return { updated: xml, removed: xml !== xmlContent };
+}
+
+function applyRefToXml(xml: string, ref: RemovedRef, filePath: string): { updated: string; removed: boolean } | null {
+  if (ref.type === 'namespace') return resolveNsRemoval(xml, ref.name, filePath);
+  if (ref.type === 'field') return removeFieldPermissionsFromXml(xml, ref.name);
+  if (ref.type === 'userPermission') return removeUserPermissionFromXml(xml, ref.name);
+  if (ref.type === 'objectFlag') {
+    if (!ref.meta) return null;
+    return removeObjectPermissionFlag(xml, ref.name, ref.meta);
+  }
+  const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
+  return handler ? handler.removeFn(xml, ref.name) : null;
+}
+
+function resolveNsRemoval(xml: string, namespace: string, filePath: string): { updated: string; removed: boolean } {
+  if (filePath.endsWith('.layout-meta.xml')) return removeNsFromLayout(xml, namespace);
+  if (filePath.toLowerCase().endsWith('.reporttype-meta.xml')) return removeNsFromReportType(xml, namespace);
+  return bulkRemoveNamespaceRefs(xml, namespace);
+}
+
+function removeNsFromLayout(xml: string, namespace: string): { updated: string; removed: boolean } {
+  let updated = removeBlocksWithNamespace(xml, 'layoutItems', 'field', namespace);
+  updated = removeBlocksWithNamespace(updated, 'quickActionListItems', 'quickActionName', namespace);
+  return { updated, removed: updated !== xml };
+}
+
+function removeNsFromReportType(xml: string, namespace: string): { updated: string; removed: boolean } {
+  const updated = removeBlocksWithNamespace(xml, 'columns', 'field', namespace);
+  return { updated, removed: updated !== xml };
 }
 
 // ===============================================================
@@ -1057,7 +1128,7 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
     const timer = setTimeout(() => {
       proc.kill();
       resolve(0);
-    }, 30_000);
+    }, 60_000); // 60s — VDI/network storage can be slow
     proc.on('close', () => {
       clearTimeout(timer);
       try {
@@ -1110,6 +1181,40 @@ function queryPsgStatus(targetOrg: string, psgName: string): Promise<string | nu
   });
 }
 
+// Queries the target org and returns which of the given PermissionSet DeveloperNames exist.
+function queryExistingPermSets(targetOrg: string, psNames: string[]): Promise<string[]> {
+  return new Promise((resolve) => {
+    if (psNames.length === 0) {
+      resolve([]);
+      return;
+    }
+    const inClause = psNames.map((n) => `'${n}'`).join(', ');
+    const query = `"SELECT DeveloperName FROM PermissionSet WHERE DeveloperName IN (${inClause})"`;
+    const args = ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'];
+    const proc = spawn('sf', args, { shell: true });
+    const chunks: string[] = [];
+    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
+    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve([]);
+    }, 30_000);
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const raw = chunks.join('');
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+          result?: { records?: Array<{ DeveloperName?: string }> };
+        };
+        resolve(json?.result?.records?.map((r) => r.DeveloperName ?? '').filter(Boolean) ?? []);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+
 async function waitForPsgUpdates(
   log: (msg: string) => void,
   psgName: string,
@@ -1153,11 +1258,15 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
   const deadline = Date.now() + maxWaitMins * 60_000;
   const queueStart = Date.now();
 
+  log('   [Queue] Checking org deployment queue...');
   // eslint-disable-next-line no-await-in-loop
   let count = await queryDeployQueueCount(targetOrg);
-  if (count === 0) return;
+  if (count === 0) {
+    log('   [Queue] No active deployments — proceeding.');
+    return;
+  }
 
-  log(`   [Queue] ${count} active deployment(s) in org (Copado or previous dry-run). Waiting for queue to clear...`);
+  log('   [Queue] Waiting for queue to clear — active deployment in progress in Copado');
   while (count > 0 && Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     await sleep(POLL_MS);
@@ -1167,12 +1276,12 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
       const elapsed = Date.now() - queueStart;
       const mins = Math.floor(elapsed / 60_000);
       const secs = Math.floor((elapsed % 60_000) / 1000);
-      log(`   [Queue] Still ${count} active deployment(s). Waiting 30s... (${mins}m ${secs}s elapsed)`);
+      log(`   [Queue] Still waiting for queue to clear — active deployment in Copado (${mins}m ${secs}s elapsed)`);
     }
   }
 
   if (count === 0) {
-    log('   [Queue] Org deployment queue is clear. Proceeding with validation.');
+    log('   [Queue] Queue cleared — proceeding with validation.');
   } else {
     log(`   [Queue] Waited ${maxWaitMins} min — queue did not clear. Proceeding anyway.`);
   }
@@ -1724,7 +1833,8 @@ function sweepOtherFiles(
   skipPaths: Set<string>,
   allFilePaths: string[],
   repoPath: string,
-  dryRun: boolean
+  dryRun: boolean,
+  batchItemsByPath?: Map<string, BatchItem>
 ): void {
   if (refs.length === 0) return;
 
@@ -1738,29 +1848,22 @@ function sweepOtherFiles(
     let fileModified = false;
 
     const isProfile = filePath.endsWith('.profile-meta.xml');
+    const isLayoutOrReport =
+      filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml');
     for (const ref of refs) {
-      // Don't sweep refs into Profile files that Copado real deployments ignore.
-      // Exception: standard/big object refs (no __c/__mdt suffix) are real errors — sweep them too.
+      if (isLayoutOrReport && ref.type !== 'namespace') continue;
       if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
-      let result: { updated: string; removed: boolean };
-      if (ref.type === 'namespace') {
-        result = bulkRemoveNamespaceRefs(xml, ref.name);
-      } else if (ref.type === 'field') {
-        result = removeFieldPermissionsFromXml(xml, ref.name);
-      } else if (ref.type === 'userPermission') {
-        result = removeUserPermissionFromXml(xml, ref.name);
-      } else if (ref.type === 'objectFlag') {
-        if (!ref.meta) continue;
-        result = removeObjectPermissionFlag(xml, ref.name, ref.meta);
-      } else {
-        const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
-        if (!handler) continue;
-        result = handler.removeFn(xml, ref.name);
-      }
+      const result = applyRefToXml(xml, ref, filePath);
+      if (!result) continue;
       if (result.removed) {
         xml = result.updated;
         fileModified = true;
         log(`   [Sweep] Removed ${ref.label} from ${path.basename(filePath)}`);
+        const sweptItem = batchItemsByPath?.get(filePath);
+        if (sweptItem && !sweptItem.allRemovedFields.some((r) => r.label === ref.label)) {
+          sweptItem.allRemovedFields.push({ label: ref.label, error: ref.deployError ?? '' });
+          sweptItem.allRemovedRefs.push(ref);
+        }
       }
     }
 
@@ -1833,10 +1936,15 @@ function repoWideSweep(
       .map((f) => path.join(dir, f));
   };
 
+  const layoutDir = path.join(repoPath, 'force-app', 'main', 'default', 'layouts');
+  const reportTypeDir = path.join(repoPath, 'force-app', 'main', 'default', 'reportTypes');
+
   const repoFiles = [
     ...collectFiles(psDir, '.permissionset-meta.xml'),
     ...collectFiles(mpsDir, '.mutingpermissionset-meta.xml'),
     ...collectFiles(profileDir, '.profile-meta.xml'),
+    ...collectFiles(layoutDir, '.layout-meta.xml'),
+    ...collectFiles(reportTypeDir, '.reportType-meta.xml'),
   ].filter((f) => !batchFilePaths.has(f)); // exclude files already in the batch
 
   if (repoFiles.length === 0) {
@@ -1853,25 +1961,14 @@ function repoWideSweep(
     let xml = fs.readFileSync(filePath, 'utf8');
     let fileModified = false;
     const isProfile = filePath.endsWith('.profile-meta.xml');
+    const isLayoutOrReport =
+      filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml');
 
     for (const ref of allRemovedRefs) {
-      // Exception: standard/big object refs are real errors — sweep them into profiles too.
+      if (isLayoutOrReport && ref.type !== 'namespace') continue;
       if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
-      let result: { updated: string; removed: boolean };
-      if (ref.type === 'namespace') {
-        result = bulkRemoveNamespaceRefs(xml, ref.name);
-      } else if (ref.type === 'field') {
-        result = removeFieldPermissionsFromXml(xml, ref.name);
-      } else if (ref.type === 'userPermission') {
-        result = removeUserPermissionFromXml(xml, ref.name);
-      } else if (ref.type === 'objectFlag') {
-        if (!ref.meta) continue;
-        result = removeObjectPermissionFlag(xml, ref.name, ref.meta);
-      } else {
-        const handler = METADATA_HANDLERS.find((h) => h.refType === ref.type);
-        if (!handler) continue;
-        result = handler.removeFn(xml, ref.name);
-      }
+      const result = applyRefToXml(xml, ref, filePath);
+      if (!result) continue;
       if (result.removed) {
         xml = result.updated;
         fileModified = true;
@@ -2104,6 +2201,28 @@ function maskStandardApps(xmlContent: string): string {
   );
 }
 
+function maskCoreCrmObjectPermissions(xml: string): string {
+  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+  return xml.replace(
+    new RegExp(
+      `[ \\t]*<objectPermissions>${inner}<object>[ \\t]*(?:${CORE_CRM_ALT})[ \\t]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+      'g'
+    ),
+    ''
+  );
+}
+
+function maskCoreCrmFieldPermissions(xml: string): string {
+  const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
+  return xml.replace(
+    new RegExp(
+      `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*(?:${CORE_CRM_ALT})\\.[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+      'g'
+    ),
+    ''
+  );
+}
+
 export function maskProfileFalsePositives(xmlContent: string, isFull = false): string {
   // Mask block types that are false positives for profiles before each dry-run.
   // The original XML is restored after each dry-run.
@@ -2145,16 +2264,23 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
       ),
       ''
     );
-    // FULL: only mask __c field permissions — keep standard, __b, __e field permissions
-    // exposed so missing fields on feature-gated objects (e.g. AccountContactRelation) are caught.
+    // FULL: mask ALL custom field permissions (field name ending in __c).
+    // Covers both custom object fields (MyObj__c.Field__c) AND custom fields on standard/CRM
+    // objects (Account.Business_Impact__c) — Copado TRIM strips all of these before real deploy.
+    // Standard fields (Account.Name, AccountContactRelation.IsActive) are NOT masked so the
+    // dry-run can detect and remove permissions for feature-gated standard objects.
     const fieldInner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
     xml = xml.replace(
       new RegExp(
-        `[ \\t]*<fieldPermissions>${fieldInner}<field>[^<]*__c\\.[^<]*</field>${fieldInner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+        `[ \\t]*<fieldPermissions>${fieldInner}<field>[^<]*(?:__c|__mdt)[ \\t]*</field>${fieldInner}</fieldPermissions>[ \\t]*\\r?\\n?`,
         'g'
       ),
       ''
     );
+    // FULL: mask core CRM object permissions and field permissions — these always exist in every
+    // SF org and are false positives that block discovery of real errors during dry-run.
+    xml = maskCoreCrmObjectPermissions(xml);
+    xml = maskCoreCrmFieldPermissions(xml);
   } else {
     // ADD: mask ALL object permissions and ALL field permissions — Copado TRIM handles them.
     xml = xml.replace(/[ \t]*<objectPermissions>[\s\S]*?<\/objectPermissions>[ \t]*\r?\n?/g, '');
@@ -2162,21 +2288,10 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
   }
   xml = xml.replace(/[ \t]*<recordTypeVisibilities>[\s\S]*?<\/recordTypeVisibilities>[ \t]*\r?\n?/g, '');
   if (isFull) {
-    // FULL: only mask __c layout assignments — keep standard, __b, __e layouts exposed
-    // so missing layouts on feature-gated objects (e.g. AccountContactRelation) are caught.
-    // Layout names follow "ObjectName-LayoutName" — mask only where ObjectName ends in __c.
-    const layoutInner = '(?:(?!<layoutAssignments>)[\\s\\S])*?';
-    xml = xml.replace(
-      new RegExp(
-        `[ \\t]*<layoutAssignments>${layoutInner}<layout>[^<]*__c-[^<]*</layout>${layoutInner}</layoutAssignments>[ \\t]*\\r?\\n?`,
-        'g'
-      ),
-      ''
-    );
-  } else {
-    // ADD: mask ALL layoutAssignments — Copado TRIM handles them for ADD profiles.
-    xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
+    // FULL + ADD: mask ALL layoutAssignments — Copado TRIM strips them before real deploy,
+    // so any layout error in dry-run is a false positive regardless of object type.
   }
+  xml = xml.replace(/[ \t]*<layoutAssignments>[\s\S]*?<\/layoutAssignments>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<tabVisibilities>[\s\S]*?<\/tabVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<customMetadataTypeAccesses>[\s\S]*?<\/customMetadataTypeAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<customPermissions>[\s\S]*?<\/customPermissions>[ \t]*\r?\n?/g, ''); // confirmed: Copado TRIM strips these
@@ -2184,24 +2299,21 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
 }
 
 export function maskPermSetFalsePositives(xmlContent: string, isFull = false): string {
-  // customMetadataTypeAccesses is NOT masked — missing __mdt references cause real deployment
-  // failures and are handled by the customMetadataType METADATA_HANDLER.
-  //
-  // FULL operation: Copado TRIM strips __c/__mdt object permissions from permission sets before
-  // the real deploy, so mask those to avoid false positives consuming the one-error-per-component
-  // slot. Standard and __b object permissions are NOT stripped by Copado and cause hard errors —
-  // keep them exposed so the dry-run detects and removes them.
-  // ADD operation: no masking needed (existing behaviour).
+  // ADD operation: no masking needed here (maskStandardApps handles standard apps separately).
+  // FULL operation: Copado does NOT reliably auto-clean FULL PS — expose real errors so dry-run
+  // catches them before Copado deployment. Only mask blocks that never cause "no X found" errors:
+  //   flowAccesses  — no real Copado errors observed; Copado handles flow cleanup
+  //   userPermissions — system permissions, never cause missing-component errors
+  // Everything else (objectPermissions, fieldPermissions, classAccesses, pageAccesses,
+  // tabSettings, recordTypeVisibilities, customPermissions, customMetadataTypeAccesses,
+  // applicationVisibilities for custom/managed-package apps) is left exposed so the dry-run
+  // surfaces the same errors that would fail in real Copado deployment.
   if (!isFull) return xmlContent;
 
-  const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
-  return xmlContent.replace(
-    new RegExp(
-      `[ \\t]*<objectPermissions>${inner}<object>[^<]*(?:__c|__mdt)[^<]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
-      'g'
-    ),
-    ''
-  );
+  let xml = xmlContent;
+  xml = xml.replace(/[ \t]*<flowAccesses>[\s\S]*?<\/flowAccesses>[ \t]*\r?\n?/g, '');
+  xml = xml.replace(/[ \t]*<userPermissions>[\s\S]*?<\/userPermissions>[ \t]*\r?\n?/g, '');
+  return xml;
 }
 
 // ===============================================================
@@ -2274,11 +2386,11 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     if (!fs.existsSync(item.filePath)) continue;
     const orig = readFileWithRetry(item.filePath);
     let masked = maskWhitelistedEntries(orig, whitelist);
-    masked = maskStandardApps(masked);
     if (item.filePath.endsWith('.profile-meta.xml')) {
       masked = maskProfileFalsePositives(masked, item.operation === 'FULL');
     }
     if (item.filePath.endsWith('.permissionset-meta.xml') || item.filePath.endsWith('.mutingpermissionset-meta.xml')) {
+      masked = maskStandardApps(masked);
       masked = maskPermSetFalsePositives(masked, item.operation === 'FULL');
     }
     // PSG files: no false-positive masking needed — structure is simple and fixed by fixPsgPermissionSetsBlock
@@ -2345,10 +2457,11 @@ function sweepPerItemRefs(
   perItemRefs: Map<string, RemovedRef[]>,
   allFilePaths: string[],
   repoPath: string,
-  dryRun: boolean
+  dryRun: boolean,
+  batchItemsByPath?: Map<string, BatchItem>
 ): void {
   for (const [sourceFilePath, refs] of perItemRefs) {
-    sweepOtherFiles(log, refs, new Set([sourceFilePath]), allFilePaths, repoPath, dryRun);
+    sweepOtherFiles(log, refs, new Set([sourceFilePath]), allFilePaths, repoPath, dryRun, batchItemsByPath);
   }
 }
 
@@ -2371,6 +2484,136 @@ type NsResult = { nsXml: string; nsRefs: RemovedRef[]; rootNode: string };
 
 // Applies namespace pre-check to all active items, stages and commits them together.
 // Returns a map of per-item NS results and the managed-refs commit hash (if any).
+async function handlePsgLockItem(
+  log: (msg: string) => void,
+  item: BatchItem,
+  failure: ComponentFailure,
+  targetOrg: string
+): Promise<void> {
+  const psgNameMatch = (failure.problem ?? failure.error ?? '').match(
+    /The\s+(\w+)\s+permission set group is updating/i
+  );
+  const blockingPsg = psgNameMatch ? psgNameMatch[1] : 'a Permission Set Group';
+  log(
+    `   [PSG] ${item.itemName} — ⏳ "${blockingPsg}" is updating. Waiting for recalculation to complete before retrying...`
+  );
+  const psgResult = await waitForPsgUpdates(log, item.itemName, targetOrg);
+  if (psgResult === 'updated') {
+    item.status = 'Pending';
+  } else if (psgResult === 'calc-failed') {
+    item.calcFailedRetries++;
+    if (item.calcFailedRetries <= 3) {
+      log(`   [PSG] ${item.itemName} — CalculationFailed retry ${item.calcFailedRetries}/3. Re-deploying...`);
+      item.status = 'Pending';
+    } else {
+      log(`   [PSG] ${item.itemName} — CalculationFailed after 3 retries. Giving up.`);
+      item.status = 'Skipped - PSG Calculation Failed';
+      item.done = true;
+    }
+  } else {
+    item.status = 'Skipped - PSG Update Failed';
+    item.done = true;
+  }
+}
+
+async function handlePsgInvalidPsItem(
+  log: (msg: string) => void,
+  item: BatchItem,
+  targetOrg: string,
+  repoPath: string,
+  promotionData: PromotionItem[]
+): Promise<void> {
+  log(`\n   [PSG] ${item.itemName} — invalid <permissionSets> reference(s) detected. Analyzing...`);
+
+  const psgXml = fs.readFileSync(item.filePath, 'utf8');
+  const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>/g;
+  const allPsRefs: string[] = [];
+  let m: RegExpExecArray | null;
+  // eslint-disable-next-line no-cond-assign
+  while ((m = tagRegex.exec(psgXml)) !== null) {
+    const name = m[1].trim();
+    if (name) allPsRefs.push(name);
+  }
+
+  if (allPsRefs.length === 0) {
+    log(`   [PSG] ${item.itemName} — no <permissionSets> refs found in XML. Cannot auto-fix.`);
+    item.done = true;
+    return;
+  }
+
+  log(`   [PSG] ${item.itemName} — refs in XML (${allPsRefs.length}): ${allPsRefs.join(', ')}`);
+
+  const existingInOrg = await queryExistingPermSets(targetOrg, allPsRefs);
+  const existingSet = new Set(existingInOrg.map((n) => n.toLowerCase()));
+  const missingInOrg = allPsRefs.filter((n) => !existingSet.has(n.toLowerCase()));
+
+  if (missingInOrg.length === 0) {
+    log(
+      `   [PSG] ${item.itemName} — all referenced PermSets exist in target org. Cannot auto-fix — manual intervention needed.`
+    );
+    item.done = true;
+    return;
+  }
+
+  log(`   [PSG] ${item.itemName} — missing in target org: ${missingInOrg.join(', ')}`);
+
+  const beingAdded = missingInOrg.filter((n) =>
+    promotionData.some(
+      (i) => i.t === 'PermissionSet' && i.n === n && (!i.a || !i.a.toLowerCase().startsWith('retrieve'))
+    )
+  );
+  const beingAddedLower = new Set(beingAdded.map((n) => n.toLowerCase()));
+  const toRemove = missingInOrg.filter((n) => !beingAddedLower.has(n.toLowerCase()));
+
+  if (beingAdded.length > 0) {
+    log(`   [PSG] ${item.itemName} — keeping refs (being added in this promotion): ${beingAdded.join(', ')}`);
+  }
+
+  if (toRemove.length === 0) {
+    log(
+      `   [PSG] ${item.itemName} — all missing PermSets are being added in this promotion. Retrying after they deploy.`
+    );
+    item.status = 'Pending';
+    return;
+  }
+
+  log(
+    `   [PSG] ${item.itemName} — removing ${toRemove.length} ref(s) not in org and not in promotion: ${toRemove.join(
+      ', '
+    )}`
+  );
+
+  const toRemoveSet = new Set(toRemove.map((n) => n.toLowerCase()));
+  const removeRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>[ \t]*\r?\n?/g;
+  const updatedPsgXml = psgXml.replace(removeRegex, (full, name: string) =>
+    toRemoveSet.has(name.trim().toLowerCase()) ? '' : full
+  );
+
+  const psgRootNode = getRootNodeName(updatedPsgXml);
+  saveXmlClean(updatedPsgXml, item.filePath, psgRootNode);
+  item.allRemovedFields.push(
+    ...toRemove.map((n) => ({
+      label: `<permissionSets>${n}</permissionSets>`,
+      error: 'Invalid PSG ref: not in org and not in promotion',
+    }))
+  );
+
+  try {
+    execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+    execSync(
+      `git commit -m "[${item.itemName}] Remove invalid PSG refs (not in org, not in promotion): ${toRemove.join(
+        ', '
+      )}"`,
+      { cwd: repoPath }
+    );
+    log(`   [PSG] ${item.itemName} — committed. Will retry deployment.`);
+    item.status = 'Pending';
+  } catch (err) {
+    log(`   [PSG] ${item.itemName} — git commit failed: ${(err as Error).message ?? err}. Skipping.`);
+    item.done = true;
+  }
+}
+
 async function applyManagedRefsPass(
   log: (msg: string) => void,
   activeItems: BatchItem[],
@@ -2379,9 +2622,12 @@ async function applyManagedRefsPass(
   targetOrg: string,
   repoPath: string,
   vlog: (msg: string) => void,
-  dryRun: boolean
+  dryRun: boolean,
+  promotionData: PromotionItem[]
 ): Promise<{ itemNsResults: Map<string, NsResult>; lastManagedRefsCommit: string | null }> {
   const PSG_LOCK = /permission set group is updating/i;
+  const PSG_INVALID_PS =
+    /Cannot create permission set group components since the following permission set names are invalid/i;
   const itemNsResults = new Map<string, NsResult>();
   let managedRefsStaged = false;
 
@@ -2390,26 +2636,17 @@ async function applyManagedRefsPass(
     const itemFailures = failuresByItem.get(item.itemName) ?? [];
     if (itemFailures.length === 0) continue;
 
-    if (itemFailures.some((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''))) {
+    const psgLockFailure = itemFailures.find((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''));
+    if (psgLockFailure) {
       // eslint-disable-next-line no-await-in-loop
-      const psgResult = await waitForPsgUpdates(log, item.itemName, targetOrg);
-      if (psgResult === 'updated') {
-        // Leave item.done=false — it will be re-deployed in the next iteration
-        item.status = 'Pending';
-      } else if (psgResult === 'calc-failed') {
-        item.calcFailedRetries++;
-        if (item.calcFailedRetries <= 3) {
-          log(`   [PSG] ${item.itemName} — CalculationFailed retry ${item.calcFailedRetries}/3. Re-deploying...`);
-          item.status = 'Pending';
-        } else {
-          log(`   [PSG] ${item.itemName} — CalculationFailed after 3 retries. Giving up.`);
-          item.status = 'Skipped - PSG Calculation Failed';
-          item.done = true;
-        }
-      } else {
-        item.status = 'Skipped - PSG Update Failed';
-        item.done = true;
-      }
+      await handlePsgLockItem(log, item, psgLockFailure, targetOrg);
+      continue;
+    }
+
+    const psgInvalidPsFailure = itemFailures.find((f) => PSG_INVALID_PS.test(f.problem ?? f.error ?? ''));
+    if (psgInvalidPsFailure && item.metadataType === 'PermissionSetGroup') {
+      // eslint-disable-next-line no-await-in-loop
+      await handlePsgInvalidPsItem(log, item, targetOrg, repoPath, promotionData);
       continue;
     }
 
@@ -2543,7 +2780,8 @@ async function processItemsInIteration(
   targetOrg: string,
   repoPath: string,
   verbose: boolean,
-  dryRun: boolean
+  dryRun: boolean,
+  promotionData: PromotionItem[]
 ): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean; lastManagedRefsCommit: string | null }> {
   const vlog: (msg: string) => void = verbose ? log : (): void => {};
   // Track refs per source file so the sweep skips only the source file, not all modified files.
@@ -2562,7 +2800,8 @@ async function processItemsInIteration(
     targetOrg,
     repoPath,
     vlog,
-    dryRun
+    dryRun,
+    promotionData
   );
 
   // ── Pass 2: Missing-ref removals (per item) ───────────────────────────────
@@ -2658,7 +2897,8 @@ async function runBatchDeploy(
   timeoutMins: number,
   maxRetries: number,
   verbose: boolean,
-  dryRun: boolean
+  dryRun: boolean,
+  promotionData: PromotionItem[]
 ): Promise<{ summary: SummaryRecord[]; lastManagedRefsCommit: string | null }> {
   validateBatchItems(log, batchItems);
 
@@ -2770,7 +3010,8 @@ async function runBatchDeploy(
       targetOrg,
       repoPath,
       verbose,
-      dryRun
+      dryRun,
+      promotionData
     );
 
     if (lastManagedRefsCommit) overallLastManagedRefsCommit = lastManagedRefsCommit;
@@ -2783,7 +3024,8 @@ async function runBatchDeploy(
     // Sweep each item's removed refs to ALL other files except that item's own file.
     // This ensures e.g. Profile B gets swept even if it was also modified this iteration
     // for a different error — it would otherwise be missed if we skipped all modified files.
-    sweepPerItemRefs(log, perItemRefs, allFilePaths, repoPath, dryRun);
+    const batchItemsByPath = new Map<string, BatchItem>(batchItems.map((i) => [i.filePath, i]));
+    sweepPerItemRefs(log, perItemRefs, allFilePaths, repoPath, dryRun, batchItemsByPath);
   }
 
   if (fs.existsSync(deployErrorsFile)) fs.unlinkSync(deployErrorsFile);
@@ -2927,6 +3169,22 @@ async function runNamespacePurge(log: (msg: string) => void): Promise<void> {
         ) {
           const content = fs.readFileSync(fullPath, 'utf8');
           const { updated, removed } = bulkRemoveNamespaceRefs(content, namespace);
+          if (removed) {
+            fs.writeFileSync(fullPath, updated, 'utf8');
+            modifiedFiles.push(fullPath);
+            log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
+          }
+        } else if (basenameLower.endsWith('.layout-meta.xml')) {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const { updated, removed } = removeNsFromLayout(content, namespace);
+          if (removed) {
+            fs.writeFileSync(fullPath, updated, 'utf8');
+            modifiedFiles.push(fullPath);
+            log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
+          }
+        } else if (basenameLower.endsWith('.reporttype-meta.xml')) {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const { updated, removed } = removeNsFromReportType(content, namespace);
           if (removed) {
             fs.writeFileSync(fullPath, updated, 'utf8');
             modifiedFiles.push(fullPath);
@@ -3086,37 +3344,52 @@ export default class DeployAndFix extends SfCommand<void> {
     // ================= LOAD & PARSE INPUT FILE =================
     const promotionData = loadInputFile(log, inputFilePath);
 
-    const permSets = [...new Set(promotionData.filter((i) => i.t === 'PermissionSet').map((i) => i.n))].sort();
+    // Exclude RetrieveOnly items from validation — they are not being deployed in this package.
+    // For package.xml (no "a" field), treat all entries as deployable (preserve existing behavior).
+    const isDeployable = (i: PromotionItem): boolean => !i.a || !i.a.toLowerCase().startsWith('retrieve');
+
+    const permSets = [
+      ...new Set(promotionData.filter((i) => i.t === 'PermissionSet' && isDeployable(i)).map((i) => i.n)),
+    ].sort();
     const mutingPermSets = [
-      ...new Set(promotionData.filter((i) => i.t === 'MutingPermissionSet').map((i) => i.n)),
+      ...new Set(promotionData.filter((i) => i.t === 'MutingPermissionSet' && isDeployable(i)).map((i) => i.n)),
     ].sort();
     const permSetGroups = [
-      ...new Set(promotionData.filter((i) => i.t === 'PermissionSetGroup').map((i) => i.n)),
+      ...new Set(promotionData.filter((i) => i.t === 'PermissionSetGroup' && isDeployable(i)).map((i) => i.n)),
     ].sort();
-    const profiles = [...new Set(promotionData.filter((i) => i.t === 'Profile').map((i) => i.n))].sort();
-
-    // Only ADD operations are whitelisted — Retrieve-only components are not being deployed
-    // in this package, so if they cause errors they can be safely removed.
-    // For package.xml (no "a" field), treat all entries as Add (preserve existing behavior).
-    const isAdd = (i: PromotionItem): boolean => !i.a || i.a.toLowerCase() === 'add';
+    const profiles = [
+      ...new Set(promotionData.filter((i) => i.t === 'Profile' && isDeployable(i)).map((i) => i.n)),
+    ].sort();
     const whitelist: WhitelistMap = {
-      fields: [...new Set(promotionData.filter((i) => i.t === 'CustomField' && isAdd(i)).map((i) => i.n))].sort(),
-      apps: [...new Set(promotionData.filter((i) => i.t === 'CustomApplication' && isAdd(i)).map((i) => i.n))].sort(),
-      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass' && isAdd(i)).map((i) => i.n))].sort(),
-      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage' && isAdd(i)).map((i) => i.n))].sort(),
-      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab' && isAdd(i)).map((i) => i.n))].sort(),
-      objects: [...new Set(promotionData.filter((i) => i.t === 'CustomObject' && isAdd(i)).map((i) => i.n))].sort(),
-      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow' && isAdd(i)).map((i) => i.n))].sort(),
-      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout' && isAdd(i)).map((i) => i.n))].sort(),
-      flexipages: [...new Set(promotionData.filter((i) => i.t === 'FlexiPage' && isAdd(i)).map((i) => i.n))].sort(),
-      recordTypes: [...new Set(promotionData.filter((i) => i.t === 'RecordType' && isAdd(i)).map((i) => i.n))].sort(),
+      fields: [
+        ...new Set(promotionData.filter((i) => i.t === 'CustomField' && isDeployable(i)).map((i) => i.n)),
+      ].sort(),
+      apps: [
+        ...new Set(promotionData.filter((i) => i.t === 'CustomApplication' && isDeployable(i)).map((i) => i.n)),
+      ].sort(),
+      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass' && isDeployable(i)).map((i) => i.n))].sort(),
+      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage' && isDeployable(i)).map((i) => i.n))].sort(),
+      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab' && isDeployable(i)).map((i) => i.n))].sort(),
+      objects: [
+        ...new Set(promotionData.filter((i) => i.t === 'CustomObject' && isDeployable(i)).map((i) => i.n)),
+      ].sort(),
+      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow' && isDeployable(i)).map((i) => i.n))].sort(),
+      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n))].sort(),
+      flexipages: [
+        ...new Set(promotionData.filter((i) => i.t === 'FlexiPage' && isDeployable(i)).map((i) => i.n)),
+      ].sort(),
+      recordTypes: [
+        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isDeployable(i)).map((i) => i.n)),
+      ].sort(),
       // CustomMetadata type definitions appear as CustomObject with __mdt suffix.
       // Individual CMT records appear as CustomMetadata with "TypeName__mdt.RecordName" format.
       customMetadataTypes: [
         ...new Set([
-          ...promotionData.filter((i) => i.t === 'CustomObject' && isAdd(i) && i.n.endsWith('__mdt')).map((i) => i.n),
           ...promotionData
-            .filter((i) => i.t === 'CustomMetadata' && isAdd(i))
+            .filter((i) => i.t === 'CustomObject' && isDeployable(i) && i.n.endsWith('__mdt'))
+            .map((i) => i.n),
+          ...promotionData
+            .filter((i) => i.t === 'CustomMetadata' && isDeployable(i))
             .map((i) => {
               const dot = i.n.indexOf('.');
               return dot >= 0 ? i.n.substring(0, dot) : i.n;
@@ -3124,19 +3397,28 @@ export default class DeployAndFix extends SfCommand<void> {
         ]),
       ].sort(),
       customPermissions: [
-        ...new Set(promotionData.filter((i) => i.t === 'CustomPermission' && isAdd(i)).map((i) => i.n)),
+        ...new Set(promotionData.filter((i) => i.t === 'CustomPermission' && isDeployable(i)).map((i) => i.n)),
       ].sort(),
       recordTypeVisibilities: [
-        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isAdd(i)).map((i) => i.n)),
+        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isDeployable(i)).map((i) => i.n)),
       ].sort(),
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
+    const collectDir = (dir: string, ext: string): string[] => {
+      if (!fs.existsSync(dir)) return [];
+      return fs
+        .readdirSync(dir)
+        .filter((f) => f.toLowerCase().endsWith(ext))
+        .map((f) => path.join(dir, f));
+    };
     const allFilePaths: string[] = [
       ...permSets.map((ps) => path.join(PS_BASE_PATH, `${ps}.permissionset-meta.xml`)),
       ...mutingPermSets.map((mps) => path.join(MUTING_PS_BASE_PATH, `${mps}.mutingpermissionset-meta.xml`)),
       ...permSetGroups.map((psg) => path.join(PSG_BASE_PATH, `${psg}.permissionsetgroup-meta.xml`)),
       ...profiles.map((p) => path.join(PROFILE_BASE_PATH, `${p}.profile-meta.xml`)),
+      ...collectDir(LAYOUT_BASE_PATH, '.layout-meta.xml'),
+      ...collectDir(REPORT_TYPE_BASE_PATH, '.reporttype-meta.xml'),
     ];
 
     const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
@@ -3146,10 +3428,17 @@ export default class DeployAndFix extends SfCommand<void> {
     log('STARTING AUTOMATED DEPLOY & FIX LOOP');
     log('======================================================');
     log(`Target Org              : ${targetOrg}`);
-    log(`Permission Sets         : ${permSets.length} found in JSON`);
-    log(`Muting Permission Sets  : ${mutingPermSets.length} found in JSON`);
-    log(`Permission Set Groups   : ${permSetGroups.length} found in JSON`);
-    log(`Profiles                : ${profiles.length} found in JSON`);
+    log(`Permission Sets         : ${permSets.length} found in JSON (deployable)`);
+    log(`Muting Permission Sets  : ${mutingPermSets.length} found in JSON (deployable)`);
+    log(`Permission Set Groups   : ${permSetGroups.length} found in JSON (deployable)`);
+    log(`Profiles                : ${profiles.length} found in JSON (deployable)`);
+    const retrieveOnly = promotionData.filter(
+      (i) => ['PermissionSet', 'PermissionSetGroup', 'Profile', 'MutingPermissionSet'].includes(i.t) && !isDeployable(i)
+    );
+    if (retrieveOnly.length > 0) {
+      log(`Retrieve-Only (skipped) : ${retrieveOnly.length} — not validated`);
+      retrieveOnly.forEach((i) => log(`   - ${i.n} [${i.t}] (RetrieveOnly — excluded)`));
+    }
     log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
     log(`  - CustomFields        : ${whitelist.fields.length}`);
     log(`  - CustomApplications  : ${whitelist.apps.length}`);
@@ -3299,7 +3588,8 @@ export default class DeployAndFix extends SfCommand<void> {
       DEPLOY_TIMEOUT_MINS,
       MAX_RETRIES,
       verbose,
-      dryRun
+      dryRun,
+      promotionData
     );
 
     // ================= FINAL SUMMARY =================
@@ -3415,7 +3705,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
     writeConclusionFile(log, conclusionLines.join('\n'), REPO_PATH);
 
-    const csvPath = path.join(REPO_PATH, 'deploy_fix_summary.csv');
+    const csvPath = path.join(os.tmpdir(), 'cleanz-deploy-summary.csv');
     const csvHeader = 'Type,Name,Status,RemovedFields,RemovedErrors,SkippedFields';
     const csvRows = summary.map(
       (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.RemovedErrors}","${r.SkippedFields}"`
