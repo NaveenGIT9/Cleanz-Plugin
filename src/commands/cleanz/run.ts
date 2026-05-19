@@ -3169,8 +3169,8 @@ async function runBatchDeploy(
     const failuresByItem = routeFailuresToItems(failures, activeItems);
     markPassedItems(log, activeItems, failuresByItem, dryRun);
 
-    // eslint-disable-next-line no-await-in-loop
     const { perItemRefs, anyProgress, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap } =
+      // eslint-disable-next-line no-await-in-loop
       await processItemsInIteration(
         log,
         activeItems,
@@ -3439,10 +3439,8 @@ async function resolveInputs(
     }
     while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
       if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
-      // eslint-disable-next-line no-await-in-loop
-      targetOrg = (
-        await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')
-      ).trim();
+      targetOrg = // eslint-disable-next-line no-await-in-loop
+      (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
     }
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
