@@ -1476,6 +1476,7 @@
       let _runStartTs = 0;
       let _nsPurgeStartTs = 0;
       let _lastLogTs = 0;
+      let _inSweepPhase = false;
       let _elapsedTimer = null;
       let _silenceTimer = null;
 
@@ -1498,11 +1499,12 @@
             const totalSecs = Math.floor((Date.now() - _runStartTs) / 1000);
             const mm = String(Math.floor(totalSecs / 60)).padStart(2, '0');
             const ss = String(totalSecs % 60).padStart(2, '0');
-            // Only show "deploy in progress" once we are actually in the deploy phase
-            const msg =
-              currentPhase >= 2
-                ? '⏳ Deploy in progress — waiting for Salesforce response... (' + mm + ':' + ss + ' total)'
-                : '⏳ Still loading — processing... (' + mm + ':' + ss + ' total)';
+            // Show a contextual message based on the current phase
+            const msg = _inSweepPhase
+              ? '🔍 Repo-wide sweep in progress — scanning files... (' + mm + ':' + ss + ' total)'
+              : currentPhase >= 2
+              ? '⏳ Deploy in progress — waiting for Salesforce response... (' + mm + ':' + ss + ' total)'
+              : '⏳ Still loading — processing... (' + mm + ':' + ss + ' total)';
             appendLog('dim', msg);
           }
         }, 30000);
@@ -1719,6 +1721,9 @@
           clearInterval(_silenceTimer);
           _silenceTimer = null;
         }
+        // Detect sweep phase start/end to show correct heartbeat label
+        if (text && /--- Repo-Wide Sweep/i.test(text)) _inSweepPhase = true;
+        if (text && /\[Repo Sweep\].*No outside files|Total time:/i.test(text)) _inSweepPhase = false;
         const panel = document.getElementById('logPanel');
         const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
         const line = document.createElement('div');
@@ -1753,6 +1758,7 @@
             // Full UI reset — works for both webview-modal and native-input launch paths
             _stopRunTimers();
             _isAborted = false;
+            _inSweepPhase = false;
             runNumber++;
             runActive = true;
             currentPhase = 0;

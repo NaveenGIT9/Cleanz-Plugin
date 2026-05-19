@@ -1993,11 +1993,25 @@ function repoWideSweep(
     return;
   }
 
-  log(`\n--- Repo-Wide Sweep (${repoFiles.length} file(s) outside batch) ---`);
+  // Option 3: skip layouts + reportTypes entirely when no namespace refs were removed —
+  // those file types only contain namespace refs, so scanning them is pure waste otherwise.
+  const hasNamespaceRef = allRemovedRefs.some((r) => r.type === 'namespace');
+  const effectiveFiles = hasNamespaceRef
+    ? repoFiles
+    : repoFiles.filter((f) => !f.endsWith('.layout-meta.xml') && !f.toLowerCase().endsWith('.reporttype-meta.xml'));
+
+  log(`\n--- Repo-Wide Sweep (${effectiveFiles.length} file(s) outside batch) ---`);
   const modifiedFiles: string[] = [];
   const removedRefLabels = new Set<string>();
 
-  for (const filePath of repoFiles) {
+  // Option 1: emit progress every 50 files so the UI heartbeat never shows "Deploy in progress"
+  const PROGRESS_INTERVAL = 50;
+
+  for (let i = 0; i < effectiveFiles.length; i++) {
+    const filePath = effectiveFiles[i];
+    if (i > 0 && i % PROGRESS_INTERVAL === 0) {
+      log(`   [Repo Sweep] Scanning ${i}/${effectiveFiles.length}...`);
+    }
     if (!fs.existsSync(filePath)) continue;
     let xml = readFileWithRetry(filePath);
     let fileModified = false;
@@ -3440,7 +3454,7 @@ async function resolveInputs(
     while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
       if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
       targetOrg = // eslint-disable-next-line no-await-in-loop
-      (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
+        (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
     }
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
