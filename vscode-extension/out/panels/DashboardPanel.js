@@ -325,10 +325,9 @@ class DashboardPanel {
         break;
       }
       case 'resetDashboard': {
-        // Full webview reload — clears all accumulated stats, logs, and items.
-        // Append a timestamp comment so VS Code sees different HTML content and triggers a real reload.
-        this._webviewReady = false;
-        this._panel.webview.html = this._getHtml() + `<!-- reset:${Date.now()} -->`;
+        // In-place reset — clear all data without reloading HTML.
+        // Reloading HTML hides mainContent (display:none initial state) making it feel broken.
+        this.postMessage({ command: 'doReset' });
         break;
       }
       case 'browseJson': {
@@ -386,6 +385,10 @@ class DashboardPanel {
       env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
     });
     this._currentProc = proc;
+    // Immediately tell the UI we're connecting — the CLI takes a few seconds to start
+    // on VDI/network storage (SF CLI module loading + git detection). Without this the
+    // dashboard shows nothing for 5-30 s after the user confirms the run, which feels broken.
+    this._queueLog('dim', '⏳ SF CleanZ starting — connecting to CLI...');
     // ── State ──────────────────────────────────────────────────────
     const menuChoice = config.mode === 'namespace-purge' ? '2' : '1';
     const isNsPurge = config.mode === 'namespace-purge';
@@ -1106,21 +1109,15 @@ ${(() => {
     vscode.window.showInformationMessage(`Report saved: CleanzConclusions/${fileName}`);
   }
   async _namespacePurge(namespace) {
-    this.postMessage({ command: 'log', level: 'info', text: `Starting namespace purge: ${namespace}` });
-    // Delegate to CLI namespace purge — spawn sf cleanz run with purge flag
-    const proc = (0, child_process_1.spawn)('sf', ['cleanz', 'run', '--namespace', namespace], {
-      cwd: path.dirname(path.dirname(this._context.extensionPath)),
-      shell: true,
-    });
-    proc.stdout.on('data', (d) => {
-      this.postMessage({ command: 'log', level: 'info', text: d.toString().trim() });
-    });
-    proc.on('close', (code) => {
-      this.postMessage({
-        command: 'log',
-        level: code === 0 ? 'ok' : 'err',
-        text: `Namespace purge complete (exit ${code})`,
-      });
+    // Route through the standard run path — CLI menu option 2 handles purge via stdin.
+    // The old approach (--namespace flag) was wrong: that flag does not exist in the CLI.
+    await this._startCleanzRun({
+      jsonPath: '',
+      org: '',
+      mode: 'namespace-purge',
+      repoSweep: false,
+      verbose: false,
+      namespace,
     });
   }
   _getHtml() {

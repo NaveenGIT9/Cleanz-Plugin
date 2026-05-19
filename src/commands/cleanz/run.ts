@@ -137,13 +137,30 @@ type FailureResult = {
 // CONSTANTS / CONFIG
 // ===============================================================
 
-const REPO_PATH = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
-const PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsets');
-const MUTING_PS_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'mutingpermissionsets');
-const PSG_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'permissionsetgroups');
-const PROFILE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'profiles');
-const LAYOUT_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'layouts');
-const REPORT_TYPE_BASE_PATH = path.join(REPO_PATH, 'force-app', 'main', 'default', 'reportTypes');
+// Resolved lazily inside run() and runNamespacePurge() — NOT at module load time.
+// Calling execSync at the top level blocks the Node.js thread during SF CLI module loading,
+// which prevents any stdout output for 30-60 s on VDI/network storage (the "1-min delay" bug).
+function resolveRepoPaths(): {
+  REPO_PATH: string;
+  PS_BASE_PATH: string;
+  MUTING_PS_BASE_PATH: string;
+  PSG_BASE_PATH: string;
+  PROFILE_BASE_PATH: string;
+  LAYOUT_BASE_PATH: string;
+  REPORT_TYPE_BASE_PATH: string;
+} {
+  const repoPath = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
+  return {
+    REPO_PATH: repoPath,
+    PS_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'permissionsets'),
+    MUTING_PS_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'mutingpermissionsets'),
+    PSG_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'permissionsetgroups'),
+    PROFILE_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'profiles'),
+    LAYOUT_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'layouts'),
+    REPORT_TYPE_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'reportTypes'),
+  };
+}
+
 const MAX_ITERATIONS = 500;
 const MAX_TOTAL_DEPLOYS = 1000;
 const DEPLOY_TIMEOUT_MINS = 25;
@@ -151,8 +168,7 @@ const MAX_RETRIES = 3;
 const MAX_QUEUE_WAIT_MINS = 60; // wait up to 60 min for active Copado deployments to finish
 
 // Core CRM standard objects that exist in every Salesforce org regardless of license.
-// objectPermissions / fieldPermissions / layoutAssignments for these are always false positives
-// in FULL dry-run validation — mask them so they don't consume the one-error-per-component slot.
+// objectPermissions for these are always false positives in FULL dry-run — mask them.
 const CORE_CRM_OBJECTS = [
   'Account',
   'Contact',
@@ -184,6 +200,28 @@ const CORE_CRM_OBJECTS = [
   'ContentVersion',
 ] as const;
 const CORE_CRM_ALT = CORE_CRM_OBJECTS.join('|');
+
+// Subset of CORE_CRM used for field-level masking only.
+// Excludes Revenue Cloud / feature-licensed objects (Product2, Order, Asset, Quote, etc.)
+// whose standard fields may not exist in all orgs (e.g. Product2.AvailabilityDate requires
+// Revenue Cloud). Keeping those exposed lets the dry-run catch and auto-remove them.
+const CORE_CRM_FIELD_OBJECTS = [
+  'Account',
+  'Contact',
+  'Lead',
+  'Opportunity',
+  'OpportunityLineItem',
+  'OpportunityContactRole',
+  'OpportunityTeamMember',
+  'Case',
+  'Campaign',
+  'CampaignMember',
+  'Task',
+  'Event',
+  'User',
+  'ContentVersion',
+] as const;
+const CORE_CRM_FIELD_ALT = CORE_CRM_FIELD_OBJECTS.join('|');
 
 // ===============================================================
 // HELPERS
@@ -227,6 +265,10 @@ export function formatXml(xml: string): string {
 }
 
 function saveXmlClean(xmlContent: string, filePath: string, metadataType: string): void {
+  // Detect original line endings so we don't change the whole file when only a few nodes changed.
+  const originalBytes = fs.existsSync(filePath) ? readFileWithRetry(filePath) : '';
+  const usesCrlf = originalBytes.includes('\r\n');
+
   let content = xmlContent.replace(/<\?xml[^?]*\?>\s*/gi, '');
   content = '<?xml version="1.0" encoding="UTF-8"?>\n' + content;
   content = formatXml(content);
@@ -234,7 +276,12 @@ function saveXmlClean(xmlContent: string, filePath: string, metadataType: string
   const escapedClosing = closingTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const regex = new RegExp(`</(\\w+)>${escapedClosing}`, 'g');
   content = content.replace(regex, (_match: string, tagName: string) => `</${tagName}>\n${closingTag}`);
-  fs.writeFileSync(filePath, content, 'utf8');
+
+  if (usesCrlf) {
+    content = content.replace(/\r?\n/g, '\r\n');
+  }
+
+  writeFileWithRetry(filePath, content);
 }
 
 export function getRootNodeName(xmlContent: string): string {
@@ -945,10 +992,6 @@ async function invokeDeployWithRetry(
 
     if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
 
-    // Wait for the org's deployment queue to clear before submitting.
-    // eslint-disable-next-line no-await-in-loop
-    await waitForQueueToClear(log, targetOrg, MAX_QUEUE_WAIT_MINS);
-
     // eslint-disable-next-line no-await-in-loop
     const procResult = await runDeployProcess(log, items, targetOrg, outputFile, timeoutMins, verbose);
 
@@ -983,6 +1026,8 @@ async function invokeDeployWithRetry(
     if (isTransientError(raw)) {
       const backoff = getBackoffMs(attempt);
       log(`   Transient error detected — waiting ${backoff / 1000}s before retry...`);
+      // eslint-disable-next-line no-await-in-loop
+      await waitForQueueToClear(log, targetOrg, MAX_QUEUE_WAIT_MINS);
       // eslint-disable-next-line no-await-in-loop
       await sleep(backoff);
       attempt = 0;
@@ -1258,15 +1303,11 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
   const deadline = Date.now() + maxWaitMins * 60_000;
   const queueStart = Date.now();
 
-  log('   [Queue] Checking org deployment queue...');
   // eslint-disable-next-line no-await-in-loop
   let count = await queryDeployQueueCount(targetOrg);
-  if (count === 0) {
-    log('   [Queue] No active deployments — proceeding.');
-    return;
-  }
+  if (count === 0) return;
 
-  log('   [Queue] Waiting for queue to clear — active deployment in progress in Copado');
+  log('   [Queue] Active deployment in Copado — waiting for queue to clear...');
   while (count > 0 && Date.now() < deadline) {
     // eslint-disable-next-line no-await-in-loop
     await sleep(POLL_MS);
@@ -1844,7 +1885,7 @@ function sweepOtherFiles(
   for (const filePath of allFilePaths) {
     if (skipPaths.has(filePath) || !fs.existsSync(filePath)) continue;
 
-    let xml = fs.readFileSync(filePath, 'utf8');
+    let xml = readFileWithRetry(filePath);
     let fileModified = false;
 
     const isProfile = filePath.endsWith('.profile-meta.xml');
@@ -1958,7 +1999,7 @@ function repoWideSweep(
 
   for (const filePath of repoFiles) {
     if (!fs.existsSync(filePath)) continue;
-    let xml = fs.readFileSync(filePath, 'utf8');
+    let xml = readFileWithRetry(filePath);
     let fileModified = false;
     const isProfile = filePath.endsWith('.profile-meta.xml');
     const isLayoutOrReport =
@@ -2216,7 +2257,7 @@ function maskCoreCrmFieldPermissions(xml: string): string {
   const inner = '(?:(?!<fieldPermissions>)[\\s\\S])*?';
   return xml.replace(
     new RegExp(
-      `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*(?:${CORE_CRM_ALT})\\.[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
+      `[ \\t]*<fieldPermissions>${inner}<field>[ \\t]*(?:${CORE_CRM_FIELD_ALT})\\.[^<]*</field>${inner}</fieldPermissions>[ \\t]*\\r?\\n?`,
       'g'
     ),
     ''
@@ -2395,7 +2436,7 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
     }
     // PSG files: no false-positive masking needed — structure is simple and fixed by fixPsgPermissionSetsBlock
     saved.set(item.filePath, orig);
-    if (masked !== orig) fs.writeFileSync(item.filePath, masked, 'utf8');
+    if (masked !== orig) writeFileWithRetry(item.filePath, masked);
   }
   return saved;
 }
@@ -2422,6 +2463,18 @@ function restoreItems(saved: Map<string, string>): void {
 // BATCH DEPLOY HELPERS
 // Extracted to keep runBatchDeploy under the complexity limit.
 // ===============================================================
+
+function mergeMapFirst<K, V>(dest: Map<K, V>, src: Map<K, V>): void {
+  for (const [k, v] of src) {
+    if (!dest.has(k)) dest.set(k, v);
+  }
+}
+
+function appendUnique(arr: string[], items: string[]): void {
+  for (const item of items) {
+    if (!arr.includes(item)) arr.push(item);
+  }
+}
 
 function validateBatchItems(log: (msg: string) => void, items: BatchItem[]): void {
   for (const item of items) {
@@ -2525,7 +2578,7 @@ async function handlePsgInvalidPsItem(
 ): Promise<void> {
   log(`\n   [PSG] ${item.itemName} — invalid <permissionSets> reference(s) detected. Analyzing...`);
 
-  const psgXml = fs.readFileSync(item.filePath, 'utf8');
+  const psgXml = readFileWithRetry(item.filePath);
   const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>/g;
   const allPsRefs: string[] = [];
   let m: RegExpExecArray | null;
@@ -2623,12 +2676,20 @@ async function applyManagedRefsPass(
   repoPath: string,
   vlog: (msg: string) => void,
   dryRun: boolean,
-  promotionData: PromotionItem[]
-): Promise<{ itemNsResults: Map<string, NsResult>; lastManagedRefsCommit: string | null }> {
+  promotionData: PromotionItem[],
+  startingCommit: string
+): Promise<{
+  itemNsResults: Map<string, NsResult>;
+  lastManagedRefsCommit: string | null;
+  nsModifiedFiles: string[];
+  nsCommitMsg: string | null;
+  nsOriginalXmlMap: Map<string, string>;
+}> {
   const PSG_LOCK = /permission set group is updating/i;
   const PSG_INVALID_PS =
     /Cannot create permission set group components since the following permission set names are invalid/i;
   const itemNsResults = new Map<string, NsResult>();
+  const nsOriginalXmlMap = new Map<string, string>();
   let managedRefsStaged = false;
 
   for (const item of activeItems) {
@@ -2653,7 +2714,7 @@ async function applyManagedRefsPass(
     log(`\n   [${item.itemName}] ${itemFailures.length} failure(s):`);
     itemFailures.forEach((f, i) => vlog(`   [DEBUG] Failure ${i + 1}: ${f.problem ?? f.error ?? ''}`));
 
-    const xmlContent = fs.readFileSync(item.filePath, 'utf8');
+    const xmlContent = readFileWithRetry(item.filePath);
     const rootNode = getRootNodeName(xmlContent);
 
     // eslint-disable-next-line no-await-in-loop
@@ -2668,13 +2729,31 @@ async function applyManagedRefsPass(
 
     itemNsResults.set(item.filePath, { nsXml, nsRefs, rootNode });
 
-    if (nsRefs.length > 0 && !dryRun) {
-      saveXmlClean(nsXml, item.filePath, rootNode);
+    if (nsRefs.length > 0) {
+      // Compute NS-only content: start from the file's original state (before any
+      // missing-ref commits from earlier iterations) and apply ONLY the NS refs.
+      // This gives a clean NS-only diff when the squash re-commits it.
       try {
-        execSync(`git add "${item.filePath}"`, { cwd: repoPath });
-        managedRefsStaged = true;
+        const relPath = path.relative(repoPath, item.filePath).replace(/\\/g, '/');
+        const originalContent = execSync(`git show "${startingCommit}:${relPath}"`, { cwd: repoPath }).toString();
+        let nsOnlyContent = originalContent;
+        for (const ref of nsRefs) {
+          const result = applyRefToXml(nsOnlyContent, ref, item.filePath);
+          if (result?.removed) nsOnlyContent = result.updated;
+        }
+        nsOriginalXmlMap.set(item.filePath, nsOnlyContent);
       } catch {
-        log(`   git add failed for managed refs: ${item.itemName}`);
+        /* file may not exist in git at startingCommit — skip */
+      }
+
+      if (!dryRun) {
+        saveXmlClean(nsXml, item.filePath, rootNode);
+        try {
+          execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+          managedRefsStaged = true;
+        } catch {
+          log(`   git add failed for managed refs: ${item.itemName}`);
+        }
       }
     }
   }
@@ -2683,20 +2762,19 @@ async function applyManagedRefsPass(
     const staged = [...itemNsResults.values()].filter((v) => v.nsRefs.length > 0);
     const totalLabels = staged.flatMap((v) => v.nsRefs.map((r) => r.label));
     const labelSummary = totalLabels.slice(0, 8).join(', ') + (totalLabels.length > 8 ? '...' : '');
+    const nsCommitMsg = `Remove managed package refs (${totalLabels.length} ref(s) in ${staged.length} file(s)): ${labelSummary}`;
+    const nsModifiedFiles = [...itemNsResults.entries()].filter(([, v]) => v.nsRefs.length > 0).map(([k]) => k);
     try {
-      execSync(
-        `git commit -m "Remove managed package refs (${totalLabels.length} ref(s) in ${staged.length} file(s)): ${labelSummary}"`,
-        { cwd: repoPath }
-      );
+      execSync(`git commit -m "${nsCommitMsg}"`, { cwd: repoPath });
       const lastCommit = execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
       log(`   Committed managed package ref removals: ${staged.length} file(s), ${totalLabels.length} ref(s)`);
-      return { itemNsResults, lastManagedRefsCommit: lastCommit };
+      return { itemNsResults, lastManagedRefsCommit: lastCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap };
     } catch {
       log('   Managed refs commit failed or nothing staged');
     }
   }
 
-  return { itemNsResults, lastManagedRefsCommit: null };
+  return { itemNsResults, lastManagedRefsCommit: null, nsModifiedFiles: [], nsCommitMsg: null, nsOriginalXmlMap };
 }
 
 // Saves and commits (or dry-runs) the missing-ref XML for one item.
@@ -2744,29 +2822,99 @@ function stopBatchOnNoProgress(log: (msg: string) => void, batchItems: BatchItem
   }
 }
 
-// Squashes all missing-ref commits (from squashBase to HEAD) into one clean commit.
+// Squashes all per-item commits into at most two clean commits: one for NS/managed-ref
+// changes, one for all missing-ref removals. Always resets to startingCommit so
+// individual per-item commits are never left in history regardless of iteration order.
+//
+// For files that had BOTH NS and missing-ref changes in the same file, we use
+// a pre-computed nsOriginalXmlMap (original file + NS refs applied, no missing-ref
+// removals) so the NS commit is always clean regardless of iteration order.
 function squashMissingRefCommits(
   log: (msg: string) => void,
-  squashBase: string,
+  startingCommit: string,
+  nsModifiedFiles: string[],
+  nsCommitMsg: string | null,
+  nsOriginalXmlMap: Map<string, string>,
   summary: SummaryRecord[],
   repoPath: string
 ): void {
   try {
     const currentHead = execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
-    if (currentHead === squashBase) {
-      log('\nNo missing-ref commits to squash.');
+    if (currentHead === startingCommit) {
+      log('\nNo commits to squash.');
       return;
     }
-    const changedFiles = execSync(`git diff --name-only ${squashBase} HEAD`, { cwd: repoPath })
+
+    // All files changed by this run
+    const allChangedFiles = execSync(`git diff --name-only "${startingCommit}" HEAD`, { cwd: repoPath })
       .toString()
       .trim()
       .split('\n')
       .filter(Boolean);
-    execSync(`git reset --soft ${squashBase}`, { cwd: repoPath });
-    const missingRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
-    const squashMsg = `Auto-fix: remove ${missingRemoved.length} missing ref(s) across ${changedFiles.length} file(s)`;
-    execSync(`git commit -m "${squashMsg}"`, { cwd: repoPath });
-    log(`\nSquashed missing-ref commits into one: "${squashMsg}"`);
+    if (allChangedFiles.length === 0) {
+      log('\nNo changed files — nothing to squash.');
+      return;
+    }
+
+    // Reset all commits from this run — all changes land in the staging area
+    execSync(`git reset --soft "${startingCommit}"`, { cwd: repoPath });
+
+    const hasNsFiles = nsModifiedFiles.length > 0 && !!nsCommitMsg && nsOriginalXmlMap.size > 0;
+    const nonNsFiles = hasNsFiles ? allChangedFiles.filter((f) => !nsModifiedFiles.includes(f)) : allChangedFiles;
+
+    if (hasNsFiles) {
+      // Phase 1: NS commit — write each NS file's true NS-only state (original content
+      // with NS refs removed, without any missing-ref removals from other iterations).
+      // nsOriginalXmlMap was computed in applyManagedRefsPass from the startingCommit
+      // file content, so it is always clean regardless of iteration order.
+      execSync('git reset HEAD', { cwd: repoPath }); // unstage all
+      const finalContents = new Map<string, string>();
+      for (const f of nsModifiedFiles) {
+        const nsOnlyContent = nsOriginalXmlMap.get(f);
+        if (!nsOnlyContent) continue;
+        try {
+          finalContents.set(f, fs.readFileSync(f, 'utf8')); // save final state for phase 2
+          fs.writeFileSync(f, nsOnlyContent, 'utf8'); // write NS-only state
+          execSync(`git add "${f}"`, { cwd: repoPath });
+        } catch {
+          /* skip */
+        }
+      }
+      execSync(`git commit -m "${nsCommitMsg}"`, { cwd: repoPath });
+      log(`\nRe-committed NS/managed-ref changes: "${nsCommitMsg}"`);
+
+      // Restore final content for NS files so phase 2 can diff them correctly
+      for (const [f, content] of finalContents) {
+        try {
+          fs.writeFileSync(f, content, 'utf8');
+          execSync(`git add "${f}"`, { cwd: repoPath });
+        } catch {
+          /* skip */
+        }
+      }
+    }
+
+    // Phase 2: Auto-fix commit — remaining missing-ref files (+ NS files' final→NS-commit diff)
+    for (const f of nonNsFiles) {
+      try {
+        execSync(`git add "${f}"`, { cwd: repoPath });
+      } catch {
+        /* file may be gone */
+      }
+    }
+
+    // Only commit if there is actually something staged (NS files may already be fully committed)
+    const stagedFiles = execSync('git diff --cached --name-only', { cwd: repoPath })
+      .toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    if (stagedFiles.length > 0) {
+      const missingRemoved = summary.flatMap((r) => (r.RemovedFields ? r.RemovedFields.split('; ') : []));
+      const squashMsg = `Auto-fix: remove ${missingRemoved.length} missing ref(s) across ${stagedFiles.length} file(s)`;
+      execSync(`git commit -m "${squashMsg}"`, { cwd: repoPath });
+      log(`\nSquashed missing-ref commits into one: "${squashMsg}"`);
+    }
   } catch (e) {
     log(`\nSquash failed — intermediate commits preserved. Error: ${String(e)}`);
   }
@@ -2781,8 +2929,16 @@ async function processItemsInIteration(
   repoPath: string,
   verbose: boolean,
   dryRun: boolean,
-  promotionData: PromotionItem[]
-): Promise<{ perItemRefs: Map<string, RemovedRef[]>; anyProgress: boolean; lastManagedRefsCommit: string | null }> {
+  promotionData: PromotionItem[],
+  startingCommit: string
+): Promise<{
+  perItemRefs: Map<string, RemovedRef[]>;
+  anyProgress: boolean;
+  lastManagedRefsCommit: string | null;
+  nsModifiedFiles: string[];
+  nsCommitMsg: string | null;
+  nsOriginalXmlMap: Map<string, string>;
+}> {
   const vlog: (msg: string) => void = verbose ? log : (): void => {};
   // Track refs per source file so the sweep skips only the source file, not all modified files.
   const perItemRefs = new Map<string, RemovedRef[]>();
@@ -2792,17 +2948,19 @@ async function processItemsInIteration(
   // Apply to ALL active items first and commit them ONCE before any missing-ref
   // commits — this gives a clean 4-commit git history.
   // eslint-disable-next-line no-await-in-loop
-  const { itemNsResults, lastManagedRefsCommit } = await applyManagedRefsPass(
-    log,
-    activeItems,
-    failuresByItem,
-    whitelist,
-    targetOrg,
-    repoPath,
-    vlog,
-    dryRun,
-    promotionData
-  );
+  const { itemNsResults, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap } =
+    await applyManagedRefsPass(
+      log,
+      activeItems,
+      failuresByItem,
+      whitelist,
+      targetOrg,
+      repoPath,
+      vlog,
+      dryRun,
+      promotionData,
+      startingCommit
+    );
 
   // ── Pass 2: Missing-ref removals (per item) ───────────────────────────────
   for (const item of activeItems) {
@@ -2811,7 +2969,7 @@ async function processItemsInIteration(
     if (itemFailures.length === 0) continue;
 
     const nsResult = itemNsResults.get(item.filePath);
-    const baseXml = nsResult?.nsXml ?? fs.readFileSync(item.filePath, 'utf8');
+    const baseXml = nsResult?.nsXml ?? readFileWithRetry(item.filePath);
     const nsRefs = nsResult?.nsRefs ?? [];
     const rootNode = nsResult?.rootNode ?? getRootNodeName(baseXml);
 
@@ -2872,7 +3030,7 @@ async function processItemsInIteration(
     commitItemMissingRefs(log, item, updatedXml, missingRefs, rootNode, repoPath, dryRun);
   }
 
-  return { perItemRefs, anyProgress, lastManagedRefsCommit };
+  return { perItemRefs, anyProgress, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap };
 }
 
 // ===============================================================
@@ -2898,14 +3056,24 @@ async function runBatchDeploy(
   maxRetries: number,
   verbose: boolean,
   dryRun: boolean,
-  promotionData: PromotionItem[]
-): Promise<{ summary: SummaryRecord[]; lastManagedRefsCommit: string | null }> {
+  promotionData: PromotionItem[],
+  startingCommit: string
+): Promise<{
+  summary: SummaryRecord[];
+  lastManagedRefsCommit: string | null;
+  allNsModifiedFiles: string[];
+  lastNsCommitMsg: string | null;
+  nsOriginalXmlMap: Map<string, string>;
+}> {
   validateBatchItems(log, batchItems);
 
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
   let iteration = 0;
   let overallLastManagedRefsCommit: string | null = null;
+  const allNsModifiedFiles: string[] = [];
+  let lastNsCommitMsg: string | null = null;
+  const allNsOriginalXmlMap = new Map<string, string>();
   const deployErrorsFile = path.join(repoPath, 'deploy_errors_batch.json');
 
   while (iteration < maxIterations) {
@@ -2980,7 +3148,7 @@ async function runBatchDeploy(
     }
 
     const failures = deployResult.result.details?.componentFailures;
-    if (!failures || failures.length === 0) {
+    if (!failures?.length) {
       consecutiveEmptyRetries++;
       log(
         `success=false but 0 component failures (retry ${consecutiveEmptyRetries}/${MAX_EMPTY_RETRIES}) — deploy may still be running.`
@@ -3002,19 +3170,24 @@ async function runBatchDeploy(
     markPassedItems(log, activeItems, failuresByItem, dryRun);
 
     // eslint-disable-next-line no-await-in-loop
-    const { perItemRefs, anyProgress, lastManagedRefsCommit } = await processItemsInIteration(
-      log,
-      activeItems,
-      failuresByItem,
-      whitelist,
-      targetOrg,
-      repoPath,
-      verbose,
-      dryRun,
-      promotionData
-    );
+    const { perItemRefs, anyProgress, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap } =
+      await processItemsInIteration(
+        log,
+        activeItems,
+        failuresByItem,
+        whitelist,
+        targetOrg,
+        repoPath,
+        verbose,
+        dryRun,
+        promotionData,
+        startingCommit
+      );
 
     if (lastManagedRefsCommit) overallLastManagedRefsCommit = lastManagedRefsCommit;
+    appendUnique(allNsModifiedFiles, nsModifiedFiles);
+    if (nsCommitMsg) lastNsCommitMsg = nsCommitMsg;
+    mergeMapFirst(allNsOriginalXmlMap, nsOriginalXmlMap);
 
     if (!anyProgress && batchItems.some((i) => !i.done)) {
       stopBatchOnNoProgress(log, batchItems);
@@ -3039,7 +3212,13 @@ async function runBatchDeploy(
     SkippedFields: item.allSkippedFields.join('; '),
     UnhandledErrors: item.allUnhandledErrors.join('; '),
   }));
-  return { summary, lastManagedRefsCommit: overallLastManagedRefsCommit };
+  return {
+    summary,
+    lastManagedRefsCommit: overallLastManagedRefsCommit,
+    allNsModifiedFiles,
+    lastNsCommitMsg,
+    nsOriginalXmlMap: allNsOriginalXmlMap,
+  };
 }
 
 // ===============================================================
@@ -3126,7 +3305,7 @@ function loadInputFile(log: (msg: string) => void, inputFilePath: string): Promo
 // NAMESPACE PURGE (Option 2)
 // ===============================================================
 
-async function runNamespacePurge(log: (msg: string) => void): Promise<void> {
+async function runNamespacePurge(log: (msg: string) => void, repoPath: string): Promise<void> {
   const namespace = (await prompt('Enter namespace to purge (e.g. TSPC): ')).trim();
   if (!namespace) {
     log('No namespace entered. Aborting.');
@@ -3135,6 +3314,7 @@ async function runNamespacePurge(log: (msg: string) => void): Promise<void> {
 
   log(`\nPurging all ${namespace}__ references from force-app/...\n`);
 
+  const REPO_PATH = repoPath;
   const forceAppPath = path.join(REPO_PATH, 'force-app');
   if (!fs.existsSync(forceAppPath)) {
     log(`force-app/ not found at ${forceAppPath}. Aborting.`);
@@ -3167,26 +3347,26 @@ async function runNamespacePurge(log: (msg: string) => void): Promise<void> {
           basenameLower.endsWith('.permissionsetgroup-meta.xml') ||
           basenameLower.endsWith('.mutingpermissionset-meta.xml')
         ) {
-          const content = fs.readFileSync(fullPath, 'utf8');
+          const content = readFileWithRetry(fullPath);
           const { updated, removed } = bulkRemoveNamespaceRefs(content, namespace);
           if (removed) {
-            fs.writeFileSync(fullPath, updated, 'utf8');
+            writeFileWithRetry(fullPath, updated);
             modifiedFiles.push(fullPath);
             log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
           }
         } else if (basenameLower.endsWith('.layout-meta.xml')) {
-          const content = fs.readFileSync(fullPath, 'utf8');
+          const content = readFileWithRetry(fullPath);
           const { updated, removed } = removeNsFromLayout(content, namespace);
           if (removed) {
-            fs.writeFileSync(fullPath, updated, 'utf8');
+            writeFileWithRetry(fullPath, updated);
             modifiedFiles.push(fullPath);
             log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
           }
         } else if (basenameLower.endsWith('.reporttype-meta.xml')) {
-          const content = fs.readFileSync(fullPath, 'utf8');
+          const content = readFileWithRetry(fullPath);
           const { updated, removed } = removeNsFromReportType(content, namespace);
           if (removed) {
-            fs.writeFileSync(fullPath, updated, 'utf8');
+            writeFileWithRetry(fullPath, updated);
             modifiedFiles.push(fullPath);
             log(`   [CLEANED] ${path.relative(REPO_PATH, fullPath)}`);
           }
@@ -3238,26 +3418,32 @@ async function resolveInputs(
   const ext = path.extname(inputFilePath).toLowerCase();
   log(`   ${ext === '.xml' ? 'package.xml' : 'JSON'} file found.\n`);
 
-  // eslint-disable-next-line no-await-in-loop
-  const { valid: validOrgs, entries: orgEntries } = await getAuthenticatedOrgs();
-  const hasOrgList = validOrgs.size > 0;
-  if (!hasOrgList) {
-    log('   (Could not retrieve org list — skipping alias validation)\n');
-  } else {
-    log('   Authenticated orgs:');
-    orgEntries.forEach((o) => {
-      const alias = o.alias ? `${o.alias}` : '';
-      const user = o.username ? `(${o.username})` : '';
-      log(`      - ${alias} ${user}`.trimEnd());
-    });
-    log('');
-  }
-
+  // If org was supplied via flag, skip the sf org list call entirely — trust the flag value.
+  // The org list check on VDI takes 15s+ and re-prompts if the alias isn't found, which
+  // causes the extension to hang waiting for input it never sends.
   let targetOrg = targetOrgFlag.trim();
-  while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
-    if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
+  if (!targetOrg) {
     // eslint-disable-next-line no-await-in-loop
-    targetOrg = (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
+    const { valid: validOrgs, entries: orgEntries } = await getAuthenticatedOrgs();
+    const hasOrgList = validOrgs.size > 0;
+    if (!hasOrgList) {
+      log('   (Could not retrieve org list — skipping alias validation)\n');
+    } else {
+      log('   Authenticated orgs:');
+      orgEntries.forEach((o) => {
+        const alias = o.alias ? `${o.alias}` : '';
+        const user = o.username ? `(${o.username})` : '';
+        log(`      - ${alias} ${user}`.trimEnd());
+      });
+      log('');
+    }
+    while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
+      if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
+      // eslint-disable-next-line no-await-in-loop
+      targetOrg = (
+        await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')
+      ).trim();
+    }
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
   return { inputFilePath, targetOrg };
@@ -3331,8 +3517,20 @@ export default class DeployAndFix extends SfCommand<void> {
     // eslint-disable-next-line no-await-in-loop
     const choice = (await prompt('Enter your choice (1 or 2): ')).trim();
 
+    // Resolve repo paths here (after first prompt) — NOT at module load time.
+    // This avoids blocking the Node.js thread with execSync during SF CLI import.
+    const {
+      REPO_PATH,
+      PS_BASE_PATH,
+      MUTING_PS_BASE_PATH,
+      PSG_BASE_PATH,
+      PROFILE_BASE_PATH,
+      LAYOUT_BASE_PATH,
+      REPORT_TYPE_BASE_PATH,
+    } = resolveRepoPaths();
+
     if (choice === '2') {
-      await runNamespacePurge(log);
+      await runNamespacePurge(log, REPO_PATH);
       return;
     }
 
@@ -3575,7 +3773,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('######################################################');
 
     // eslint-disable-next-line no-await-in-loop
-    const { summary, lastManagedRefsCommit } = await runBatchDeploy(
+    const { summary, allNsModifiedFiles, lastNsCommitMsg, nsOriginalXmlMap } = await runBatchDeploy(
       log,
       batchItems,
       targetOrg,
@@ -3589,7 +3787,8 @@ export default class DeployAndFix extends SfCommand<void> {
       MAX_RETRIES,
       verbose,
       dryRun,
-      promotionData
+      promotionData,
+      startingCommit
     );
 
     // ================= FINAL SUMMARY =================
@@ -3716,14 +3915,21 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
 
     // ================= SQUASH MISSING-REF COMMITS =================
-    // Squash only the per-item missing-ref commits into one clean commit.
-    // Managed-ref commits (before squashBase) are preserved as-is.
-    // Repo-wide sweep runs AFTER squash so it stays as a separate commit.
-    const squashBase = lastManagedRefsCommit ?? startingCommit;
+    // Always resets to startingCommit so individual per-item commits are never left
+    // in history. NS/managed-ref files are re-committed first (if any), then all
+    // remaining missing-ref changes are squashed into one commit.
     if (dryRun) {
       log('\nDry run — no commits were made, skipping squash.');
     } else {
-      squashMissingRefCommits(log, squashBase, summary, REPO_PATH);
+      squashMissingRefCommits(
+        log,
+        startingCommit,
+        allNsModifiedFiles,
+        lastNsCommitMsg,
+        nsOriginalXmlMap,
+        summary,
+        REPO_PATH
+      );
     }
 
     // ================= REPO-WIDE SWEEP =================
