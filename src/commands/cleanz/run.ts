@@ -1114,11 +1114,45 @@ function runDeployProcess(
     proc.stderr.pipe(outputStream);
 
     const deployStart = Date.now();
+    let queueState: 'unknown' | 'queued' | 'deploying' = 'unknown';
+    let queryInFlight = false;
     const progressTimer = setInterval(() => {
       const elapsed = Date.now() - deployStart;
       const mins = Math.floor(elapsed / 60_000);
       const secs = Math.floor((elapsed % 60_000) / 1000);
-      log(`   Still deploying... ${mins}m ${secs}s elapsed (timeout: ${timeoutMins}m)`);
+
+      if (queryInFlight) {
+        if (queueState === 'queued') {
+          log(`   Copado deployment in progress — waiting in queue (${mins}m ${secs}s elapsed)`);
+        } else {
+          log(`   Deploying changes... ${mins}m ${secs}s elapsed (timeout: ${timeoutMins}m)`);
+        }
+        return;
+      }
+
+      queryInFlight = true;
+      queryDeployQueueCount(targetOrg)
+        .then((count) => {
+          queryInFlight = false;
+          const e = Date.now() - deployStart;
+          const m = Math.floor(e / 60_000);
+          const s = Math.floor((e % 60_000) / 1000);
+          if (count >= 2) {
+            queueState = 'queued';
+            log(`   Copado deployment in progress — waiting in queue (${m}m ${s}s elapsed)`);
+          } else {
+            if (queueState === 'queued') {
+              log('   Queue cleared — deploying changes');
+            } else {
+              log(`   Deploying changes... ${m}m ${s}s elapsed (timeout: ${timeoutMins}m)`);
+            }
+            queueState = 'deploying';
+          }
+        })
+        .catch(() => {
+          queryInFlight = false;
+          log(`   Deploying changes... ${mins}m ${secs}s elapsed (timeout: ${timeoutMins}m)`);
+        });
     }, 30_000);
 
     const timer = setTimeout(() => {
