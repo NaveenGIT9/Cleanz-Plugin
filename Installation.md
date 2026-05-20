@@ -143,4 +143,4 @@ When a new version of CleanZ is released:
    ```powershell
    sf plugins link C:\cleanz-plugin\package
    ```
-4. Uninstall the old VSIX from VS Code Extensions and install the new `cleanz-latest.vsix`
+4. Install the new `cleanz-latest.vsix` directly — no need to uninstall the old one first. VS Code replaces it in-place. Reload when prompted.
