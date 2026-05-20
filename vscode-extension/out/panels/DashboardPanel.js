@@ -117,6 +117,7 @@ class DashboardPanel {
     this._aborted = false;
     this._webviewReady = false;
     this._pendingRunDialog = false;
+    this._autoRebuildInProgress = false;
     // Batched log queue — flushed every 80 ms to prevent flooding the webview message queue
     this._logQueue = [];
     this._readyCallbacks = [];
@@ -872,6 +873,42 @@ class DashboardPanel {
           }
           return;
         }
+        // ── Auto-rebuild on stale wireit cache (exit 127) ─────────────
+        if (code === 127 && !this._autoRebuildInProgress) {
+          this._autoRebuildInProgress = true;
+          lineBuffer = '';
+          this._currentProc = undefined;
+          this._flushLog();
+          this._queueLog('warn', '⚠ Build cache stale — auto-rebuilding plugin (~10s)...');
+          this._flushLog();
+          let rebuilt = false;
+          try {
+            const pluginPath = await this._findPluginCleanzPath();
+            if (pluginPath) {
+              // Clear wireit cache then rebuild
+              const wireitDir = path.join(pluginPath, '.wireit');
+              if (fs.existsSync(wireitDir)) fs.rmSync(wireitDir, { recursive: true, force: true });
+              await new Promise((resolve, reject) => {
+                (0, child_process_1.exec)('npm run build', { cwd: pluginPath, timeout: 60000 }, (err) =>
+                  err ? reject(err) : resolve()
+                );
+              });
+              rebuilt = true;
+              this._queueLog('ok', '✓ Rebuild complete — retrying...');
+              this._flushLog();
+            }
+          } catch (e) {
+            this._queueLog('err', `✗ Auto-rebuild failed: ${e}`);
+            this._flushLog();
+          }
+          this._autoRebuildInProgress = false;
+          if (rebuilt && this._lastConfig) {
+            await this._startCleanzRun(this._lastConfig);
+          } else {
+            this.postMessage({ command: 'runComplete', exitCode: 127 });
+          }
+          return;
+        }
         // ── Normal completion ──────────────────────────────────────────
         if (lineBuffer.trim()) parseLine(lineBuffer);
         lineBuffer = '';
@@ -1118,6 +1155,19 @@ ${(() => {
       repoSweep: false,
       verbose: false,
       namespace,
+    });
+  }
+  _findPluginCleanzPath() {
+    return new Promise((resolve) => {
+      (0, child_process_1.exec)('sf plugins --json', { timeout: 10000 }, (_err, stdout) => {
+        try {
+          const plugins = JSON.parse(stdout);
+          const cleanz = plugins.find((p) => p.name === '@naveengit9/plugin-cleanz');
+          resolve(cleanz?.root ?? null);
+        } catch {
+          resolve(null);
+        }
+      });
     });
   }
   _getHtml() {
