@@ -897,6 +897,7 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
   xml = removeBlocksWithNamespace(xml, 'flowAccesses', 'flow', namespace);
   xml = removeBlocksWithNamespace(xml, 'applicationVisibilities', 'application', namespace);
   xml = removeBlocksWithNamespace(xml, 'profileActionOverrides', 'content', namespace);
+  xml = removeBlocksWithNamespace(xml, 'profileActionOverrides', 'pageOrSobjectType', namespace);
   xml = removeBlocksWithNamespace(xml, 'customMetadataTypeAccesses', 'name', namespace);
   xml = removeBlocksWithNamespace(xml, 'customPermissions', 'name', namespace);
 
@@ -1902,6 +1903,14 @@ function isProfileSweepSkip(isProfile: boolean, refType: RefType, name: string):
   return isProfile && PROFILE_SKIPPED_REF_TYPES.has(refType) && !isStandardOrBigObjectRef(refType, name);
 }
 
+function saveSweptFile(xml: string, filePath: string): void {
+  if (filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml')) {
+    writeFileWithRetry(filePath, xml);
+  } else {
+    saveXmlClean(xml, filePath, getRootNodeName(xml));
+  }
+}
+
 function sweepOtherFiles(
   log: (msg: string) => void,
   refs: RemovedRef[],
@@ -1943,7 +1952,7 @@ function sweepOtherFiles(
     }
 
     if (fileModified) {
-      saveXmlClean(xml, filePath, getRootNodeName(xml));
+      saveSweptFile(xml, filePath);
       modifiedFiles.push(filePath);
     }
   }
@@ -2067,7 +2076,7 @@ function repoWideSweep(
     }
 
     if (fileModified) {
-      saveXmlClean(xml, filePath, getRootNodeName(xml));
+      saveSweptFile(xml, filePath);
       modifiedFiles.push(filePath);
     }
   }
