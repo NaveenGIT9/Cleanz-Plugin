@@ -2381,6 +2381,9 @@ export function maskProfileFalsePositives(xmlContent: string, isFull = false): s
   xml = xml.replace(/[ \t]*<categoryGroupVisibilities>[\s\S]*?<\/categoryGroupVisibilities>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<classAccesses>[\s\S]*?<\/classAccesses>[ \t]*\r?\n?/g, '');
   xml = xml.replace(/[ \t]*<pageAccesses>[\s\S]*?<\/pageAccesses>[ \t]*\r?\n?/g, '');
+  // customSettingAccesses: always __c — Copado treats missing custom setting errors as warnings
+  // and deploys successfully. Mask for both ADD and FULL to avoid false positives.
+  xml = xml.replace(/[ \t]*<customSettingAccesses>[\s\S]*?<\/customSettingAccesses>[ \t]*\r?\n?/g, '');
   if (isFull) {
     // FULL: mask flowAccesses, userPermissions, and profileActionOverrides — all false positives.
     xml = xml.replace(/[ \t]*<flowAccesses>[\s\S]*?<\/flowAccesses>[ \t]*\r?\n?/g, '');
