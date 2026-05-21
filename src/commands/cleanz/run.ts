@@ -264,26 +264,6 @@ export function formatXml(xml: string): string {
   return formatted;
 }
 
-function saveXmlClean(xmlContent: string, filePath: string, metadataType: string): void {
-  // Detect original line endings so we don't change the whole file when only a few nodes changed.
-  const originalBytes = fs.existsSync(filePath) ? readFileWithRetry(filePath) : '';
-  const usesCrlf = originalBytes.includes('\r\n');
-
-  let content = xmlContent.replace(/<\?xml[^?]*\?>\s*/gi, '');
-  content = '<?xml version="1.0" encoding="UTF-8"?>\n' + content;
-  content = formatXml(content);
-  const closingTag = `</${metadataType}>`;
-  const escapedClosing = closingTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
-  const regex = new RegExp(`</(\\w+)>${escapedClosing}`, 'g');
-  content = content.replace(regex, (_match: string, tagName: string) => `</${tagName}>\n${closingTag}`);
-
-  if (usesCrlf) {
-    content = content.replace(/\r?\n/g, '\r\n');
-  }
-
-  writeFileWithRetry(filePath, content);
-}
-
 export function getRootNodeName(xmlContent: string): string {
   const match = /<(\w+)\s+xmlns=/i.exec(xmlContent) ?? /<(\w+)>/i.exec(xmlContent);
   return match ? match[1] : 'PermissionSet';
@@ -2744,8 +2724,7 @@ async function handlePsgInvalidPsItem(
     toRemoveSet.has(name.trim().toLowerCase()) ? '' : full
   );
 
-  const psgRootNode = getRootNodeName(updatedPsgXml);
-  saveXmlClean(updatedPsgXml, item.filePath, psgRootNode);
+  saveXmlPreserved(updatedPsgXml, item.filePath);
   item.allRemovedFields.push(
     ...toRemove.map((n) => ({
       label: `<permissionSets>${n}</permissionSets>`,
@@ -2849,7 +2828,7 @@ async function applyManagedRefsPass(
       }
 
       if (!dryRun) {
-        saveXmlClean(nsXml, item.filePath, rootNode);
+        saveXmlPreserved(nsXml, item.filePath);
         try {
           execSync(`git add "${item.filePath}"`, { cwd: repoPath });
           managedRefsStaged = true;
@@ -2885,17 +2864,16 @@ function commitItemMissingRefs(
   item: BatchItem,
   updatedXml: string,
   missingRefs: RemovedRef[],
-  rootNode: string,
   repoPath: string,
   dryRun: boolean
 ): void {
   if (dryRun) {
-    saveXmlClean(updatedXml, item.filePath, rootNode);
+    saveXmlPreserved(updatedXml, item.filePath);
     log(`   Dry run — skipped commit for: ${item.itemName}`);
     // eslint-disable-next-line no-param-reassign
     item.status = 'Fixed (Dry Run)';
   } else if (missingRefs.length > 0) {
-    saveXmlClean(updatedXml, item.filePath, rootNode);
+    saveXmlPreserved(updatedXml, item.filePath);
     try {
       execSync(`git add "${item.filePath}"`, { cwd: repoPath });
       execSync(
@@ -3073,7 +3051,6 @@ async function processItemsInIteration(
     const nsResult = itemNsResults.get(item.filePath);
     const baseXml = nsResult?.nsXml ?? readFileWithRetry(item.filePath);
     const nsRefs = nsResult?.nsRefs ?? [];
-    const rootNode = nsResult?.rootNode ?? getRootNodeName(baseXml);
 
     for (const ref of nsRefs) {
       if (!item.allRemovedFields.some((r) => r.label === ref.label)) {
@@ -3129,7 +3106,7 @@ async function processItemsInIteration(
 
     anyProgress = true;
     perItemRefs.set(item.filePath, removedRefs);
-    commitItemMissingRefs(log, item, updatedXml, missingRefs, rootNode, repoPath, dryRun);
+    commitItemMissingRefs(log, item, updatedXml, missingRefs, repoPath, dryRun);
   }
 
   return { perItemRefs, anyProgress, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap };
