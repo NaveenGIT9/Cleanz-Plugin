@@ -1926,11 +1926,21 @@ function isProfileSweepSkip(isProfile: boolean, refType: RefType, name: string):
   return isProfile && PROFILE_SKIPPED_REF_TYPES.has(refType) && !isStandardOrBigObjectRef(refType, name);
 }
 
+// Writes XML back preserving the original line endings (CRLF or LF) without
+// reformatting. Used for sweep/fix commits so git diffs show only the removed
+// blocks — not every line in the file (which formatXml would cause).
+function saveXmlPreserved(xml: string, filePath: string): void {
+  const original = fs.existsSync(filePath) ? readFileWithRetry(filePath) : '';
+  const usesCrlf = original.includes('\r\n');
+  const content = usesCrlf ? xml.replace(/\r?\n/g, '\r\n') : xml;
+  writeFileWithRetry(filePath, content);
+}
+
 function saveSweptFile(xml: string, filePath: string): void {
   if (filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml')) {
     writeFileWithRetry(filePath, xml);
   } else {
-    saveXmlClean(xml, filePath, getRootNodeName(xml));
+    saveXmlPreserved(xml, filePath);
   }
 }
 
