@@ -1708,6 +1708,29 @@ function processRegisteredFailure(
       return { handled: true, xmlContent };
     }
 
+    // For Profile metadata: "no CustomObject named X found" can originate from
+    // profileActionOverrides.pageOrSobjectType. For ADD profiles Copado TRIM strips
+    // objectPermissions so the error must come from profileActionOverrides; for FULL
+    // profiles profileActionOverrides is masked in dry-run so this block won't match.
+    // Try removing the profileActionOverrides block by pageOrSobjectType before the
+    // skip guard fires and swallows the error.
+    if (metadataType === 'Profile' && handler.refType === 'object') {
+      const { updated, removed } = removeProfileActionOverrideByPageObjectFromXml(xmlContent, name);
+      if (removed) {
+        log(`   [Profile] Removed profileActionOverrides block for missing object in pageOrSobjectType: ${name}`);
+        return {
+          handled: true,
+          xmlContent: updated,
+          removedRef: {
+            type: handler.refType,
+            name,
+            label: `[ProfileActionOverride] Object: ${name}`,
+            deployError: errorMessage,
+          },
+        };
+      }
+    }
+
     // Safety net: skip false-positive types for Profiles.
     // maskProfileFalsePositives strips these before dry-run so they should never
     // reach here, but guard anyway in case masking is incomplete.
