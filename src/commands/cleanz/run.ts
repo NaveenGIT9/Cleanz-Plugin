@@ -1790,6 +1790,7 @@ function processRegisteredFailure(
 // PROCESS ALL FAILURES FOR ONE DEPLOY ITERATION
 // ===============================================================
 
+// eslint-disable-next-line complexity
 function processFailures(
   log: (msg: string) => void,
   failures: ComponentFailure[],
@@ -1895,6 +1896,14 @@ function processFailures(
     if (regResult.handled) {
       updatedXml = regResult.xmlContent;
       if (regResult.removedRef) removedRefs.push(regResult.removedRef);
+      continue;
+    }
+
+    // Salesforce record locking — transient, not a missing-ref problem. Copado
+    // deploys past it; treat as non-fatal so the component doesn't land in
+    // "Partial / Manual Check Needed" when this is the only remaining error.
+    if (/unable to obtain exclusive access to this record/i.test(err)) {
+      log(`   Skipping transient lock error (non-fatal): ${err}`);
       continue;
     }
 
