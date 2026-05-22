@@ -57,7 +57,7 @@ export class DashboardPanel {
     if (DashboardPanel.currentPanel) return;
     const panel = vscode.window.createWebviewPanel(
       'cleanzDashboard',
-      'Cleanz — Dashboard',
+      'SF Cleanz',
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
       {
         enableScripts: true,
@@ -76,7 +76,7 @@ export class DashboardPanel {
       return;
     }
 
-    const panel = vscode.window.createWebviewPanel('cleanzDashboard', 'Cleanz — Dashboard', column, {
+    const panel = vscode.window.createWebviewPanel('cleanzDashboard', 'SF Cleanz', column, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
