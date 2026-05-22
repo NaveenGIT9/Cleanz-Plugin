@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Split: left=light blue, right=dark blue -->
+    <clipPath id="left-half">
+      <rect x="0" y="0" width="256" height="512"/>
+    </clipPath>
+    <clipPath id="right-half">
+      <rect x="256" y="0" width="256" height="512"/>
+    </clipPath>
+    <!-- Cloud shape path -->
+    <path id="cloud"
+      d="M390,340
+         a80,80 0 0,0 0-160
+         a60,60 0 0,0-50-90
+         a70,70 0 0,0-140,10
+         a60,60 0 0,0-80,56
+         a70,70 0 0,0 20,137
+         Z"/>
+  </defs>
+
+  <!-- Light blue left half -->
+  <use href="#cloud" fill="#64BDFF" clip-path="url(#left-half)"/>
+  <!-- Dark blue right half -->
+  <use href="#cloud" fill="#00AAEE" clip-path="url(#right-half)"/>
+
+  <!-- SF text -->
+  <text x="256" y="230"
+    font-family="Arial Black, Arial, sans-serif"
+    font-weight="900"
+    font-size="130"
+    fill="white"
+    text-anchor="middle"
+    dominant-baseline="middle">SF</text>
+
+  <!-- CLEANZ text -->
+  <text x="256" y="315"
+    font-family="Arial Black, Arial, sans-serif"
+    font-weight="900"
+    font-size="72"
+    fill="white"
+    text-anchor="middle"
+    dominant-baseline="middle">CLEANZ</text>
+</svg>

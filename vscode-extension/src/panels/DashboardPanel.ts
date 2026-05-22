@@ -65,6 +65,7 @@ export class DashboardPanel {
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
       }
     );
+    panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'cleanz-logo.svg');
     DashboardPanel.currentPanel = new DashboardPanel(panel, context);
   }
 
@@ -81,6 +82,7 @@ export class DashboardPanel {
       retainContextWhenHidden: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')],
     });
+    panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'cleanz-logo.svg');
 
     DashboardPanel.currentPanel = new DashboardPanel(panel, context);
   }
