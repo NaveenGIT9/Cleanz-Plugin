@@ -493,6 +493,7 @@ export class DashboardPanel {
     let actualCsvPath: string | undefined; // captured from "Summary CSV saved to :" log line
     let resultsSent = false; // guards against double-send if both parseLine and close handler fire
     const retriedInIteration = new Set<string>(); // items that had refs committed this iteration
+    const stillActiveInIteration = new Set<string>(); // items still failing/re-verifying — must not be marked clean
     let batchDeployStarted = false; // true after "Running batch dry-run deploy"
 
     const emitPhase = (phase: number, label: string, pct: number) => {
@@ -540,6 +541,8 @@ export class DashboardPanel {
       const headers = parseCsvRow(lines[0]);
       const iName = headers.indexOf('Name');
       const iRemoved = headers.indexOf('RemovedFields');
+      const iCsvStatus = headers.indexOf('Status');
+      const iUnhandled = headers.indexOf('UnhandledErrors');
       let csvJsonFixed = 0;
       for (const line of lines.slice(1)) {
         const cols = parseCsvRow(line);
@@ -550,6 +553,13 @@ export class DashboardPanel {
         const item = batchItems.find((i) => i.name === name);
         if (item) {
           item.refs = String(refCount);
+          // Override badge if CSV confirms unhandled errors
+          const csvStatus = iCsvStatus >= 0 ? cols[iCsvStatus] ?? '' : '';
+          const csvUnhandled = iUnhandled >= 0 ? cols[iUnhandled] ?? '' : '';
+          if (csvUnhandled.trim() || /unhandled errors/i.test(csvStatus)) {
+            item.status = 'attention';
+            item.statusLabel = 'Unhandled Errors';
+          }
           this.postMessage({
             command: 'itemStatus',
             name,
@@ -559,17 +569,27 @@ export class DashboardPanel {
           });
         }
       }
+      // Compute authoritative attention count from CSV (replaces regex log-line counting)
+      const csvAttnCount = lines.slice(1).filter((line) => {
+        const cols = parseCsvRow(line);
+        const unhandledVal = iUnhandled >= 0 ? cols[iUnhandled] ?? '' : '';
+        return unhandledVal.trim().length > 0;
+      }).length;
+      if (csvAttnCount > 0 || attnCount === 0) {
+        attnCount = csvAttnCount;
+      }
+
       if (csvJsonFixed > 0 || jsonFixed === 0) {
         jsonFixed = csvJsonFixed;
-        this.postMessage({
-          command: 'stats',
-          jsonFixed,
-          repoFixed,
-          deploys: deployCount,
-          warnings: warnCount,
-          attention: attnCount,
-        });
       }
+      this.postMessage({
+        command: 'stats',
+        jsonFixed,
+        repoFixed,
+        deploys: deployCount,
+        warnings: warnCount,
+        attention: attnCount,
+      });
     };
 
     const parseLine = (line: string) => {
@@ -620,6 +640,7 @@ export class DashboardPanel {
       if (/Running batch dry-run deploy/i.test(t)) {
         batchDeployStarted = true;
         retriedInIteration.clear();
+        stillActiveInIteration.clear();
         batchItems.forEach((i) => {
           if (i.status !== 'clean' && i.status !== 'fixed' && i.status !== 'attention') {
             i.status = 'running';
@@ -644,11 +665,26 @@ export class DashboardPanel {
         setItemStatus(name, 'running', 'Validating');
       }
 
-      // ── Batch iteration summary → items NOT in retriedInIteration passed ──
+      // ── Item is re-verifying (consecutive zero-failure check) → keep as running ──
+      const reVerifyMatch = t.match(/\[([^\]]+)\]\s+No failures this iteration.*re-verifying/i);
+      if (reVerifyMatch) {
+        const name = reVerifyMatch[1].trim();
+        stillActiveInIteration.add(name);
+        setItemStatus(name, 'running', 'Re-verifying...');
+      }
+
+      // ── Item still has failures (including masked/unhandled) → keep as running ──
+      const failureLineMatch = t.match(/\[([^\]]+)\]\s+\d+\s+failure\(s\)/i);
+      if (failureLineMatch) {
+        const name = failureLineMatch[1].trim();
+        stillActiveInIteration.add(name);
+      }
+
+      // ── Batch iteration summary → only items not still-active and not committed passed ──
       const iterMatch = t.match(/Batch Iteration\s+(\d+)\s*\|\s*Active:\s*(\d+)\s*\|\s*Fixed:\s*(\d+)\/(\d+)/i);
       if (iterMatch && batchDeployStarted) {
         batchItems.forEach((i) => {
-          if (i.status === 'running' && !retriedInIteration.has(i.name)) {
+          if (i.status === 'running' && !retriedInIteration.has(i.name) && !stillActiveInIteration.has(i.name)) {
             i.status = 'clean';
             i.statusLabel = 'Clean ✓';
             if (i.refs === '—') i.refs = '0';
@@ -748,13 +784,6 @@ export class DashboardPanel {
           warnings: warnCount,
           attention: attnCount,
         });
-      }
-
-      // ── Attention items (unhandled errors) ───────────────────────
-      const unhandledMatch = t.match(/Unhandled error.*?[:\-]\s*(.+)/i);
-      if (unhandledMatch) {
-        attnCount++;
-        this.postMessage({ command: 'stats', attention: attnCount });
       }
 
       // ── Log to UI (filter noise) ─────────────────────────────────
@@ -1049,6 +1078,8 @@ export class DashboardPanel {
     const iName = idx('Name');
     const iRemoved = idx('RemovedFields');
     const iErrors = idx('RemovedErrors');
+    const iUnhandledCol = idx('UnhandledErrors');
+    const iStatusCol = idx('Status');
 
     const parseRow = (line: string): string[] => {
       const cols: string[] = [];
@@ -1085,8 +1116,10 @@ export class DashboardPanel {
         const name = cols[iName] ?? '';
         const removed = cols[iRemoved] ?? '';
         const errors = cols[iErrors] ?? '';
+        const unhandled = iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '';
         const remLines = splitLines(removed);
         const errLines = splitLines(errors);
+        const unhandledLines = splitLines(unhandled);
 
         const remCell = remLines.length
           ? remLines.map((r) => `<div class="line-item line-green">&#10003; ${esc(r)}</div>`).join('')
@@ -1096,7 +1129,13 @@ export class DashboardPanel {
           ? errLines.map((e) => `<div class="line-item line-red">&#9888; ${esc(e)}</div>`).join('')
           : '<span class="cell-muted">—</span>';
 
-        const rowClass = errLines.length ? 'row-err' : remLines.length ? 'row-ok' : '';
+        const rowClass = unhandledLines.length
+          ? 'row-unhandled'
+          : errLines.length
+          ? 'row-err'
+          : remLines.length
+          ? 'row-ok'
+          : '';
         return `<tr class="${rowClass}">
         <td class="td-name">${esc(name)}</td>
         <td>${remCell}</td>
@@ -1104,6 +1143,28 @@ export class DashboardPanel {
       </tr>`;
       })
       .join('\n');
+
+    // Build unhandled errors conclusion section
+    const unhandledRows = rows.filter(
+      (cols) => splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '').length > 0
+    );
+    const unhandledConclusionHtml =
+      unhandledRows.length > 0
+        ? `<div class="unhandled-section">
+  <div class="unhandled-header">&#9888;&nbsp; Unhandled / Skipped Errors &mdash; Manual Fix Required</div>
+  ${unhandledRows
+    .map((cols) => {
+      const name = cols[iName] ?? '';
+      const status = iStatusCol >= 0 ? cols[iStatusCol] ?? '' : '';
+      const errs = splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '');
+      return `<div class="unhandled-item">
+    <div class="unhandled-name">${esc(name)}<span class="unhandled-status">${esc(status)}</span></div>
+    ${errs.map((e) => `<div class="unhandled-err-line">&#8227; ${esc(e)}</div>`).join('')}
+  </div>`;
+    })
+    .join('\n')}
+</div>`
+        : '';
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -1140,6 +1201,16 @@ export class DashboardPanel {
   .chip b{color:#1a5a8a}
   .chip-clean{background:#f0fff8;border-color:#a0dcc0;color:#1a6a40}.chip-clean b{color:#1a6a40}
   .chip-warn{background:#fff4f4;border-color:#f0a0a0;color:#a02020}.chip-warn b{color:#a02020}
+  tbody tr.row-unhandled{background:#fff5f5}
+  tbody tr.row-unhandled:hover{background:#ffecec}
+  .line-unhandled{color:#b02020;font-weight:600}
+  .unhandled-section{margin-top:24px;border:2px solid rgba(180,30,30,.3);border-radius:10px;overflow:hidden;background:#fff8f8}
+  .unhandled-header{background:rgba(180,30,30,.1);padding:10px 18px;font-size:11px;font-weight:800;color:#b02020;text-transform:uppercase;letter-spacing:.14em;border-bottom:1px solid rgba(180,30,30,.18)}
+  .unhandled-item{padding:10px 18px;border-bottom:1px solid rgba(180,30,30,.1)}
+  .unhandled-item:last-child{border-bottom:none}
+  .unhandled-name{font-family:'Consolas',monospace;font-size:12px;font-weight:700;color:#1a2a40;margin-bottom:4px}
+  .unhandled-status{font-size:10px;font-weight:400;color:#a02020;margin-left:10px;font-family:'Segoe UI',system-ui,Arial,sans-serif}
+  .unhandled-err-line{font-size:12px;color:#b02020;padding:2px 0 2px 12px;border-left:2px solid rgba(180,30,30,.3);margin:3px 0;word-break:break-word}
 </style>
 </head>
 <body>
@@ -1151,16 +1222,18 @@ export class DashboardPanel {
   </div>
 </div>
 ${(() => {
-  const errCount = rows.filter((c) => splitLines(c[iErrors] ?? '').length > 0).length;
+  const unhandledCount = rows.filter(
+    (c) => splitLines(iUnhandledCol >= 0 ? c[iUnhandledCol] ?? '' : '').length > 0
+  ).length;
   const refCount = rows.reduce((n, c) => n + splitLines(c[iRemoved] ?? '').length, 0);
-  const errChip =
-    errCount > 0
-      ? `<div class="chip chip-warn"><b>${errCount} of ${rows.length}</b> components need attention</div>`
+  const statusChip =
+    unhandledCount > 0
+      ? `<div class="chip chip-warn"><b>${unhandledCount} of ${rows.length}</b> components need manual fixes</div>`
       : `<div class="chip chip-clean"><b>All ${rows.length} components</b> deployed cleanly ✓</div>`;
   return `<div class="summary-chips">
   <div class="chip"><b>${rows.length}</b> components processed</div>
   <div class="chip"><b>${refCount}</b> references removed</div>
-  ${errChip}
+  ${statusChip}
 </div>`;
 })()}
 <table>
@@ -1168,13 +1241,14 @@ ${(() => {
     <tr>
       <th>PermSet / Profile</th>
       <th>Component References Removed</th>
-      <th>Deployment Error</th>
+      <th>Deployment Error (per ref)</th>
     </tr>
   </thead>
   <tbody>
     ${rowsHtml}
   </tbody>
 </table>
+${unhandledConclusionHtml}
 <div class="footer">Generated by SF CLEANZ VS Code Extension</div>
 </body>
 </html>`;

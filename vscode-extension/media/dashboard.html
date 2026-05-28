@@ -1125,6 +1125,96 @@
           transform: translateX(700%);
         }
       }
+
+      /* RESULTS TABLE — horizontal scroll wrapper */
+      .results-table-wrap {
+        overflow-x: auto;
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid #d8edf8;
+        box-shadow: 0 2px 12px rgba(0, 0, 0, 0.05);
+      }
+      .results-table-wrap .results-table {
+        border: none;
+        box-shadow: none;
+        border-radius: 0;
+        min-width: 860px;
+      }
+
+      /* Unhandled errors column — wrapped text */
+      .unhandled-err-cell {
+        white-space: normal;
+        word-break: break-word;
+        min-width: 200px;
+        max-width: 300px;
+        font-family: var(--sans);
+        font-size: 10.5px;
+        color: #dc2626;
+        padding: 2px 0;
+      }
+
+      /* Dual-badge status layout */
+      .badge-status-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+      }
+      .badge-unhandled-alert {
+        background: rgba(239, 68, 68, 0.12);
+        color: #dc2626;
+        border: 1.5px solid rgba(239, 68, 68, 0.4);
+        font-weight: 800;
+        font-size: 9.5px;
+        padding: 2px 7px;
+        border-radius: 50px;
+        font-family: var(--mono);
+        white-space: nowrap;
+      }
+
+      /* UNHANDLED ERRORS conclusion section */
+      .unhandled-conclusion {
+        background: rgba(239, 68, 68, 0.05);
+        border: 1.5px solid rgba(239, 68, 68, 0.3);
+        border-radius: 10px;
+        overflow: hidden;
+        margin-top: 4px;
+      }
+      .unhandled-conclusion-header {
+        background: rgba(239, 68, 68, 0.1);
+        padding: 8px 14px;
+        font-size: 10px;
+        font-weight: 800;
+        color: #dc2626;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        border-bottom: 1px solid rgba(239, 68, 68, 0.18);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .unhandled-conclusion-item {
+        padding: 10px 14px;
+        border-bottom: 1px solid rgba(239, 68, 68, 0.1);
+      }
+      .unhandled-conclusion-item:last-child {
+        border-bottom: none;
+      }
+      .unhandled-component-name {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: #0c3d56;
+        font-weight: 700;
+        margin-bottom: 5px;
+      }
+      .unhandled-error-entry {
+        font-size: 11px;
+        color: #dc2626;
+        padding: 3px 0 3px 12px;
+        border-left: 2px solid rgba(239, 68, 68, 0.35);
+        margin: 3px 0;
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
@@ -1315,20 +1405,29 @@
           <div id="resultsPlaceholder" style="color: #374151; font-size: 12px; padding: 24px 0; text-align: center">
             Results will appear here after a run completes.
           </div>
-          <table class="results-table" id="resultsTable" style="display: none">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Op</th>
-                <th>Status</th>
-                <th>Removed Refs</th>
-                <th>Skipped (Whitelisted)</th>
-                <th>Unhandled Errors</th>
-              </tr>
-            </thead>
-            <tbody id="resultsBody"></tbody>
-          </table>
+          <div class="results-table-wrap" id="resultsTableWrap" style="display: none">
+            <table class="results-table" id="resultsTable">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Op</th>
+                  <th>Status</th>
+                  <th>Removed Refs</th>
+                  <th>Skipped (Whitelisted)</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody"></tbody>
+            </table>
+          </div>
+          <div id="unhandledConclusion" style="display: none">
+            <div class="unhandled-conclusion">
+              <div class="unhandled-conclusion-header">
+                &#9888; Unhandled / Skipped Errors &mdash; Manual Fix Required After Run
+              </div>
+              <div id="unhandledConclusionBody"></div>
+            </div>
+          </div>
         </div>
 
         <!-- NAMESPACE PURGE BANNER — shown only when mode is namespace-purge -->
@@ -1570,7 +1669,7 @@
           let inQ = false;
           for (let i = 0; i < line.length; i++) {
             const c = line[i];
-            if (c === '"' && line[i + 1] === '"') {
+            if (c === '"' && inQ && line[i + 1] === '"') {
               cur += '"';
               i++;
             } else if (c === '"') {
@@ -1595,7 +1694,7 @@
         };
 
         function makePills(cell, cls) {
-          if (!cell) return '<span style="color:#374151">—</span>';
+          if (!cell) return '<span style="color:#a0b8c8">—</span>';
           return cell
             .split(';')
             .filter((s) => s.trim())
@@ -1603,26 +1702,75 @@
             .join('');
         }
 
-        document.getElementById('resultsPlaceholder').style.display = 'none';
-        document.getElementById('resultsTable').style.display = '';
+        function renderStatusCell(status) {
+          const fixedWithUnhandled = /\+\s*unhandled errors/i.test(status);
+          const unhandledOnly = /^unhandled errors\s*[-–]/i.test(status);
+          if (fixedWithUnhandled) {
+            const cleanPart = status.replace(/\s*\+\s*unhandled errors.*/i, '').trim();
+            return (
+              '<div class="badge-status-wrap"><span style="color:var(--green);font-weight:600;white-space:nowrap">' +
+              escHtml(cleanPart) +
+              '</span><span class="badge-unhandled-alert">&#9888; Unhandled Errors exist</span></div>'
+            );
+          }
+          if (unhandledOnly) {
+            return '<div class="badge-status-wrap"><span class="badge-unhandled-alert">&#9888; Unhandled Errors exist</span></div>';
+          }
+          return '<span style="color:' + statusColor(status) + ';white-space:nowrap">' + escHtml(status) + '</span>';
+        }
+
+        function renderUnhandledErrors(cell) {
+          if (!cell || !cell.trim()) return '<span style="color:#a0b8c8">—</span>';
+          return cell
+            .split(';')
+            .filter((s) => s.trim())
+            .map((s) => '<div class="unhandled-err-cell">' + escHtml(s.trim()) + '</div>')
+            .join('');
+        }
+
         const tbody = document.getElementById('resultsBody');
         tbody.innerHTML = rows
           .map(
             (r) => `
       <tr>
-        <td style="font-weight:500;color:#0c3d56">${r[idx('Name')] ?? ''}</td>
-        <td style="color:var(--muted)">${r[idx('Type')] ?? ''}</td>
-        <td><span style="font-size:10px;color:var(--blue)">${r[idx('Op')] ?? ''}</span></td>
-        <td style="color:${statusColor(r[idx('Status')] ?? '')};white-space:nowrap">${r[idx('Status')] ?? ''}</td>
+        <td style="font-weight:500;color:#0c3d56">${escHtml(r[idx('Name')] ?? '')}</td>
+        <td style="color:var(--muted)">${escHtml(r[idx('Type')] ?? '')}</td>
+        <td><span style="font-size:10px;color:var(--blue)">${escHtml(r[idx('Op')] ?? '')}</span></td>
+        <td>${renderStatusCell(r[idx('Status')] ?? '')}</td>
         <td>${makePills(r[idx('RemovedFields')], '')}</td>
         <td>${makePills(r[idx('SkippedFields')], 'skipped')}</td>
-        <td>${makePills(r[idx('UnhandledErrors')], 'error')}</td>
       </tr>`
           )
           .join('');
 
         document.getElementById('resultsPlaceholder').style.display = 'none';
-        document.getElementById('resultsTable').style.display = 'table';
+        document.getElementById('resultsTableWrap').style.display = '';
+
+        // Populate the highlighted conclusion section for items with unhandled errors
+        const unhandledItems = rows.filter((r) => (r[idx('UnhandledErrors')] || '').trim().length > 0);
+        const conclusionEl = document.getElementById('unhandledConclusion');
+        if (unhandledItems.length > 0) {
+          document.getElementById('unhandledConclusionBody').innerHTML = unhandledItems
+            .map((r) => {
+              const name = r[idx('Name')] || '';
+              const type = r[idx('Type')] || '';
+              const errors = (r[idx('UnhandledErrors')] || '').split(';').filter((s) => s.trim());
+              return (
+                '<div class="unhandled-conclusion-item"><div class="unhandled-component-name">' +
+                escHtml(name) +
+                ' <span style="font-weight:400;color:var(--muted);font-size:10px">' +
+                escHtml(type) +
+                '</span></div>' +
+                errors.map((e) => '<div class="unhandled-error-entry">' + escHtml(e.trim()) + '</div>').join('') +
+                '</div>'
+              );
+            })
+            .join('');
+          conclusionEl.style.display = '';
+        } else {
+          conclusionEl.style.display = 'none';
+        }
+
         document.getElementById('resultsTabBtn').textContent = 'Results (' + rows.length + ')';
       }
 
@@ -1798,7 +1946,8 @@
               '<tr><td colspan="5" style="text-align:center;color:#374151;padding:16px">Loading batch...</td></tr>';
             document.getElementById('skippedSection').style.display = 'none';
             document.getElementById('resultsBody').innerHTML = '';
-            document.getElementById('resultsTable').style.display = 'none';
+            document.getElementById('resultsTableWrap').style.display = 'none';
+            document.getElementById('unhandledConclusion').style.display = 'none';
             document.getElementById('resultsPlaceholder').style.display = 'block';
             document.getElementById('resultsTabBtn').textContent = 'Results';
             switchTab('items');
@@ -1845,6 +1994,7 @@
             document.getElementById('abortBtn').disabled = true;
             document.getElementById('resetBtn').disabled = false;
             document.getElementById('runBtn').style.display = '';
+            document.getElementById('progressSection').style.display = 'none';
             break;
 
           case 'runComplete': {
@@ -1870,6 +2020,7 @@
               for (let i = 0; i < 4; i++) setPhase(i, 'done');
               setStatusBar('Complete ✓', 'ok');
               document.getElementById('runTitle').textContent = '— Run #' + runNumber + ' · Done ✓';
+              document.getElementById('progressSection').style.display = 'none';
             } else {
               setProgress(Math.max(10, (currentPhase / 3) * 100), 'Failed', '', true);
               for (let i = 0; i < 4; i++) {
@@ -1877,6 +2028,7 @@
               }
               setStatusBar('Failed ✗ (exit ' + msg.exitCode + ')', 'fail');
               document.getElementById('runTitle').textContent = '— Run #' + runNumber + ' · Failed ✗';
+              document.getElementById('progressSection').style.display = 'none';
             }
             break;
           }

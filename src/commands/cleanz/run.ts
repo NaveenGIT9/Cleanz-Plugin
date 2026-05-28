@@ -60,6 +60,7 @@ type ComponentFailure = {
 type SummaryRecord = {
   Type: string;
   Name: string;
+  Op: string;
   Status: string;
   RemovedFields: string;
   RemovedErrors: string;
@@ -68,6 +69,12 @@ type SummaryRecord = {
 };
 
 type TotalDeploys = { value: number };
+
+type ErrorMask = {
+  xmlPattern: RegExp; // regex applied to masked XML to strip the offending block
+  label: string; // short identifier (e.g. 'loginIpRanges', 'userPermission:ViewAllData')
+  reason: string; // original Salesforce error text, shown in Unhandled/Skipped Errors column
+};
 
 type BatchItem = {
   metadataType: string;
@@ -79,8 +86,10 @@ type BatchItem = {
   allRemovedRefs: RemovedRef[]; // full ref objects for repo-wide sweep
   allSkippedFields: string[];
   allUnhandledErrors: string[];
+  errorBasedMasks: ErrorMask[]; // dynamically accumulated masks for blocks that caused unhandled errors
   done: boolean;
   calcFailedRetries: number; // tracks CalculationFailed transient retries for PSG items
+  consecutiveZeroFailures: number; // consecutive zero-failure responses while success=false; must reach 2 before marking clean
 };
 
 type WhitelistMap = {
@@ -383,6 +392,8 @@ export function buildAsciiTable(headers: string[], rows: string[][], maxColWidth
 
 // ===============================================================
 // XML BLOCK REMOVERS
+// ===============================================================
+
 // ===============================================================
 
 function removeFieldPermissionsFromXml(
@@ -1810,9 +1821,14 @@ function processFailures(
       continue;
     }
 
-    // ── Permission dependency errors — validation-only, not enforced by Copado ──
+    // ── Permission dependency errors ──────────────────────────────────────────
+    // Object-flag PermDep (e.g. "Permission Edit X depends on Read X") and system
+    // userPermission PermDep (e.g. "Permission ViewAllData depends on ModifyAllData")
+    // are both left as unhandled so the user is informed. tryAddErrorMask will mask
+    // the <userPermissions> block for system perms so validation can continue; for
+    // object-flag PermDep it returns false and the item stops as Partial/Manual.
     if (/Permission .+ depends on permission\(s\):/i.test(err)) {
-      log(`   [PermDep] Ignoring validation-only permission dependency error: ${err}`);
+      unhandledErrors.push(err);
       continue;
     }
 
@@ -2503,6 +2519,101 @@ function readFileWithRetry(filePath: string, retries = 5, delayMs = 500): string
   return fs.readFileSync(filePath, 'utf8'); // unreachable, satisfies TS
 }
 
+// Adds each unhandled error to item.allUnhandledErrors and, for eligible metadata types,
+// attempts to add an error-based mask so subsequent dry-runs can bypass the offending block.
+// Returns true if at least one new mask was added (caller should treat this as progress).
+function collectUnhandledErrors(errors: string[], item: BatchItem, log: (msg: string) => void): boolean {
+  let addedAny = false;
+  for (const e of errors) {
+    if (!item.allUnhandledErrors.includes(e)) item.allUnhandledErrors.push(e);
+    if (isEligibleForDynamicMasking(item) && tryAddErrorMask(e, item, log)) addedAny = true;
+  }
+  return addedAny;
+}
+
+// Dynamic error-based masking applies to Profile/PS/MutingPS only.
+// PSG errors (e.g. license-dependent PS) cannot be auto-identified and are left for manual fix.
+function isEligibleForDynamicMasking(item: BatchItem): boolean {
+  return (
+    item.metadataType === 'Profile' ||
+    item.metadataType === 'PermissionSet' ||
+    item.metadataType === 'MutingPermissionSet'
+  );
+}
+
+function escapeRegexChars(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Tries to identify the XML block responsible for an unhandled error and adds a mask for it.
+// Returns true if a new mask was added (i.e. the error is now handled by masking).
+function tryAddErrorMask(err: string, item: BatchItem, log: (msg: string) => void): boolean {
+  // ── IP login ranges ───────────────────────────────────────────────────────
+  if (/limit.*ipv[46]|ipv[46].*limit|ip\s*range/i.test(err)) {
+    const label = 'loginIpRanges';
+    if (item.errorBasedMasks.some((m) => m.label === label)) return false;
+    item.errorBasedMasks.push({
+      xmlPattern: /[ \t]*<loginIpRanges>[\s\S]*?<\/loginIpRanges>[ \t]*\r?\n?/g,
+      label,
+      reason: err,
+    });
+    log('   [Dynamic Mask] Masking <loginIpRanges> block — needs manual fix after run');
+    return true;
+  }
+
+  // ── Object-flag PermDep: "Permission Edit/Read/... ObjectName depends on ..." ──
+  // Mask ALL <objectPermissions> blocks for that object so validation can continue
+  // and surface other errors. Error is already in unhandledErrors — user will see it.
+  const objPermDepMatch =
+    /Permission\s+(?:View All|Modify All|Read|Edit|Create|Delete)\s+(\S+)\s+depends\s+on\s+permission/i.exec(err);
+  if (objPermDepMatch) {
+    const objectName = objPermDepMatch[1].trim();
+    const label = `objectPermDep:${objectName}`;
+    if (item.errorBasedMasks.some((m) => m.label === label)) return false;
+    const escapedObj = escapeRegexChars(objectName);
+    const inner = '(?:(?!<objectPermissions>)[\\s\\S])*?';
+    item.errorBasedMasks.push({
+      xmlPattern: new RegExp(
+        `[ \\t]*<objectPermissions>${inner}<object>[ \\t]*${escapedObj}[ \\t]*</object>${inner}</objectPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      label,
+      reason: err,
+    });
+    log(`   [Dynamic Mask] Masking <objectPermissions> for '${objectName}' — PermDep, needs manual fix after run`);
+    return true;
+  }
+
+  // ── System userPermission PermDep: "Permission ViewAllData depends on ..." ──
+  // Mask the <userPermissions> block so validation can continue.
+  // Error is already in unhandledErrors — user will see it.
+  const permMatch = err.match(/Permission\s+(.+?)\s+depends\s+on\s+permission/i);
+  if (permMatch) {
+    const permName = permMatch[1].trim();
+    const permNameNoSpaces = permName.replace(/\s+/g, '');
+    const label = `userPermission:${permNameNoSpaces}`;
+    if (item.errorBasedMasks.some((m) => m.label === label)) return false;
+    // Match both "View All Data" and "ViewAllData" forms inside <name>...</name>
+    const nameAlt =
+      permNameNoSpaces !== permName
+        ? `(?:${escapeRegexChars(permName)}|${permNameNoSpaces})`
+        : escapeRegexChars(permName);
+    const inner = '(?:(?!<userPermissions>)[\\s\\S])*?';
+    item.errorBasedMasks.push({
+      xmlPattern: new RegExp(
+        `[ \\t]*<userPermissions>${inner}<name>[ \\t]*${nameAlt}[ \\t]*</name>${inner}</userPermissions>[ \\t]*\\r?\\n?`,
+        'g'
+      ),
+      label,
+      reason: err,
+    });
+    log(`   [Dynamic Mask] Masking <userPermissions> block for '${permName}' — needs manual fix after run`);
+    return true;
+  }
+
+  return false; // unknown error — cannot auto-mask
+}
+
 function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map<string, string> {
   const saved = new Map<string, string>();
   for (const item of activeItems) {
@@ -2517,6 +2628,14 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
       masked = maskPermSetFalsePositives(masked, item.operation === 'FULL');
     }
     // PSG files: no false-positive masking needed — structure is simple and fixed by fixPsgPermissionSetsBlock
+
+    // Apply dynamic error-based masks accumulated from previous iterations (Profile/PS/MutingPS only).
+    if (isEligibleForDynamicMasking(item)) {
+      for (const mask of item.errorBasedMasks) {
+        masked = masked.replace(mask.xmlPattern, '');
+      }
+    }
+
     saved.set(item.filePath, orig);
     if (masked !== orig) writeFileWithRetry(item.filePath, masked);
   }
@@ -2600,6 +2719,19 @@ function sweepPerItemRefs(
   }
 }
 
+// Minimum consecutive zero-failure responses (while success=false) before an item is
+// declared clean. Salesforce's error reporting is non-deterministic — a single zero-failure
+// response after many fixes is not reliable evidence that all errors are gone.
+const ZERO_FAILURE_CONFIRM = 2;
+
+// Returns true if the batch should stop because there are undone items but no real progress
+// and none of them are in re-verification state (waiting for a second zero-failure confirmation).
+function isStuckWithNoProgress(batchItems: BatchItem[]): boolean {
+  const hasUndone = batchItems.some((i) => !i.done);
+  const hasReVerifying = batchItems.some((i) => !i.done && i.consecutiveZeroFailures > 0);
+  return hasUndone && !hasReVerifying;
+}
+
 function markPassedItems(
   log: (msg: string) => void,
   activeItems: BatchItem[],
@@ -2608,9 +2740,32 @@ function markPassedItems(
 ): void {
   for (const item of activeItems) {
     if ((failuresByItem.get(item.itemName) ?? []).length === 0) {
-      log(`   [${item.itemName}] No failures this iteration — passed.`);
-      item.status = item.allRemovedFields.length > 0 ? (dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed') : 'Success';
-      item.done = true;
+      item.consecutiveZeroFailures++;
+      if (item.consecutiveZeroFailures < ZERO_FAILURE_CONFIRM) {
+        log(
+          `   [${item.itemName}] No failures this iteration — re-verifying (${item.consecutiveZeroFailures}/${ZERO_FAILURE_CONFIRM})...`
+        );
+      } else {
+        const hasFixed = item.allRemovedFields.length > 0;
+        const hasUnhandled = item.allUnhandledErrors.length > 0;
+        log(
+          `   [${item.itemName}] No failures this iteration — passed${
+            hasUnhandled ? ' (with unhandled/skipped errors — see report)' : ''
+          }.`
+        );
+        if (hasFixed && hasUnhandled) {
+          item.status = dryRun ? 'Fixed (Dry Run) + Unhandled Errors' : 'Fixed & Committed + Unhandled Errors';
+        } else if (hasFixed) {
+          item.status = dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed';
+        } else if (hasUnhandled) {
+          item.status = 'Unhandled Errors - Manual Fix Needed';
+        } else {
+          item.status = 'Success';
+        }
+        item.done = true;
+      }
+    } else {
+      item.consecutiveZeroFailures = 0;
     }
   }
 }
@@ -3093,11 +3248,25 @@ async function processItemsInIteration(
         item.allRemovedRefs.push(ref);
       }
     }
-    for (const e of unhandledErrors) {
-      if (!item.allUnhandledErrors.includes(e)) item.allUnhandledErrors.push(e);
-    }
+
+    const addedNewMasks = collectUnhandledErrors(unhandledErrors, item, log);
 
     if (removedRefs.length === 0) {
+      if (addedNewMasks) {
+        // New masks were added — next iteration deploys without the offending block,
+        // potentially surfacing other real errors. Treat as progress so the loop continues.
+        anyProgress = true;
+        continue;
+      }
+      // If every failure was a validation-only ignored error (PermDep, TabSettings, etc.)
+      // — nothing to remove, nothing unhandled, nothing skipped — Copado real deploy won't
+      // fail on these. Treat the item as passed rather than stuck.
+      if (itemFailures.length > 0 && unhandledErrors.length === 0 && skippedFields.length === 0) {
+        item.status = 'Success';
+        item.done = true;
+        log(`   [${item.itemName}] All failures were validation-only (ignored by Copado) — marking as passed`);
+        continue;
+      }
       item.status =
         skippedFields.length > 0 ? 'Whitelisted Items Only - Manual Deploy Needed' : 'Partial / Manual Check Needed';
       item.done = true;
@@ -3110,6 +3279,59 @@ async function processItemsInIteration(
   }
 
   return { perItemRefs, anyProgress, lastManagedRefsCommit, nsModifiedFiles, nsCommitMsg, nsOriginalXmlMap };
+}
+
+function markSuccessItems(items: BatchItem[], dryRun: boolean): void {
+  for (const item of items) {
+    const hasFixed = item.allRemovedFields.length > 0;
+    const hasUnhandled = item.allUnhandledErrors.length > 0;
+    if (hasFixed && hasUnhandled) {
+      item.status = dryRun ? 'Fixed (Dry Run) + Unhandled Errors' : 'Fixed & Committed + Unhandled Errors';
+    } else if (hasFixed) {
+      item.status = dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed';
+    } else if (hasUnhandled) {
+      item.status = 'Unhandled Errors - Manual Fix Needed';
+    } else {
+      item.status = 'Success';
+    }
+    item.done = true;
+  }
+}
+
+function preRunDeduplicateBlocks(
+  log: (msg: string) => void,
+  batchItems: BatchItem[],
+  repoPath: string,
+  dryRun: boolean
+): void {
+  const modifiedFiles: string[] = [];
+  let totalRemoved = 0;
+  for (const item of batchItems) {
+    if (!fs.existsSync(item.filePath)) continue;
+    const srcXml = readFileWithRetry(item.filePath);
+    const { updated, removedCount } = deduplicateXmlBlocks(srcXml);
+    if (removedCount > 0) {
+      writeFileWithRetry(item.filePath, updated);
+      modifiedFiles.push(item.filePath);
+      totalRemoved += removedCount;
+      log(`[Pre-run] ${item.itemName}: removed ${removedCount} exact duplicate XML block(s)`);
+    }
+  }
+  if (modifiedFiles.length === 0) return;
+  if (dryRun) {
+    log(`[Pre-run] Dry run — skipped commit for ${modifiedFiles.length} deduplicated file(s).`);
+    return;
+  }
+  try {
+    for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
+    execSync(
+      `git commit -m "Auto-fix: remove ${totalRemoved} exact duplicate XML block(s) across ${modifiedFiles.length} file(s)"`,
+      { cwd: repoPath }
+    );
+    log(`[Pre-run] Committed deduplication: ${totalRemoved} block(s) removed across ${modifiedFiles.length} file(s).`);
+  } catch (e) {
+    log(`[Pre-run] Warning: deduplication commit failed — ${String(e)}`);
+  }
 }
 
 // ===============================================================
@@ -3145,6 +3367,7 @@ async function runBatchDeploy(
   nsOriginalXmlMap: Map<string, string>;
 }> {
   validateBatchItems(log, batchItems);
+  preRunDeduplicateBlocks(log, batchItems, repoPath, dryRun);
 
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
@@ -3219,10 +3442,7 @@ async function runBatchDeploy(
     }
     if (deployResult.result.success === true) {
       log('All remaining items passed validation!');
-      for (const item of activeItems) {
-        item.status = item.allRemovedFields.length > 0 ? 'Fixed & Committed' : 'Success';
-        item.done = true;
-      }
+      markSuccessItems(activeItems, dryRun);
       break;
     }
 
@@ -3268,7 +3488,7 @@ async function runBatchDeploy(
     if (nsCommitMsg) lastNsCommitMsg = nsCommitMsg;
     mergeMapFirst(allNsOriginalXmlMap, nsOriginalXmlMap);
 
-    if (!anyProgress && batchItems.some((i) => !i.done)) {
+    if (!anyProgress && isStuckWithNoProgress(batchItems)) {
       stopBatchOnNoProgress(log, batchItems);
       break;
     }
@@ -3285,6 +3505,7 @@ async function runBatchDeploy(
   const summary: SummaryRecord[] = batchItems.map((item) => ({
     Type: item.metadataType,
     Name: item.itemName,
+    Op: item.operation,
     Status: item.status,
     RemovedFields: item.allRemovedFields.map((r) => r.label).join('; '),
     RemovedErrors: item.allRemovedFields.map((r) => r.error).join('; '),
@@ -3787,8 +4008,10 @@ export default class DeployAndFix extends SfCommand<void> {
         allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
         done: false,
         calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
       })),
       ...mutingPermSets.map((n) => ({
         metadataType: 'MutingPermissionSet',
@@ -3800,8 +4023,10 @@ export default class DeployAndFix extends SfCommand<void> {
         allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
         done: false,
         calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
       })),
       ...permSetGroups.map((n) => ({
         metadataType: 'PermissionSetGroup',
@@ -3813,8 +4038,10 @@ export default class DeployAndFix extends SfCommand<void> {
         allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
         done: false,
         calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
       })),
       ...profiles.map((n) => ({
         metadataType: 'Profile',
@@ -3826,8 +4053,10 @@ export default class DeployAndFix extends SfCommand<void> {
         allRemovedRefs: [] as RemovedRef[],
         allSkippedFields: [] as string[],
         allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
         done: false,
         calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
       })),
     ];
 
@@ -3982,9 +4211,12 @@ export default class DeployAndFix extends SfCommand<void> {
     writeConclusionFile(log, conclusionLines.join('\n'), REPO_PATH);
 
     const csvPath = path.join(os.tmpdir(), 'cleanz-deploy-summary.csv');
-    const csvHeader = 'Type,Name,Status,RemovedFields,RemovedErrors,SkippedFields';
+    const csvHeader = 'Type,Name,Op,Status,RemovedFields,RemovedErrors,SkippedFields,UnhandledErrors';
     const csvRows = summary.map(
-      (r) => `${r.Type},"${r.Name}","${r.Status}","${r.RemovedFields}","${r.RemovedErrors}","${r.SkippedFields}"`
+      (r) =>
+        `${r.Type},"${r.Name}",${r.Op},"${r.Status}","${r.RemovedFields}","${r.RemovedErrors}","${
+          r.SkippedFields
+        }","${r.UnhandledErrors.replace(/"/g, '""')}"`
     );
     fs.writeFileSync(csvPath, [csvHeader, ...csvRows].join('\n'), 'utf8');
 
