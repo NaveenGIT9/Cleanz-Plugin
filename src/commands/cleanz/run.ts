@@ -1260,7 +1260,9 @@ function queryExistingPermSets(targetOrg: string, psNames: string[]): Promise<st
       return;
     }
     const inClause = psNames.map((n) => `'${n}'`).join(', ');
-    const query = `"SELECT DeveloperName FROM PermissionSet WHERE DeveloperName IN (${inClause})"`;
+    // Query by Name — for non-namespaced custom PSes this is identical to DeveloperName.
+    // Managed-package PSes are handled separately via checkNamespaceInstalled in handlePsgInvalidPsItem.
+    const query = `"SELECT Name FROM PermissionSet WHERE Name IN (${inClause})"`;
     const args = ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'];
     const proc = spawn('sf', args, { shell: true });
     const chunks: string[] = [];
@@ -1269,16 +1271,16 @@ function queryExistingPermSets(targetOrg: string, psNames: string[]): Promise<st
     const timer = setTimeout(() => {
       proc.kill();
       resolve([]);
-    }, 30_000);
+    }, 60_000);
     proc.on('close', () => {
       clearTimeout(timer);
       try {
         const raw = chunks.join('');
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: { records?: Array<{ DeveloperName?: string }> };
+          result?: { records?: Array<{ Name?: string }> };
         };
-        resolve(json?.result?.records?.map((r) => r.DeveloperName ?? '').filter(Boolean) ?? []);
+        resolve(json?.result?.records?.map((r) => r.Name ?? '').filter(Boolean) ?? []);
       } catch {
         resolve([]);
       }
@@ -1900,6 +1902,17 @@ function processFailures(
     // "Partial / Manual Check Needed" when this is the only remaining error.
     if (/unable to obtain exclusive access to this record/i.test(err)) {
       log(`   Skipping transient lock error (non-fatal): ${err}`);
+      continue;
+    }
+
+    // PSG invalid PermissionSet refs — handled by handlePsgInvalidPsItem in applyManagedRefsPass.
+    // Don't add to unhandledErrors here; applyManagedRefsPass will query the org, remove
+    // the missing PS refs from the PSG XML, commit, and retry.
+    if (
+      /Cannot create permission set group components since the following permission set names are invalid/i.test(err) &&
+      metadataType === 'PermissionSetGroup'
+    ) {
+      log('   [PSG] Invalid PermissionSet ref(s) — will be resolved in managed refs pass');
       continue;
     }
 
@@ -2845,15 +2858,46 @@ async function handlePsgInvalidPsItem(
     return;
   }
 
-  log(`   [PSG] ${item.itemName} — missing in target org: ${missingInOrg.join(', ')}`);
+  log(`   [PSG] ${item.itemName} — not found by Name query: ${missingInOrg.join(', ')}`);
 
-  const beingAdded = missingInOrg.filter((n) =>
+  // For managed-package PS refs (e.g. "whistic_profile__whistic_user"), SOQL Name field
+  // stores only the DeveloperName portion ("whistic_user") — the namespace prefix is absent.
+  // So a SOQL Name query returns nothing for them. If the namespace is installed, the PS
+  // exists — do not remove it.
+  const confirmedMissing: string[] = [];
+  for (const psName of missingInOrg) {
+    // Namespace prefixes CAN contain underscores (e.g. "whistic_profile__whistic_user").
+    // Use [A-Za-z0-9_]* so "whistic_profile" is captured as the namespace, not just "whistic".
+    const nsMatch = /^([A-Za-z][A-Za-z0-9_]*)__/.exec(psName);
+    if (nsMatch) {
+      const namespace = nsMatch[1];
+      // eslint-disable-next-line no-await-in-loop
+      const installed = await checkNamespaceInstalled(log, targetOrg, namespace);
+      if (installed) {
+        log(`   [PSG] ${item.itemName} — keeping '${psName}' (namespace '${namespace}' is installed in org)`);
+        continue;
+      }
+    }
+    confirmedMissing.push(psName);
+  }
+
+  if (confirmedMissing.length === 0) {
+    log(`   [PSG] ${item.itemName} — all unresolved refs belong to installed namespaces. No removal needed.`);
+    item.status = 'Pending';
+    return;
+  }
+
+  log(
+    `   [PSG] ${item.itemName} — confirmed missing (not in org, not a managed package): ${confirmedMissing.join(', ')}`
+  );
+
+  const beingAdded = confirmedMissing.filter((n) =>
     promotionData.some(
       (i) => i.t === 'PermissionSet' && i.n === n && (!i.a || !i.a.toLowerCase().startsWith('retrieve'))
     )
   );
   const beingAddedLower = new Set(beingAdded.map((n) => n.toLowerCase()));
-  const toRemove = missingInOrg.filter((n) => !beingAddedLower.has(n.toLowerCase()));
+  const toRemove = confirmedMissing.filter((n) => !beingAddedLower.has(n.toLowerCase()));
 
   if (beingAdded.length > 0) {
     log(`   [PSG] ${item.itemName} — keeping refs (being added in this promotion): ${beingAdded.join(', ')}`);
@@ -4067,6 +4111,46 @@ export default class DeployAndFix extends SfCommand<void> {
     // is no safe way to know which block represents the intended state. Leaving duplicates
     // in place is harmless; the developer should resolve conflicting blocks manually.
     // runDeduplicationPrePass(log, batchItems, REPO_PATH, dryRun);
+
+    // ── PSG deduplication pre-pass ───────────────────────────────────────────────
+    // For PermissionSetGroup files, duplicate <permissionSets> entries cause
+    // "Element permissionSets is duplicated" or silent PSG recalculation failures.
+    // fixPsgPermissionSetsBlock safely deduplicates (case-insensitive) and re-orders
+    // the block after <label> — this is always correct for PSGs so we run it proactively.
+    {
+      const psgItems = batchItems.filter((i) => i.metadataType === 'PermissionSetGroup');
+      const psgFixed: string[] = [];
+      for (const psgItem of psgItems) {
+        if (!fs.existsSync(psgItem.filePath)) continue;
+        const psgXml = readFileWithRetry(psgItem.filePath);
+        const { updated, fixed } = fixPsgPermissionSetsBlock(psgXml);
+        if (fixed) {
+          saveXmlPreserved(updated, psgItem.filePath);
+          psgFixed.push(psgItem.itemName);
+          log(`   [PSG Pre-fix] ${psgItem.itemName} — deduplicated/reordered <permissionSets> block`);
+          psgItem.allRemovedFields.push({
+            label: '[PSG] permissionSets block deduplicated/reordered',
+            error: 'Duplicate <permissionSets> entries removed proactively',
+          });
+        }
+      }
+      if (psgFixed.length > 0 && !dryRun) {
+        try {
+          for (const name of psgFixed) {
+            execSync(`git add "${path.join(PSG_BASE_PATH, `${name}.permissionsetgroup-meta.xml`)}"`, {
+              cwd: REPO_PATH,
+            });
+          }
+          execSync(`git commit -m "Auto-fix: deduplicate <permissionSets> in PSG(s): ${psgFixed.join(', ')}"`, {
+            cwd: REPO_PATH,
+          });
+          log(`   [PSG Pre-fix] Committed dedup fix for: ${psgFixed.join(', ')}`);
+        } catch (e) {
+          log(`   [PSG Pre-fix] git commit failed: ${(e as Error).message ?? e}`);
+        }
+      }
+    }
+    // ── end PSG deduplication pre-pass ───────────────────────────────────────────
 
     // Record HEAD so the final squash covers only missing-ref removal commits.
     const startingCommit = execSync('git rev-parse HEAD', { cwd: REPO_PATH }).toString().trim();
