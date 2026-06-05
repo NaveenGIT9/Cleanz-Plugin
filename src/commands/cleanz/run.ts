@@ -629,6 +629,28 @@ function removeObjectPermissionFlag(
 //   4. Re-inserts them as one sorted block immediately after the <label> element
 // ===============================================================
 
+/**
+ * Removes duplicate <permissionSets> lines from a PSG file in-place.
+ * Does NOT reorder or relocate any lines — preserves original position so
+ * git blame stays clean and tracing commits remains straightforward.
+ * Only the second (and further) occurrences of a duplicate name are removed.
+ */
+export function removeDuplicatePsgPermissionSets(xmlContent: string): { updated: string; removed: string[] } {
+  const seen = new Set<string>();
+  const removedNames: string[] = [];
+  const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>[ \t]*\r?\n?/g;
+  const updated = xmlContent.replace(tagRegex, (fullMatch, name: string) => {
+    const key = name.trim().toLowerCase();
+    if (seen.has(key)) {
+      removedNames.push(name.trim());
+      return ''; // remove duplicate — keep first occurrence only
+    }
+    seen.add(key);
+    return fullMatch; // keep first occurrence as-is
+  });
+  return { updated, removed: removedNames };
+}
+
 export function fixPsgPermissionSetsBlock(xmlContent: string): { updated: string; fixed: boolean } {
   // Collect every <permissionSets> line (single-line tags only — Salesforce always writes them this way)
   const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>[ \t]*\r?\n?/g;
@@ -4123,15 +4145,22 @@ export default class DeployAndFix extends SfCommand<void> {
       for (const psgItem of psgItems) {
         if (!fs.existsSync(psgItem.filePath)) continue;
         const psgXml = readFileWithRetry(psgItem.filePath);
-        const { updated, fixed } = fixPsgPermissionSetsBlock(psgXml);
-        if (fixed) {
+        // Only remove duplicates in-place — do NOT reorder so git blame stays clean
+        const { updated, removed } = removeDuplicatePsgPermissionSets(psgXml);
+        if (removed.length > 0) {
           saveXmlPreserved(updated, psgItem.filePath);
           psgFixed.push(psgItem.itemName);
-          log(`   [PSG Pre-fix] ${psgItem.itemName} — deduplicated/reordered <permissionSets> block`);
-          psgItem.allRemovedFields.push({
-            label: '[PSG] permissionSets block deduplicated/reordered',
-            error: 'Duplicate <permissionSets> entries removed proactively',
-          });
+          log(
+            `   [PSG Pre-fix] ${psgItem.itemName} — removed ${
+              removed.length
+            } duplicate <permissionSets>: ${removed.join(', ')}`
+          );
+          removed.forEach((name) =>
+            psgItem.allRemovedFields.push({
+              label: `<permissionSets>${name}</permissionSets>`,
+              error: 'Duplicate <permissionSets> entry removed',
+            })
+          );
         }
       }
       if (psgFixed.length > 0 && !dryRun) {
