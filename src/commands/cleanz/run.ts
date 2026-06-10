@@ -2969,6 +2969,93 @@ async function handlePsgInvalidPsItem(
   }
 }
 
+// When 43 PS files deploy together and only 1 fails with an OmbudApp error,
+// the per-item loop bulk-removes OmbudApp refs from that 1 file only. The other
+// 42 files also contain OmbudApp refs but had no failures yet — each subsequent
+// deploy iteration exposes one more, causing N iterations for N files instead of 1.
+// This function runs after the per-item pass and sweeps ALL active items for every
+// namespace already confirmed not installed in the org (via namespaceCache).
+function applyCrossItemNamespaceSweep(
+  log: (msg: string) => void,
+  activeItems: BatchItem[],
+  itemNsResults: Map<string, NsResult>,
+  nsOriginalXmlMap: Map<string, string>,
+  whitelist: WhitelistMap,
+  targetOrg: string,
+  repoPath: string,
+  startingCommit: string,
+  dryRun: boolean,
+  onStaged: (staged: boolean) => void
+): void {
+  const confirmedUninstalledNs = new Set<string>();
+  for (const [key, installed] of namespaceCache) {
+    if (!installed && key.startsWith(`${targetOrg}:`)) {
+      confirmedUninstalledNs.add(key.slice(targetOrg.length + 1));
+    }
+  }
+  if (confirmedUninstalledNs.size === 0) return;
+
+  for (const item of activeItems) {
+    if (item.done) continue;
+
+    const existingResult = itemNsResults.get(item.filePath);
+    const baseXml = existingResult?.nsXml ?? readFileWithRetry(item.filePath);
+    const rootNode = existingResult?.rootNode ?? getRootNodeName(baseXml);
+    let sweepXml = baseXml;
+    const sweepRefs: RemovedRef[] = existingResult?.nsRefs ? [...existingResult.nsRefs] : [];
+    let sweptAny = false;
+
+    for (const ns of confirmedUninstalledNs) {
+      if (sweepRefs.some((r) => r.name === ns)) continue; // already swept in per-item pass
+
+      const hasWhitelisted = Object.values(whitelist)
+        .flat()
+        .some((v) => v.startsWith(`${ns}__`) || v.includes(`.${ns}__`));
+      if (hasWhitelisted) continue;
+
+      const { updated, removed } = resolveNsRemoval(sweepXml, ns, item.filePath);
+      if (removed) {
+        sweepXml = updated;
+        sweepRefs.push({
+          type: 'namespace',
+          name: ns,
+          label: `[NS:${ns}] bulk-removed`,
+          deployError: `Namespace ${ns} not installed in org — cross-item sweep`,
+        });
+        log(`   [NS Sweep] Removed ALL ${ns}__ refs from ${item.itemName}`);
+        sweptAny = true;
+      }
+    }
+
+    if (!sweptAny) continue;
+
+    itemNsResults.set(item.filePath, { nsXml: sweepXml, nsRefs: sweepRefs, rootNode });
+
+    try {
+      const relPath = path.relative(repoPath, item.filePath).replace(/\\/g, '/');
+      const originalContent = execSync(`git show "${startingCommit}:${relPath}"`, { cwd: repoPath }).toString();
+      let nsOnlyContent = originalContent;
+      for (const ref of sweepRefs) {
+        const result = applyRefToXml(nsOnlyContent, ref, item.filePath);
+        if (result?.removed) nsOnlyContent = result.updated;
+      }
+      nsOriginalXmlMap.set(item.filePath, nsOnlyContent);
+    } catch {
+      /* file may not exist in git at startingCommit — skip */
+    }
+
+    if (!dryRun) {
+      saveXmlPreserved(sweepXml, item.filePath);
+      try {
+        execSync(`git add "${item.filePath}"`, { cwd: repoPath });
+        onStaged(true);
+      } catch {
+        log(`   git add failed for namespace sweep: ${item.itemName}`);
+      }
+    }
+  }
+}
+
 async function applyManagedRefsPass(
   log: (msg: string) => void,
   activeItems: BatchItem[],
@@ -3059,6 +3146,24 @@ async function applyManagedRefsPass(
       }
     }
   }
+
+  // ── Cross-item namespace sweep ──────────────────────────────────────────────
+  // Sweep ALL active items for every namespace confirmed not installed above.
+  // Extracted to keep applyManagedRefsPass under the complexity limit.
+  applyCrossItemNamespaceSweep(
+    log,
+    activeItems,
+    itemNsResults,
+    nsOriginalXmlMap,
+    whitelist,
+    targetOrg,
+    repoPath,
+    startingCommit,
+    dryRun,
+    (staged) => {
+      managedRefsStaged = managedRefsStaged || staged;
+    }
+  );
 
   if (!dryRun && managedRefsStaged) {
     const staged = [...itemNsResults.values()].filter((v) => v.nsRefs.length > 0);
