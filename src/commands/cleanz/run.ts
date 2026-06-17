@@ -3536,9 +3536,14 @@ async function runBatchDeploy(
   allNsModifiedFiles: string[];
   lastNsCommitMsg: string | null;
   nsOriginalXmlMap: Map<string, string>;
+  postDedupCommit: string;
 }> {
   validateBatchItems(log, batchItems);
   preRunDeduplicateBlocks(log, batchItems, repoPath, dryRun);
+  // Re-read HEAD after the dedup commit so the squash baseline excludes dedup changes.
+  // Without this, git reset --soft startingCommit would undo the dedup commit too,
+  // folding exact-duplicate removals into the missing-ref commit.
+  const postDedupCommit = dryRun ? startingCommit : execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
 
   const MAX_EMPTY_RETRIES = 5;
   let consecutiveEmptyRetries = 0;
@@ -3651,7 +3656,7 @@ async function runBatchDeploy(
         verbose,
         dryRun,
         promotionData,
-        startingCommit
+        postDedupCommit
       );
 
     if (lastManagedRefsCommit) overallLastManagedRefsCommit = lastManagedRefsCommit;
@@ -3689,6 +3694,7 @@ async function runBatchDeploy(
     allNsModifiedFiles,
     lastNsCommitMsg,
     nsOriginalXmlMap: allNsOriginalXmlMap,
+    postDedupCommit,
   };
 }
 
@@ -4297,7 +4303,7 @@ export default class DeployAndFix extends SfCommand<void> {
     log('######################################################');
 
     // eslint-disable-next-line no-await-in-loop
-    const { summary, allNsModifiedFiles, lastNsCommitMsg, nsOriginalXmlMap } = await runBatchDeploy(
+    const { summary, allNsModifiedFiles, lastNsCommitMsg, nsOriginalXmlMap, postDedupCommit } = await runBatchDeploy(
       log,
       batchItems,
       targetOrg,
@@ -4442,15 +4448,15 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Total deploy calls   : ${totalDeploys.value} / ${MAX_TOTAL_DEPLOYS}`);
 
     // ================= SQUASH MISSING-REF COMMITS =================
-    // Always resets to startingCommit so individual per-item commits are never left
-    // in history. NS/managed-ref files are re-committed first (if any), then all
-    // remaining missing-ref changes are squashed into one commit.
+    // Resets to postDedupCommit (HEAD after the dedup pre-pass commit) so the dedup
+    // commit stays separate. NS/managed-ref files are re-committed first (Phase 1),
+    // then all remaining missing-ref changes are squashed into one commit (Phase 2).
     if (dryRun) {
       log('\nDry run — no commits were made, skipping squash.');
     } else {
       squashMissingRefCommits(
         log,
-        startingCommit,
+        postDedupCommit,
         allNsModifiedFiles,
         lastNsCommitMsg,
         nsOriginalXmlMap,
