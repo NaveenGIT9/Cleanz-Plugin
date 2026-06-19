@@ -2541,6 +2541,49 @@ export function deduplicateXmlBlocks(xmlContent: string): { updated: string; rem
   return { updated, removedCount };
 }
 
+// ===============================================================
+// MALFORMED TAG FIXER
+// Handles two merge-artifact patterns that cause SF XML parse errors:
+//
+//   Pattern 1 — duplicate opening tag:
+//     <classAccesses>
+//     <classAccesses>        ← remove the second one
+//         <apexClass>Foo</apexClass>
+//
+//   Pattern 2 — missing opening tag:
+//     </classAccesses>
+//         <apexClass>Bar</apexClass>   ← insert <classAccesses> before this
+//         <enabled>true</enabled>
+//     </classAccesses>
+// ===============================================================
+
+export function fixMalformedXmlTags(xmlContent: string): { updated: string; fixedCount: number } {
+  let updated = xmlContent;
+  let fixedCount = 0;
+  const esc = (s: string): string => s.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+
+  for (const { blockTag, keyTag } of DEDUP_BLOCKS) {
+    const bt = esc(blockTag);
+    const kt = esc(keyTag);
+
+    // Pattern 1: duplicate consecutive opening tag on the very next line
+    const dupOpen = new RegExp(`([ \\t]*<${bt}>[ \\t]*\\r?\\n)[ \\t]*<${bt}>`, 'g');
+    updated = updated.replace(dupOpen, (_m, first: string) => {
+      fixedCount++;
+      return first;
+    });
+
+    // Pattern 2: missing opening tag — closing tag immediately followed by a child key element
+    const missingOpen = new RegExp(`([ \\t]*)<\\/${bt}>([ \\t]*\\r?\\n)([ \\t]*)<${kt}>`, 'g');
+    updated = updated.replace(missingOpen, (_m, closingIndent: string, nl: string, childIndent: string) => {
+      fixedCount++;
+      return `${closingIndent}</${blockTag}>${nl}${closingIndent}<${blockTag}>${nl}${childIndent}<${keyTag}>`;
+    });
+  }
+
+  return { updated, fixedCount };
+}
+
 function readFileWithRetry(filePath: string, retries = 5, delayMs = 500): string {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -3477,31 +3520,37 @@ function preRunDeduplicateBlocks(
 ): void {
   const modifiedFiles: string[] = [];
   let totalRemoved = 0;
+  let totalTagFixes = 0;
   for (const item of batchItems) {
     if (!fs.existsSync(item.filePath)) continue;
     const srcXml = readFileWithRetry(item.filePath);
-    const { updated, removedCount } = deduplicateXmlBlocks(srcXml);
-    if (removedCount > 0) {
-      writeFileWithRetry(item.filePath, updated);
+    const { updated: afterDedup, removedCount } = deduplicateXmlBlocks(srcXml);
+    const { updated: afterTagFix, fixedCount } = fixMalformedXmlTags(afterDedup);
+    if (removedCount > 0 || fixedCount > 0) {
+      writeFileWithRetry(item.filePath, afterTagFix);
       modifiedFiles.push(item.filePath);
       totalRemoved += removedCount;
-      log(`[Pre-run] ${item.itemName}: removed ${removedCount} exact duplicate XML block(s)`);
+      totalTagFixes += fixedCount;
+      const parts: string[] = [];
+      if (removedCount > 0) parts.push(`removed ${removedCount} exact duplicate block(s)`);
+      if (fixedCount > 0) parts.push(`fixed ${fixedCount} malformed tag(s)`);
+      log(`[Pre-run] ${item.itemName}: ${parts.join(', ')}`);
     }
   }
   if (modifiedFiles.length === 0) return;
   if (dryRun) {
-    log(`[Pre-run] Dry run — skipped commit for ${modifiedFiles.length} deduplicated file(s).`);
+    log(`[Pre-run] Dry run — skipped commit for ${modifiedFiles.length} file(s).`);
     return;
   }
   try {
     for (const f of modifiedFiles) execSync(`git add "${f}"`, { cwd: repoPath });
-    execSync(
-      `git commit -m "Auto-fix: remove ${totalRemoved} exact duplicate XML block(s) across ${modifiedFiles.length} file(s)"`,
-      { cwd: repoPath }
-    );
-    log(`[Pre-run] Committed deduplication: ${totalRemoved} block(s) removed across ${modifiedFiles.length} file(s).`);
+    const parts: string[] = [];
+    if (totalRemoved > 0) parts.push(`remove ${totalRemoved} exact duplicate block(s)`);
+    if (totalTagFixes > 0) parts.push(`fix ${totalTagFixes} malformed XML tag(s)`);
+    execSync(`git commit -m "Auto-fix: ${parts.join(', ')} across ${modifiedFiles.length} file(s)"`, { cwd: repoPath });
+    log(`[Pre-run] Committed: ${parts.join(', ')} across ${modifiedFiles.length} file(s).`);
   } catch (e) {
-    log(`[Pre-run] Warning: deduplication commit failed — ${String(e)}`);
+    log(`[Pre-run] Warning: pre-run fix commit failed — ${String(e)}`);
   }
 }
 
