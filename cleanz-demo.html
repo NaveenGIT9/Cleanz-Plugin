@@ -1,0 +1,1594 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CleanZ — Demo Overview</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        background: #ffffff;
+        color: #1e293b;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      /* ── HEADER ── */
+      .hero {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 60%, #0369a1 100%);
+        color: #fff;
+        padding: 48px 60px 40px;
+      }
+      .hero-badge {
+        display: inline-block;
+        background: rgba(14, 165, 233, 0.25);
+        border: 1px solid rgba(14, 165, 233, 0.5);
+        color: #7dd3fc;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        padding: 4px 12px;
+        border-radius: 20px;
+        margin-bottom: 14px;
+      }
+      .hero h1 {
+        font-size: 36px;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        margin-bottom: 8px;
+      }
+      .hero h1 span {
+        color: #38bdf8;
+      }
+      .hero p {
+        color: #94a3b8;
+        font-size: 15px;
+        max-width: 680px;
+      }
+      .hero-tags {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+        flex-wrap: wrap;
+      }
+      .hero-tag {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #cbd5e1;
+        font-size: 12px;
+        padding: 4px 12px;
+        border-radius: 6px;
+      }
+
+      /* ── LAYOUT ── */
+      .container {
+        max-width: 1060px;
+        margin: 0 auto;
+        padding: 0 40px;
+      }
+      .section {
+        padding: 44px 0 36px;
+        border-bottom: 1px solid #e2e8f0;
+      }
+      .section:last-child {
+        border-bottom: none;
+      }
+
+      .section-label {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: #0369a1;
+        margin-bottom: 6px;
+      }
+      .section-title {
+        font-size: 22px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 12px;
+      }
+      .section-desc {
+        color: #475569;
+        max-width: 780px;
+        margin-bottom: 24px;
+      }
+
+      /* ── FLOW DIAGRAM ── */
+      .flow {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        flex-wrap: wrap;
+        margin: 28px 0;
+      }
+      .flow-step {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        min-width: 120px;
+        flex: 1;
+      }
+      .flow-box {
+        width: 100%;
+        padding: 10px 8px;
+        border-radius: 10px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.4;
+        position: relative;
+      }
+      .flow-box.red {
+        background: #fef2f2;
+        border: 1.5px solid #fca5a5;
+        color: #b91c1c;
+      }
+      .flow-box.amber {
+        background: #fffbeb;
+        border: 1.5px solid #fcd34d;
+        color: #92400e;
+      }
+      .flow-box.blue {
+        background: #eff6ff;
+        border: 1.5px solid #93c5fd;
+        color: #1d4ed8;
+      }
+      .flow-box.green {
+        background: #f0fdf4;
+        border: 1.5px solid #86efac;
+        color: #15803d;
+      }
+      .flow-box.slate {
+        background: #f8fafc;
+        border: 1.5px solid #cbd5e1;
+        color: #475569;
+      }
+      .flow-box.purple {
+        background: #faf5ff;
+        border: 1.5px solid #c4b5fd;
+        color: #6d28d9;
+      }
+      .flow-icon {
+        font-size: 20px;
+        margin-bottom: 2px;
+      }
+      .flow-label {
+        font-size: 10px;
+        color: #94a3b8;
+        text-align: center;
+      }
+      .flow-arrow {
+        font-size: 18px;
+        color: #94a3b8;
+        padding: 0 4px;
+        flex-shrink: 0;
+        align-self: flex-start;
+        margin-top: 28px;
+      }
+      .flow-arrow.no {
+        color: #ef4444;
+      }
+      .flow-arrow.yes {
+        color: #16a34a;
+      }
+
+      /* ── CATEGORY CARDS ── */
+      .cards {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-top: 16px;
+      }
+      .cards.three {
+        grid-template-columns: 1fr 1fr 1fr;
+      }
+      .card {
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 18px 20px;
+        background: #f8fafc;
+        transition: box-shadow 0.15s;
+      }
+      .card:hover {
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.07);
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .card-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        flex-shrink: 0;
+      }
+      .card-icon.blue {
+        background: #dbeafe;
+      }
+      .card-icon.green {
+        background: #dcfce7;
+      }
+      .card-icon.amber {
+        background: #fef3c7;
+      }
+      .card-icon.red {
+        background: #fee2e2;
+      }
+      .card-icon.purple {
+        background: #ede9fe;
+      }
+      .card-icon.teal {
+        background: #ccfbf1;
+      }
+      .card h3 {
+        font-size: 14px;
+        font-weight: 700;
+        color: #0f172a;
+      }
+      .card p {
+        font-size: 12.5px;
+        color: #64748b;
+        margin-top: 4px;
+        line-height: 1.5;
+      }
+
+      /* ── TAG PILLS ── */
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .tag {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 9px;
+        border-radius: 20px;
+        border: 1px solid;
+      }
+      .tag.blue {
+        background: #eff6ff;
+        color: #1d4ed8;
+        border-color: #bfdbfe;
+      }
+      .tag.green {
+        background: #f0fdf4;
+        color: #15803d;
+        border-color: #bbf7d0;
+      }
+      .tag.amber {
+        background: #fffbeb;
+        color: #92400e;
+        border-color: #fde68a;
+      }
+      .tag.red {
+        background: #fef2f2;
+        color: #991b1b;
+        border-color: #fecaca;
+      }
+      .tag.purple {
+        background: #faf5ff;
+        color: #6d28d9;
+        border-color: #ddd6fe;
+      }
+      .tag.slate {
+        background: #f1f5f9;
+        color: #475569;
+        border-color: #cbd5e1;
+      }
+
+      /* ── TABLE ── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-top: 12px;
+      }
+      th {
+        background: #f1f5f9;
+        text-align: left;
+        padding: 9px 12px;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #64748b;
+        border-bottom: 2px solid #e2e8f0;
+      }
+      td {
+        padding: 9px 12px;
+        border-bottom: 1px solid #f1f5f9;
+        vertical-align: top;
+        color: #374151;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      tr:hover td {
+        background: #f8fafc;
+      }
+      code {
+        background: #f1f5f9;
+        border: 1px solid #e2e8f0;
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-family: 'Cascadia Code', 'Fira Code', monospace;
+        font-size: 11.5px;
+        color: #0369a1;
+      }
+
+      /* ── CALLOUT ── */
+      .callout {
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 16px 0;
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      .callout.blue {
+        background: #eff6ff;
+        border-left: 3px solid #3b82f6;
+      }
+      .callout.green {
+        background: #f0fdf4;
+        border-left: 3px solid #22c55e;
+      }
+      .callout.amber {
+        background: #fffbeb;
+        border-left: 3px solid #f59e0b;
+      }
+      .callout.red {
+        background: #fef2f2;
+        border-left: 3px solid #ef4444;
+      }
+      .callout.purple {
+        background: #faf5ff;
+        border-left: 3px solid #a855f7;
+      }
+      .callout-icon {
+        font-size: 18px;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+      .callout-title {
+        font-weight: 700;
+        font-size: 13px;
+        margin-bottom: 3px;
+      }
+      .callout-title.blue {
+        color: #1d4ed8;
+      }
+      .callout-title.green {
+        color: #15803d;
+      }
+      .callout-title.amber {
+        color: #92400e;
+      }
+      .callout-title.red {
+        color: #991b1b;
+      }
+      .callout-title.purple {
+        color: #6d28d9;
+      }
+      .callout p {
+        font-size: 13px;
+        color: #475569;
+      }
+
+      /* ── COMMIT PILL ── */
+      .commit-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: #0f172a;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-top: 14px;
+        flex-wrap: wrap;
+      }
+      .commit-sha {
+        font-family: monospace;
+        color: #7dd3fc;
+        font-size: 13px;
+        flex-shrink: 0;
+      }
+      .commit-msg {
+        color: #e2e8f0;
+        font-size: 13px;
+        flex: 1;
+      }
+      .commit-stat {
+        color: #4ade80;
+        font-size: 12px;
+        flex-shrink: 0;
+      }
+
+      /* ── TWO COL ── */
+      .two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        margin-top: 16px;
+      }
+
+      /* ── STEP LIST ── */
+      .steps {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .step {
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+      }
+      .step-num {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: #0369a1;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+      .step-body {
+        flex: 1;
+      }
+      .step-body strong {
+        font-size: 13.5px;
+        color: #0f172a;
+      }
+      .step-body p {
+        font-size: 13px;
+        color: #64748b;
+        margin-top: 2px;
+      }
+
+      /* ── SWEEP DIAGRAM ── */
+      .sweep-diagram {
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-top: 16px;
+      }
+      .sweep-header {
+        background: #0f172a;
+        color: #fff;
+        padding: 12px 18px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .sweep-body {
+        padding: 18px;
+        background: #f8fafc;
+      }
+      .sweep-files {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .sweep-file {
+        border: 1px solid;
+        border-radius: 8px;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .sweep-file.origin {
+        background: #eff6ff;
+        border-color: #93c5fd;
+        color: #1d4ed8;
+      }
+      .sweep-file.swept {
+        background: #f0fdf4;
+        border-color: #86efac;
+        color: #15803d;
+      }
+      .sweep-file.profile {
+        background: #faf5ff;
+        border-color: #c4b5fd;
+        color: #6d28d9;
+      }
+      .sweep-arrow-down {
+        text-align: center;
+        color: #94a3b8;
+        font-size: 20px;
+        padding: 4px 0;
+      }
+
+      /* ── NS BLOCK ── */
+      .ns-block {
+        background: #fffbeb;
+        border: 1px solid #fcd34d;
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-top: 14px;
+      }
+      .ns-block h4 {
+        color: #92400e;
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      .ns-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .ns-item {
+        background: #fff;
+        border: 1px solid #fde68a;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        color: #78350f;
+        font-family: monospace;
+      }
+
+      /* ── PSG SECTION ── */
+      .psg-row {
+        display: flex;
+        gap: 16px;
+        margin-top: 14px;
+        flex-wrap: wrap;
+      }
+      .psg-box {
+        flex: 1;
+        min-width: 220px;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .psg-box-head {
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .psg-box-head.blue {
+        background: #dbeafe;
+        color: #1d4ed8;
+      }
+      .psg-box-head.green {
+        background: #dcfce7;
+        color: #15803d;
+      }
+      .psg-box-head.amber {
+        background: #fef3c7;
+        color: #92400e;
+      }
+      .psg-box-body {
+        padding: 12px 14px;
+        background: #f8fafc;
+        font-size: 12.5px;
+        color: #475569;
+      }
+      .psg-box-body code {
+        display: block;
+        margin: 4px 0;
+      }
+
+      /* ── FOOTER ── */
+      .footer {
+        background: #0f172a;
+        color: #475569;
+        text-align: center;
+        padding: 24px;
+        font-size: 12px;
+        margin-top: 40px;
+      }
+      .footer span {
+        color: #7dd3fc;
+      }
+
+      /* ── COMPARE TABLE ── */
+      .compare {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-top: 16px;
+      }
+      .compare-box {
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .compare-head {
+        padding: 12px 16px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .compare-head.sf {
+        background: #eff6ff;
+        color: #1d4ed8;
+      }
+      .compare-head.copado {
+        background: #f0fdf4;
+        color: #15803d;
+      }
+      .compare-body {
+        padding: 14px 16px;
+        border: 1px solid #e2e8f0;
+        border-top: none;
+        border-radius: 0 0 12px 12px;
+        background: #fff;
+      }
+      .compare-item {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        margin-bottom: 8px;
+        font-size: 12.5px;
+        color: #475569;
+      }
+      .compare-item:last-child {
+        margin-bottom: 0;
+      }
+      .dot-red {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #ef4444;
+        flex-shrink: 0;
+        margin-top: 6px;
+      }
+      .dot-green {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #22c55e;
+        flex-shrink: 0;
+        margin-top: 6px;
+      }
+
+      @media (max-width: 700px) {
+        .cards,
+        .cards.three,
+        .two-col,
+        .compare,
+        .ns-grid {
+          grid-template-columns: 1fr;
+        }
+        .flow {
+          gap: 4px;
+        }
+        .hero {
+          padding: 32px 24px;
+        }
+        .container {
+          padding: 0 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ═══════════════════════════════════════════════════
+     HERO
+════════════════════════════════════════════════════ -->
+    <div class="hero">
+      <div class="hero-badge">Salesforce DevOps Utility</div>
+      <h1>Clean<span>Z</span></h1>
+      <p>
+        An intelligent Salesforce metadata cleaner that is <strong style="color: #38bdf8">error-driven</strong> — reads
+        every deployment failure from the org, automatically resolves invalid references in Permission Sets, Profiles,
+        and PSGs, and loops until clean — before they break your Copado promotion.
+      </p>
+      <div class="hero-tags">
+        <span class="hero-tag">PermissionSet</span>
+        <span class="hero-tag">Profile</span>
+        <span class="hero-tag">PermissionSetGroup</span>
+        <span class="hero-tag" style="opacity: 0.6" title="NS bulk removal &amp; repo sweep only"
+          >Layout (NS only)</span
+        >
+        <span class="hero-tag" style="opacity: 0.6" title="NS bulk removal &amp; repo sweep only"
+          >ReportType (NS only)</span
+        >
+        <span class="hero-tag">Copado-Aware</span>
+        <span class="hero-tag">Namespace Detection</span>
+        <span class="hero-tag">Cross-Sweep</span>
+      </div>
+    </div>
+
+    <div class="container">
+      <!-- ═══════════════════════════════════════════════════
+     WHY CLEANZ
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">The Problem</div>
+        <div class="section-title">Why CleanZ Exists</div>
+        <p class="section-desc">
+          When metadata is promoted between Salesforce orgs, references to missing components (fields, classes,
+          packages) cause deployment failures. Manually hunting each error is slow and error-prone. CleanZ automates the
+          entire fix loop.
+        </p>
+
+        <!-- REAL-WORLD SCENARIO -->
+        <div
+          style="
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 22px 24px;
+            margin-bottom: 24px;
+          "
+        >
+          <div
+            style="
+              font-size: 11px;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: 1px;
+              color: #0369a1;
+              margin-bottom: 10px;
+            "
+          >
+            Real-World Scenario — Org Drift
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 0">
+            <!-- timeline -->
+            <div style="display: flex; gap: 14px; align-items: flex-start">
+              <div style="display: flex; flex-direction: column; align-items: center; gap: 0; flex-shrink: 0">
+                <div
+                  style="
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    background: #0369a1;
+                    color: #fff;
+                    font-size: 12px;
+                    font-weight: 700;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                  "
+                >
+                  1
+                </div>
+                <div style="width: 2px; flex: 1; background: #e2e8f0; min-height: 24px"></div>
+              </div>
+              <div style="padding-bottom: 18px">
+                <div style="font-size: 13px; font-weight: 700; color: #0f172a">Feature branch created from master</div>
+                <div style="font-size: 12.5px; color: #64748b; margin-top: 2px">
+                  CPQ User PermissionSet has <strong>20 field permissions</strong> on the Lead object — all valid, all
+                  present in DEV.
+                </div>
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 14px; align-items: flex-start">
+              <div style="display: flex; flex-direction: column; align-items: center; gap: 0; flex-shrink: 0">
+                <div
+                  style="
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    background: #dc2626;
+                    color: #fff;
+                    font-size: 12px;
+                    font-weight: 700;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                  "
+                >
+                  2
+                </div>
+                <div style="width: 2px; flex: 1; background: #e2e8f0; min-height: 24px"></div>
+              </div>
+              <div style="padding-bottom: 18px">
+                <div style="font-size: 13px; font-weight: 700; color: #0f172a">
+                  Meanwhile — someone deletes those 20 fields from QA
+                </div>
+                <div style="font-size: 12.5px; color: #64748b; margin-top: 2px">
+                  A different story or admin action removes the fields from QA. The feature branch has no way to know
+                  this happened.
+                </div>
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 14px; align-items: flex-start">
+              <div style="display: flex; flex-direction: column; align-items: center; gap: 0; flex-shrink: 0">
+                <div
+                  style="
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    background: #dc2626;
+                    color: #fff;
+                    font-size: 12px;
+                    font-weight: 700;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                  "
+                >
+                  3
+                </div>
+                <div style="width: 2px; flex: 1; background: #e2e8f0; min-height: 24px"></div>
+              </div>
+              <div style="padding-bottom: 18px">
+                <div style="font-size: 13px; font-weight: 700; color: #0f172a">
+                  PS story promotes DEV → QA via Copado
+                </div>
+                <div style="font-size: 12.5px; color: #dc2626; margin-top: 2px; font-family: monospace">
+                  ✗ no CustomField named Lead.CPQ_Field1__c found<br />✗ no CustomField named Lead.CPQ_Field2__c
+                  found<br />✗ … × 20 errors — deployment blocked
+                </div>
+              </div>
+            </div>
+
+            <div style="display: flex; gap: 14px; align-items: flex-start">
+              <div style="display: flex; flex-direction: column; align-items: center; gap: 0; flex-shrink: 0">
+                <div
+                  style="
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 50%;
+                    background: #15803d;
+                    color: #fff;
+                    font-size: 12px;
+                    font-weight: 700;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                  "
+                >
+                  4
+                </div>
+              </div>
+              <div>
+                <div style="font-size: 13px; font-weight: 700; color: #0f172a">
+                  CleanZ runs — resolves all 20 in one pass
+                </div>
+                <div style="font-size: 12.5px; color: #64748b; margin-top: 2px">
+                  Checks promotion JSON — those 20 fields are NOT in the same promotion bundle → removes all 20
+                  <code style="font-size: 11px; background: #f1f5f9; padding: 1px 5px; border-radius: 3px"
+                    >&lt;fieldPermissions&gt;</code
+                  >
+                  blocks → squashed commit → promotion succeeds.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- WHEN IS CLEANZ USEFUL -->
+        <div
+          style="
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            border-radius: 12px;
+            padding: 18px 22px;
+            margin-bottom: 24px;
+          "
+        >
+          <div
+            style="
+              font-size: 11px;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: 1px;
+              color: #15803d;
+              margin-bottom: 10px;
+            "
+          >
+            When Is CleanZ Useful?
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px">
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span
+              ><span>Fields / objects deleted from destination org after the feature branch was created</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span><span>Managed package (CPQ, OmniStudio, etc.) installed in DEV but not in QA/UAT</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span><span>Apex classes / pages removed from the org but still referenced in a PS/Profile</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span><span>PS/Profile accumulated stale refs over many merges — one run cleans everything</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span><span>User license differences between orgs causing permission flag rejections</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 12.5px; color: #166534">
+              <span>✓</span
+              ><span>Duplicate XML blocks from Copado auto-merging the same component from two stories</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     HOW IT WORKS — FLOW
+════════════════════════════════════════════════════ -->
+      <div class="section" style="padding-bottom: 28px">
+        <div class="section-label">Inputs</div>
+        <div class="section-title">What You Provide to Run CleanZ</div>
+        <div style="display: flex; gap: 16px; flex-wrap: wrap; margin-top: 4px">
+          <div
+            style="
+              flex: 1;
+              min-width: 240px;
+              border: 1.5px solid #93c5fd;
+              border-radius: 10px;
+              padding: 16px 20px;
+              background: #eff6ff;
+            "
+          >
+            <div
+              style="
+                font-size: 12px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.8px;
+                color: #1d4ed8;
+                margin-bottom: 6px;
+              "
+            >
+              1 — Promotion Changes JSON
+            </div>
+            <p style="font-size: 13px; color: #1e40af">
+              The Copado promotion package JSON serves two purposes for CleanZ:
+            </p>
+            <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 5px">
+              <div style="font-size: 12.5px; color: #1e40af; display: flex; gap: 7px">
+                <span style="font-weight: 700; flex-shrink: 0">①</span
+                ><span
+                  ><strong>Source of work</strong> — CleanZ reads this to identify which PermSets, Profiles, and PSGs
+                  are part of this promotion and need to be cleaned.</span
+                >
+              </div>
+              <div style="font-size: 12.5px; color: #1e40af; display: flex; gap: 7px">
+                <span style="font-weight: 700; flex-shrink: 0">②</span
+                ><span
+                  ><strong>Whitelist</strong> — any component listed in this JSON is protected. CleanZ will never remove
+                  a ref to something that's being deployed in the same promotion.</span
+                >
+              </div>
+            </div>
+          </div>
+          <div
+            style="
+              flex: 1;
+              min-width: 240px;
+              border: 1.5px solid #86efac;
+              border-radius: 10px;
+              padding: 16px 20px;
+              background: #f0fdf4;
+            "
+          >
+            <div
+              style="
+                font-size: 12px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.8px;
+                color: #15803d;
+                margin-bottom: 6px;
+              "
+            >
+              2 — Target Org Alias
+            </div>
+            <p style="font-size: 13px; color: #166534">
+              The SFDX alias of the destination org (e.g.
+              <code style="font-size: 12px; background: #dcfce7; padding: 1px 6px; border-radius: 3px">rbkpipeqa</code
+              >). CleanZ authenticates against this org to run dry-run validations and query installed packages and org
+              components.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-label">Core Logic</div>
+        <div class="section-title">Error → Whitelist Check → Remove → Commit</div>
+        <p class="section-desc">
+          For every deployment error CleanZ intercepts, it checks whether the missing component is part of the current
+          promotion before deciding to remove it.
+        </p>
+
+        <div class="flow">
+          <div class="flow-step">
+            <div class="flow-box red">
+              <div class="flow-icon">🔴</div>
+              Salesforce Deployment Error
+            </div>
+            <div class="flow-label">e.g. no CustomField<br />named Account.Score__c found</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-box amber">
+              <div class="flow-icon">📋</div>
+              Check Promotion JSON (Whitelist)
+            </div>
+            <div class="flow-label">Is this component being<br />deployed in this promotion?</div>
+          </div>
+          <div class="flow-arrow yes">→ YES</div>
+          <div class="flow-step">
+            <div class="flow-box slate">
+              <div class="flow-icon">⏭</div>
+              SKIP — Keep the ref
+            </div>
+            <div class="flow-label">Component will exist after<br />promotion completes</div>
+          </div>
+          <div style="width: 100%; height: 8px"></div>
+          <div class="flow-step" style="visibility: hidden"></div>
+          <div class="flow-arrow no">→ NO</div>
+          <div class="flow-step">
+            <div class="flow-box blue">
+              <div class="flow-icon">✂</div>
+              Remove from XML
+            </div>
+            <div class="flow-label">Strip the offending block<br />from permset / profile file</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-box purple">
+              <div class="flow-icon">🔁</div>
+              Re-validate (Loop)
+            </div>
+            <div class="flow-label">Redeploy dry-run to<br />surface next error</div>
+          </div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-step">
+            <div class="flow-box green">
+              <div class="flow-icon">✅</div>
+              Clean — Squashed Commit
+            </div>
+            <div class="flow-label">All fixes in one commit<br />on promotion branch</div>
+          </div>
+        </div>
+
+        <div class="callout green">
+          <div class="callout-icon">💡</div>
+          <div>
+            <div class="callout-title green">Squashed into One Merge Commit</div>
+            <p>
+              No matter how many iterations the loop runs — 5 fixes or 50 — all removals are squashed into a single
+              clean commit on the promotion branch. The git history stays tidy and traceable.
+            </p>
+            <div class="commit-row">
+              <div class="commit-sha">a3f9c12</div>
+              <div class="commit-msg">CleanZ: Remove 37 missing refs from 4 PermissionSets, 2 Profiles</div>
+              <div class="commit-stat">+0 −1,284 lines</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     CATEGORY 1 — MISSING REFS
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Category 1</div>
+        <div class="section-title">Missing Component References — Auto-Fixed</div>
+        <p class="section-desc">
+          These are removed automatically when Salesforce reports them as missing. The entire XML block is stripped.
+          Applies to Permission Sets and Profiles.
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Component Type</th>
+              <th>XML Block Removed</th>
+              <th>Salesforce Error Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>Custom Fields</strong></td>
+              <td><code>&lt;fieldPermissions&gt;</code></td>
+              <td><code>no CustomField named Account.Score__c found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Apex Classes</strong></td>
+              <td><code>&lt;classAccesses&gt;</code></td>
+              <td><code>no ApexClass named MyBatchJob found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Apex Pages</strong></td>
+              <td><code>&lt;pageAccesses&gt;</code></td>
+              <td><code>no ApexPage named LegacyPage found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Custom Tabs</strong></td>
+              <td><code>&lt;tabSettings&gt;</code> / <code>&lt;tabVisibilities&gt;</code></td>
+              <td><code>no CustomTab named OldObj__c found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Custom Objects</strong> <span style="color: #ef4444; font-size: 11px">★ cascades</span></td>
+              <td>
+                <code>&lt;objectPermissions&gt;</code> + all <code>&lt;fieldPermissions&gt;</code> for that object +
+                <code>&lt;layoutAssignments&gt;</code>
+              </td>
+              <td><code>no CustomObject named OldObj__c found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Applications</strong></td>
+              <td><code>&lt;applicationVisibilities&gt;</code></td>
+              <td><code>no CustomApplication named OldApp found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Flows</strong></td>
+              <td><code>&lt;flowAccesses&gt;</code></td>
+              <td><code>no Flow named My_Old_Flow found</code></td>
+            </tr>
+            <tr>
+              <td>
+                <strong>Layout Assignments</strong>
+                <span style="color: #94a3b8; font-size: 11px">(in Profile XML)</span>
+              </td>
+              <td><code>&lt;layoutAssignments&gt;</code> in Profile</td>
+              <td>
+                <code>no Layout named Account-Old Layout found</code> — error from deploying the Profile, not the Layout
+                file
+              </td>
+            </tr>
+            <tr>
+              <td><strong>FlexiPages</strong></td>
+              <td><code>&lt;profileActionOverrides&gt;</code></td>
+              <td><code>The OldPage Lightning page doesn't exist or isn't valid</code></td>
+            </tr>
+            <tr>
+              <td><strong>Custom Metadata Types</strong></td>
+              <td><code>&lt;customMetadataTypeAccesses&gt;</code></td>
+              <td><code>no CustomObject named Config__mdt found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Custom Permissions</strong></td>
+              <td><code>&lt;customPermissions&gt;</code></td>
+              <td><code>no CustomPermission named OldPerm found</code></td>
+            </tr>
+            <tr>
+              <td><strong>RecordType Visibilities</strong></td>
+              <td><code>&lt;recordTypeVisibilities&gt;</code></td>
+              <td><code>no RecordType named Account.OldRT found</code></td>
+            </tr>
+            <tr>
+              <td><strong>Profile Action Overrides — missing RecordType</strong></td>
+              <td><code>&lt;profileActionOverrides&gt;</code> (by recordType)</td>
+              <td>Detected by querying org before deploy — no error needed</td>
+            </tr>
+            <tr>
+              <td><strong>Profile Action Overrides — missing Object</strong></td>
+              <td><code>&lt;profileActionOverrides&gt;</code> (by pageOrSobjectType)</td>
+              <td>Detected by querying org's EntityDefinition before deploy</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout amber" style="margin-top: 14px">
+          <div class="callout-icon">⚠</div>
+          <div>
+            <div class="callout-title amber">Cascade Removal for Missing Objects</div>
+            <p>
+              When a custom object is missing, CleanZ removes not just the <code>&lt;objectPermissions&gt;</code> block
+              but also every <code>&lt;fieldPermissions&gt;</code> entry for that object's fields AND every
+              <code>&lt;layoutAssignments&gt;</code> block referencing that object — all in one pass.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     CATEGORY 2 — NAMESPACE BULK REMOVAL
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Category 2</div>
+        <div class="section-title">Namespace Bulk Removal</div>
+        <p class="section-desc">
+          When any error references a managed package component (e.g. <code>SBQQ__Field__c</code>), CleanZ checks if
+          that package's namespace is installed in the target org. If not — it bulk-removes every reference to that
+          namespace across ALL block types in one pass.
+        </p>
+
+        <div class="callout amber" style="margin-top: 4px">
+          <div class="callout-icon">📦</div>
+          <div>
+            <div class="callout-title amber">Example — CPQ (<code>SBQQ</code>) not installed in target org</div>
+            <p>
+              One error on any <code>SBQQ__</code> component triggers a single bulk pass — every reference to that
+              namespace across all block types in PermSet, Profile, PSG, Layout, and ReportType files is removed at
+              once. CleanZ queries <code>InstalledSubscriberPackage</code> once per run to confirm the package is
+              missing before acting.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     CATEGORY 3 — USER LICENSE ERRORS
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Category 3</div>
+        <div class="section-title">User License Errors — Surgical Fix</div>
+        <p class="section-desc">
+          Two distinct user-license errors — handled differently depending on what Salesforce actually reports.
+        </p>
+
+        <div class="two-col">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon red">🗑</div>
+              <h3>Unknown User Permission</h3>
+            </div>
+            <p>The permission name doesn't exist at all in the org's license edition.</p>
+            <div class="callout red" style="margin-top: 10px; padding: 10px 14px">
+              <div>
+                <div style="font-family: monospace; font-size: 12px; color: #991b1b">
+                  Unknown user permission: ManageDataCategories
+                </div>
+              </div>
+            </div>
+            <p style="margin-top: 8px">→ Entire <code>&lt;userPermissions&gt;</code> block is removed.</p>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon amber">✂</div>
+              <h3>License Doesn't Allow Flag</h3>
+            </div>
+            <p>Object is valid but a specific boolean flag exceeds the license tier.</p>
+            <div class="callout amber" style="margin-top: 10px; padding: 10px 14px">
+              <div>
+                <div style="font-family: monospace; font-size: 12px; color: #92400e">
+                  The user license doesn't allow the permission: View All Account
+                </div>
+              </div>
+            </div>
+            <p style="margin-top: 8px">
+              → Only <code>&lt;viewAllRecords&gt;true&lt;/viewAllRecords&gt;</code> removed. Rest of objectPermissions
+              block stays intact.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     CATEGORY 4 — MANUAL FIX ERRORS (DYNAMIC MASKING)
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Category 4</div>
+        <div class="section-title">Manual Fix Errors — Dynamic Masking</div>
+        <p class="section-desc">
+          Some errors cannot be safely auto-fixed — removing the block blindly could break org behavior. CleanZ
+          <strong>temporarily masks</strong> these blocks during the dry-run loop so other errors in the same file can
+          still be discovered and fixed. After the run, they are flagged clearly for manual resolution.
+        </p>
+
+        <div class="callout purple" style="margin-bottom: 18px">
+          <div class="callout-icon">🎭</div>
+          <div>
+            <div class="callout-title purple">What "Masking" Means</div>
+            <p>
+              The block is stripped from the XML only for the dry-run validation — it is <strong>not</strong> committed
+              to the branch. CleanZ re-validates without the masked block to surface all remaining errors. After the
+              run, the original file is preserved and the error is listed in the Conclusion report as "Needs Manual
+              Fix."
+            </p>
+          </div>
+        </div>
+
+        <div class="cards three">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon amber">🌐</div>
+              <h3>IP Login Ranges</h3>
+            </div>
+            <p>Org has IP range limits (IPv4/IPv6 count exceeded).</p>
+            <p style="margin-top: 6px"><strong>Error:</strong> <code>ip range / ipv4 limit exceeded</code></p>
+            <p style="margin-top: 6px">
+              <strong>Mask:</strong> <code>&lt;loginIpRanges&gt;</code> block temporarily hidden.
+            </p>
+            <p style="margin-top: 6px">
+              <strong>Why manual:</strong> IP ranges are an org-level security setting — requires deliberate
+              configuration, not blind removal.
+            </p>
+            <div class="tags" style="margin-top: 8px"><span class="tag amber">Needs Manual Fix</span></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon purple">🔗</div>
+              <h3>Object Permission Dependency</h3>
+            </div>
+            <p>A flag on an object depends on another permission being enabled.</p>
+            <p style="margin-top: 6px">
+              <strong>Error:</strong> <code>Permission View All Account depends on permission(s): Read Account</code>
+            </p>
+            <p style="margin-top: 6px">
+              <strong>Mask:</strong> Entire <code>&lt;objectPermissions&gt;</code> block for that object temporarily
+              hidden.
+            </p>
+            <p style="margin-top: 6px">
+              <strong>Why manual:</strong> The dependency chain needs deliberate resolution — can't just delete either
+              side.
+            </p>
+            <div class="tags" style="margin-top: 8px"><span class="tag purple">Needs Manual Fix</span></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon red">🔗</div>
+              <h3>User Permission Dependency</h3>
+            </div>
+            <p>A system permission depends on another system permission being present.</p>
+            <p style="margin-top: 6px">
+              <strong>Error:</strong> <code>Permission ViewAllData depends on permission(s): ModifyAllData</code>
+            </p>
+            <p style="margin-top: 6px">
+              <strong>Mask:</strong> The <code>&lt;userPermissions&gt;</code> block for that perm temporarily hidden.
+            </p>
+            <p style="margin-top: 6px">
+              <strong>Why manual:</strong> Removing ViewAllData without removing ModifyAllData (or vice-versa) could
+              leave the PS in an inconsistent state.
+            </p>
+            <div class="tags" style="margin-top: 8px"><span class="tag red">Needs Manual Fix</span></div>
+          </div>
+        </div>
+
+        <div class="callout blue" style="margin-top: 16px">
+          <div class="callout-icon">📄</div>
+          <div>
+            <div class="callout-title blue">Conclusion Report</div>
+            <p>
+              At the end of every CleanZ run, a <strong>Conclusion file</strong> is written to
+              <code>D:\CleanzConclusionErrors\</code> listing every manual-fix error by component name, the exact
+              Salesforce error, and the file path — so nothing is silently dropped.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     CROSS-SWEEP & REPO-WIDE SWEEP
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Efficiency Feature</div>
+        <div class="section-title">Cross-Sweep &amp; Repo-Wide Sweep</div>
+        <p class="section-desc">
+          When a missing ref is found in one file, the same removal is immediately applied to all other files in the
+          current batch — and then swept across the entire repo at the end.
+        </p>
+
+        <div class="two-col">
+          <div>
+            <h4 style="font-weight: 700; color: #0f172a; margin-bottom: 10px">⚡ Cross-Sweep (Same Run)</h4>
+            <p style="font-size: 13px; color: #475569; margin-bottom: 12px">
+              When <code>Account.Score__c</code> is found missing in <em>PermSet_A</em>, CleanZ immediately removes it
+              from every other PermSet and Profile in the same promotion batch — without waiting for them to
+              individually fail the dry-run.
+            </p>
+
+            <div class="sweep-diagram">
+              <div class="sweep-header">Batch: 4 files in promotion</div>
+              <div class="sweep-body">
+                <div class="sweep-files">
+                  <div class="sweep-file origin">🔴 PermSet_A — error found here</div>
+                  <div class="sweep-file swept">✓ PermSet_B — swept</div>
+                  <div class="sweep-file swept">✓ PermSet_C — swept</div>
+                  <div class="sweep-file profile">✓ Sales_Profile — swept</div>
+                </div>
+                <div class="sweep-arrow-down">↓</div>
+                <p style="font-size: 12px; color: #475569; text-align: center">
+                  All 4 files clean before re-validate — saves 3 dry-run iterations
+                </p>
+              </div>
+            </div>
+          </div>
+          <div>
+            <h4 style="font-weight: 700; color: #0f172a; margin-bottom: 10px">🌍 Repo-Wide Sweep (End of Run)</h4>
+            <p style="font-size: 13px; color: #475569; margin-bottom: 12px">
+              After all files in the batch are clean, CleanZ scans <strong>every</strong> PermSet, Profile, and PSG in
+              the entire repo and applies the same missing-ref removals. Layout and ReportType files are also included —
+              but <em>only</em> if namespace refs were removed during the run (NS-scoped sweep).
+            </p>
+
+            <div class="callout green">
+              <div class="callout-icon">🚀</div>
+              <div>
+                <div class="callout-title green">Future-Proofing Your Team</div>
+                <p style="font-size: 12.5px">
+                  If another developer later promotes a different story that touches <em>Sales_PSG_2</em> or
+                  <em>Finance_Profile</em>, those files are <strong>already clean</strong>. No repeat failures, no
+                  repeated CleanZ runs for the same deleted field. One run benefits the whole team's future promotions.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     EXACT DUPLICATE REMOVAL
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Structural Fix</div>
+        <div class="section-title">Exact Duplicate Block Removal</div>
+        <p class="section-desc">
+          Salesforce rejects files that contain duplicate XML blocks (e.g. the same field permission appearing twice).
+          CleanZ detects and deduplicates these before the first dry-run.
+        </p>
+
+        <div class="cards">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon blue">🔎</div>
+              <h3>What Gets Deduplicated</h3>
+            </div>
+            <p>
+              All major block types are checked for exact duplicates: <code>fieldPermissions</code>,
+              <code>classAccesses</code>, <code>objectPermissions</code>, <code>tabSettings</code>,
+              <code>flowAccesses</code>, <code>recordTypeVisibilities</code>, <code>customMetadataTypeAccesses</code>,
+              <code>customPermissions</code>, <code>categoryGroupVisibilities</code>.
+            </p>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-icon green">✓</div>
+              <h3>Common Cause</h3>
+            </div>
+            <p>
+              Merge conflicts resolved by keeping both sides, or Copado auto-merging the same component from two
+              different stories into the same file. CleanZ catches these silently before they cause a deployment
+              failure.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     PERMISSION SET GROUPS
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Special Handling</div>
+        <div class="section-title">Permission Set Groups (PSG)</div>
+        <p class="section-desc">
+          PSGs have unique behavior in Salesforce — after every deploy they enter a background
+          <em>recalculation</em> state. CleanZ handles this specifically.
+        </p>
+
+        <div class="psg-row">
+          <div class="psg-box">
+            <div class="psg-box-head blue">Step 1 — Fix Structure</div>
+            <div class="psg-box-body">
+              <p>Before deploying, CleanZ checks that <code>&lt;permissionSets&gt;</code> entries are:</p>
+              <code>✓ No duplicates</code>
+              <code>✓ Positioned after &lt;label&gt;</code>
+              <code>✓ Alphabetically sorted</code>
+              <p style="margin-top: 6px; font-size: 12px">
+                Salesforce throws <em>"Element permissionSets is duplicated at this location"</em> if these rules are
+                violated.
+              </p>
+            </div>
+          </div>
+          <div class="psg-box">
+            <div class="psg-box-head amber">Step 2 — Deploy &amp; Poll</div>
+            <div class="psg-box-body">
+              <p>After each PSG dry-run, CleanZ polls the org for recalculation status:</p>
+              <code>Updated → ✅ Continue</code>
+              <code>CalculationFailed → 🔁 Retry (transient)</code>
+              <code>Other → ⛔ Manual intervention</code>
+              <p style="margin-top: 6px; font-size: 12px">
+                Polls every 30s, waits up to 10 minutes for recalculation to complete before proceeding.
+              </p>
+            </div>
+          </div>
+          <div class="psg-box">
+            <div class="psg-box-head green">Step 3 — Verify PS Members Against Target Org</div>
+            <div class="psg-box-body">
+              <p>
+                Every PermissionSet listed inside the PSG is verified against the target org. Any PS that doesn't exist
+                in the org and isn't in the promotion JSON is removed from the PSG before deploying.
+              </p>
+              <p style="margin-top: 8px; font-size: 12px; color: #15803d; font-weight: 600">
+                Salesforce rejects a PSG if it references a PS that doesn't exist in the org.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════
+     COPADO BEHAVIOR MIMIC
+════════════════════════════════════════════════════ -->
+      <div class="section">
+        <div class="section-label">Key Design Decision</div>
+        <div class="section-title">Mimicking Copado Deployment Behavior</div>
+        <p class="section-desc">
+          Standard Salesforce validation and Copado promotions behave very differently. CleanZ is built to match
+          Copado's actual behavior — not SF's default — so the dry-run results accurately predict whether the real
+          Copado promotion will succeed.
+        </p>
+
+        <div class="steps">
+          <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <strong>ADD vs FULL Mode</strong>
+              <p>
+                Copado <em>ADD</em> promotions only enforce a subset of profile sections (flowAccesses, userPermissions,
+                profileActionOverrides). CleanZ detects ADD vs FULL from the promotion JSON operation field and masks
+                the irrelevant sections — exactly as Copado TRIM does — to avoid false positive failures.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <strong>TRIM Masking</strong>
+              <p>
+                Copado TRIM strips many sections before deployment (categoryGroupVisibilities, classAccesses,
+                pageAccesses, applicationVisibilities, etc. in profiles). CleanZ pre-masks these same sections so its
+                dry-run doesn't fail on things Copado would silently strip anyway.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <strong>Deploy Queue Awareness</strong>
+              <p>
+                Before each dry-run, CleanZ checks the org's deploy queue via Tooling API. If a Copado promotion is
+                already running, it waits for the queue to clear before submitting — preventing validation jobs from
+                piling up and timing out.
+              </p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <strong>Transient Error Retry</strong>
+              <p>
+                Network drops, rate limits, session expiries, ECONNRESET — CleanZ retries with exponential backoff up to
+                10 times before giving up. The run doesn't fail just because the VDI had a blip mid-validation.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="callout blue" style="margin-top: 20px">
+          <div class="callout-icon">🎯</div>
+          <div>
+            <div class="callout-title blue">The Goal</div>
+            <p>
+              If CleanZ says the promotion is clean — it <em>is</em> clean for Copado. Standard SF validation would give
+              you false positives (stripping things Copado never deploys) or false negatives (skipping Copado-specific
+              checks). CleanZ bridges that gap so Salesforce teams using Copado can trust the result.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- /container -->
+
+    <div class="footer">Built by <span>Naveen Bonthu</span> · CleanZ Internal Utility · Rubrik IT Apps</div>
+  </body>
+</html>
