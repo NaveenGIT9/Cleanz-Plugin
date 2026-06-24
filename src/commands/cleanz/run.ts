@@ -325,12 +325,14 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   const fixedPSGs = summary.filter((r) => r.Type === 'PermissionSetGroup' && r.RemovedFields);
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
   const fixedReportTypes = summary.filter((r) => r.Type === 'ReportType' && r.RemovedFields);
+  const fixedLayouts = summary.filter((r) => r.Type === 'Layout' && r.RemovedFields);
   if (
     fixedPermSets.length === 0 &&
     fixedMutingPermSets.length === 0 &&
     fixedPSGs.length === 0 &&
     fixedProfiles.length === 0 &&
-    fixedReportTypes.length === 0
+    fixedReportTypes.length === 0 &&
+    fixedLayouts.length === 0
   )
     return;
 
@@ -361,6 +363,10 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   if (fixedReportTypes.length > 0) {
     log('\nREPORT TYPES');
     log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedReportTypes), [15, 35, 45]));
+  }
+  if (fixedLayouts.length > 0) {
+    log('\nLAYOUTS');
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedLayouts), [15, 35, 45]));
   }
 }
 
@@ -1001,6 +1007,25 @@ function removeNsFromLayout(xml: string, namespace: string): { updated: string; 
 function removeNsFromReportType(xml: string, namespace: string): { updated: string; removed: boolean } {
   const updated = removeBlocksWithNamespace(xml, 'columns', 'field', namespace);
   return { updated, removed: updated !== xml };
+}
+
+function removeLayoutItemByField(xmlContent: string, bareField: string): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'layoutItems', 'field', bareField);
+}
+
+function removeLayoutRelatedListByName(
+  xmlContent: string,
+  relatedListName: string
+): { updated: string; removed: boolean } {
+  return removeXmlBlock(xmlContent, 'relatedLists', 'relatedList', relatedListName);
+}
+
+// Remove a <fields> column entry inside any <relatedLists> block (case-insensitive field name match).
+function removeRelatedListFieldEntry(xmlContent: string, fullFieldName: string): { updated: string; removed: boolean } {
+  const escaped = fullFieldName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const regex = new RegExp(`[ \\t]*<fields>[ \\t]*${escaped}[ \\t]*</fields>[ \\t]*\\r?\\n?`, 'gi');
+  const updated = xmlContent.replace(regex, '');
+  return { updated, removed: updated !== xmlContent };
 }
 
 // ===============================================================
@@ -1806,6 +1831,102 @@ function processReportTypeColumnFailure(
   return { handled: true, xmlContent };
 }
 
+function processLayoutFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  promotionData: PromotionItem[]
+): FailureResult {
+  // Missing field in layoutItems: In field: field - no CustomField named Obj.Field__c found
+  const fieldMatch =
+    /In field: field - no CustomField named (.+?) found/i.exec(errorMessage) ??
+    /no CustomField named (.+?) found/i.exec(errorMessage);
+  if (fieldMatch && !/In field: relatedList/i.test(errorMessage)) {
+    const fullFieldName = fieldMatch[1].trim();
+    const dotIdx = fullFieldName.lastIndexOf('.');
+    const bareField = dotIdx >= 0 ? fullFieldName.substring(dotIdx + 1) : fullFieldName;
+    const isInBatchAsAdd = promotionData.some(
+      (i) => i.t === 'CustomField' && i.n === fullFieldName && (!i.a || i.a.toLowerCase().startsWith('add'))
+    );
+    if (isInBatchAsAdd) {
+      log(`   [Layout] Skipping — ${fullFieldName} is ADD in batch`);
+      return { handled: true, xmlContent };
+    }
+    log(`   [Layout] Missing field: ${fullFieldName}`);
+    const { updated, removed } = removeLayoutItemByField(xmlContent, bareField);
+    if (removed) {
+      log(`   [Layout] Removed layoutItem for: ${fullFieldName}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: fullFieldName,
+          label: `[Layout.field] ${fullFieldName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] layoutItem not found for: ${fullFieldName}`);
+    return { handled: true, xmlContent };
+  }
+
+  // Missing field referenced by a relatedList column: In field: relatedList - no CustomField named X found
+  const rlFieldMatch = /In field: relatedList - no CustomField named (.+?) found/i.exec(errorMessage);
+  if (rlFieldMatch) {
+    const fullFieldName = rlFieldMatch[1].trim();
+    const isInBatchAsAdd = promotionData.some(
+      (i) => i.t === 'CustomField' && i.n === fullFieldName && (!i.a || i.a.toLowerCase().startsWith('add'))
+    );
+    if (isInBatchAsAdd) {
+      log(`   [Layout] Skipping relatedList column — ${fullFieldName} is ADD in batch`);
+      return { handled: true, xmlContent };
+    }
+    log(`   [Layout] Missing relatedList column field: ${fullFieldName}`);
+    const { updated, removed } = removeRelatedListFieldEntry(xmlContent, fullFieldName);
+    if (removed) {
+      log(`   [Layout] Removed <fields> entry for: ${fullFieldName}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: fullFieldName,
+          label: `[Layout.relatedList.field] ${fullFieldName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] <fields> entry not found for: ${fullFieldName}`);
+    return { handled: true, xmlContent };
+  }
+
+  // Missing relatedList object: Cannot find related list: RelationshipName
+  const rlMatch = /Cannot find related list:\s*(.+)/i.exec(errorMessage);
+  if (rlMatch) {
+    const relatedListName = rlMatch[1].trim();
+    log(`   [Layout] Missing relatedList: ${relatedListName}`);
+    const { updated, removed } = removeLayoutRelatedListByName(xmlContent, relatedListName);
+    if (removed) {
+      log(`   [Layout] Removed relatedLists block for: ${relatedListName}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: relatedListName,
+          label: `[Layout.relatedList] ${relatedListName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] relatedLists block not found for: ${relatedListName}`);
+    return { handled: true, xmlContent };
+  }
+
+  return { handled: false, xmlContent };
+}
+
 function processRegisteredFailure(
   log: (msg: string) => void,
   errorMessage: string,
@@ -1923,7 +2044,8 @@ function processFailures(
   whitelist: WhitelistMap,
   allSkippedFields: string[],
   metadataType: string,
-  verbose: boolean
+  verbose: boolean,
+  promotionData: PromotionItem[] = []
 ): { xmlContent: string; removedRefs: RemovedRef[]; skippedFields: string[]; unhandledErrors: string[] } {
   let updatedXml = xmlContent;
   const removedRefs: RemovedRef[] = [];
@@ -2003,6 +2125,16 @@ function processFailures(
       if (rtResult.handled) {
         updatedXml = rtResult.xmlContent;
         if (rtResult.removedRef) removedRefs.push(rtResult.removedRef);
+        continue;
+      }
+    }
+
+    // ── Layout field / relatedList removal ────────────────────────
+    if (metadataType === 'Layout') {
+      const layoutResult = processLayoutFailure(log, err, updatedXml, promotionData);
+      if (layoutResult.handled) {
+        updatedXml = layoutResult.xmlContent;
+        if (layoutResult.removedRef) removedRefs.push(layoutResult.removedRef);
         continue;
       }
     }
@@ -2648,6 +2780,10 @@ const DEDUP_BLOCKS: Array<{ blockTag: string; keyTag: string }> = [
   { blockTag: 'customMetadataTypeAccesses', keyTag: 'name' },
   { blockTag: 'customPermissions', keyTag: 'name' },
   { blockTag: 'categoryGroupVisibilities', keyTag: 'dataCategoryGroup' },
+  // Layout-specific blocks
+  { blockTag: 'layoutItems', keyTag: 'field' },
+  { blockTag: 'relatedLists', keyTag: 'relatedList' },
+  { blockTag: 'platformActionListItems', keyTag: 'actionName' },
 ];
 
 export function deduplicateXmlBlocks(xmlContent: string): { updated: string; removedCount: number } {
@@ -3589,7 +3725,16 @@ async function processItemsInIteration(
       removedRefs: perFailureRefs,
       skippedFields,
       unhandledErrors,
-    } = processFailures(log, itemFailures, objXml, whitelist, item.allSkippedFields, item.metadataType, verbose);
+    } = processFailures(
+      log,
+      itemFailures,
+      objXml,
+      whitelist,
+      item.allSkippedFields,
+      item.metadataType,
+      verbose,
+      promotionData
+    );
 
     const missingRefs = [...rtRefs, ...objRefs, ...perFailureRefs];
     const removedRefs = [...nsRefs, ...missingRefs];
@@ -4240,6 +4385,9 @@ export default class DeployAndFix extends SfCommand<void> {
     const reportTypes = [
       ...new Set(promotionData.filter((i) => i.t === 'ReportType' && isDeployable(i)).map((i) => i.n)),
     ].sort();
+    const layouts = [
+      ...new Set(promotionData.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n)),
+    ].sort();
     const whitelist: WhitelistMap = {
       fields: [
         ...new Set(promotionData.filter((i) => i.t === 'CustomField' && isDeployable(i)).map((i) => i.n)),
@@ -4355,6 +4503,9 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nReport Types to process:');
     logItemList(log, reportTypes, promotionData, 'ReportType');
 
+    log('\nLayouts to process:');
+    logItemList(log, layouts, promotionData, 'Layout');
+
     logWhitelistDetails(log, whitelist);
 
     log('');
@@ -4443,6 +4594,21 @@ export default class DeployAndFix extends SfCommand<void> {
         itemName: n,
         filePath: path.join(REPORT_TYPE_BASE_PATH, `${n}.reportType-meta.xml`),
         operation: getItemOperation(promotionData, 'ReportType', n),
+        status: 'No Change',
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
+        allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
+        done: false,
+        calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
+      })),
+      ...layouts.map((n) => ({
+        metadataType: 'Layout',
+        itemName: n,
+        filePath: path.join(LAYOUT_BASE_PATH, `${n}.layout-meta.xml`),
+        operation: getItemOperation(promotionData, 'Layout', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -4603,6 +4769,21 @@ export default class DeployAndFix extends SfCommand<void> {
       log('   (none)');
     }
 
+    log('\nLAYOUTS:');
+    if (summary.filter((r) => r.Type === 'Layout').length > 0) {
+      summary
+        .filter((r) => r.Type === 'Layout')
+        .forEach((r) =>
+          log(
+            `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+              r.SkippedFields || 'none'
+            }`
+          )
+        );
+    } else {
+      log('   (none)');
+    }
+
     // ================= CONCLUSION =================
     const passedClean = summary.filter((r) => r.Status === 'Success' || r.Status === 'No Change');
     const hadFixes = summary.filter((r) => r.Status === 'Fixed & Committed');
@@ -4632,6 +4813,8 @@ export default class DeployAndFix extends SfCommand<void> {
         ? 'PSG'
         : r.Type === 'ReportType'
         ? 'ReportType'
+        : r.Type === 'Layout'
+        ? 'Layout'
         : 'Profile',
       r.Name,
       r.Status,
