@@ -220,7 +220,22 @@ describe('maskPermSetFalsePositives', () => {
 // ─── deduplicateXmlBlocks ────────────────────────────────────────────────────
 
 describe('deduplicateXmlBlocks', () => {
-  it('removes a duplicate fieldPermissions block', () => {
+  it('removes a duplicate fieldPermissions block when content is 100% identical', () => {
+    const block = [
+      '    <fieldPermissions>',
+      '        <editable>true</editable>',
+      '        <field>Account.My_Field__c</field>',
+      '        <readable>true</readable>',
+      '    </fieldPermissions>',
+    ].join('\n');
+    const xml = block + '\n' + block + '\n';
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(1);
+    // first occurrence kept, second removed
+    expect((updated.match(/Account\.My_Field__c/g) ?? []).length).to.equal(1);
+  });
+
+  it('keeps same-key blocks with different values (not true duplicates)', () => {
     const xml =
       [
         '    <fieldPermissions>',
@@ -235,9 +250,8 @@ describe('deduplicateXmlBlocks', () => {
         '    </fieldPermissions>',
       ].join('\n') + '\n';
     const { updated, removedCount } = deduplicateXmlBlocks(xml);
-    expect(removedCount).to.equal(1);
-    // first occurrence kept, second removed
-    expect((updated.match(/Account\.My_Field__c/g) ?? []).length).to.equal(1);
+    expect(removedCount).to.equal(0);
+    expect(updated).to.equal(xml);
   });
 
   it('keeps unique blocks untouched', () => {
@@ -257,7 +271,19 @@ describe('deduplicateXmlBlocks', () => {
     expect(updated).to.equal(xml);
   });
 
-  it('removes duplicate userPermissions', () => {
+  it('removes duplicate userPermissions when content is 100% identical', () => {
+    const block = [
+      '    <userPermissions>',
+      '        <enabled>true</enabled>',
+      '        <name>ApiEnabled</name>',
+      '    </userPermissions>',
+    ].join('\n');
+    const xml = block + '\n' + block + '\n';
+    const { removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(1);
+  });
+
+  it('keeps same-name userPermissions with different enabled values', () => {
     const xml =
       [
         '    <userPermissions>',
@@ -269,8 +295,9 @@ describe('deduplicateXmlBlocks', () => {
         '        <name>ApiEnabled</name>',
         '    </userPermissions>',
       ].join('\n') + '\n';
-    const { removedCount } = deduplicateXmlBlocks(xml);
-    expect(removedCount).to.equal(1);
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(0);
+    expect(updated).to.equal(xml);
   });
 
   it('handles multiple different duplicate types in one file', () => {
