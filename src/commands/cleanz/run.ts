@@ -2782,7 +2782,8 @@ const DEDUP_BLOCKS: Array<{ blockTag: string; keyTag: string }> = [
   { blockTag: 'categoryGroupVisibilities', keyTag: 'dataCategoryGroup' },
   // Layout-specific blocks
   { blockTag: 'layoutItems', keyTag: 'field' },
-  { blockTag: 'relatedLists', keyTag: 'relatedList' },
+  // relatedLists excluded: same <relatedList> key appears legitimately in both <miniLayout> and
+  // top-level sections — dedup by key would wrongly remove the top-level block.
   { blockTag: 'platformActionListItems', keyTag: 'actionName' },
 ];
 
