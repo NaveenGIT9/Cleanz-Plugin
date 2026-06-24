@@ -125,7 +125,8 @@ type RefType =
   | 'recordTypeOverride' // profileActionOverrides block with an invalid <recordType> reference
   | 'customMetadataType' // customMetadataTypeAccesses block referencing a missing __mdt type
   | 'customPermission' // customPermissions block referencing a missing CustomPermission
-  | 'recordTypeVisibility'; // recordTypeVisibilities block referencing a missing RecordType
+  | 'recordTypeVisibility' // recordTypeVisibilities block referencing a missing RecordType
+  | 'reportTypeColumn'; // columns block in a ReportType referencing a missing field/object
 
 type RemovedRef = {
   type: RefType;
@@ -323,11 +324,13 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   const fixedMutingPermSets = summary.filter((r) => r.Type === 'MutingPermissionSet' && r.RemovedFields);
   const fixedPSGs = summary.filter((r) => r.Type === 'PermissionSetGroup' && r.RemovedFields);
   const fixedProfiles = summary.filter((r) => r.Type === 'Profile' && r.RemovedFields);
+  const fixedReportTypes = summary.filter((r) => r.Type === 'ReportType' && r.RemovedFields);
   if (
     fixedPermSets.length === 0 &&
     fixedMutingPermSets.length === 0 &&
     fixedPSGs.length === 0 &&
-    fixedProfiles.length === 0
+    fixedProfiles.length === 0 &&
+    fixedReportTypes.length === 0
   )
     return;
 
@@ -354,6 +357,10 @@ function logRemovedRefsDetail(log: (msg: string) => void, summary: SummaryRecord
   if (fixedProfiles.length > 0) {
     log('\nPROFILES');
     log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedProfiles), [15, 35, 45]));
+  }
+  if (fixedReportTypes.length > 0) {
+    log('\nREPORT TYPES');
+    log(buildAsciiTable(['Name', 'Removed Ref', 'Deployment Error'], buildRows(fixedReportTypes), [15, 35, 45]));
   }
 }
 
@@ -584,6 +591,42 @@ function removeCustomPermissionFromXml(xmlContent: string, name: string): { upda
 }
 function removeRecordTypeVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'recordTypeVisibilities', 'recordType', name);
+}
+function removeColumnFromReportType(
+  xmlContent: string,
+  fieldName: string,
+  objectName?: string
+): { updated: string; removed: boolean } {
+  const escapedField = fieldName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const inner = '(?:(?!<columns>)[\\s\\S])*?';
+  const blockRegex = new RegExp(
+    `[ \\t]*<columns>${inner}<field>[ \\t]*${escapedField}[ \\t]*</field>${inner}</columns>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  if (!objectName) {
+    const updated = xmlContent.replace(blockRegex, '');
+    return { updated, removed: updated !== xmlContent };
+  }
+  // When objectName is known, only remove the <columns> block whose <table> terminal
+  // segment relates to objectName. The table path uses object names in plural form
+  // (e.g. "Contacts" → Contact, "Accounts__r" → Account). Checking only the last
+  // segment avoids false matches on intermediate path segments (e.g. "Accounts__r"
+  // inside "Opportunity.OpportunityContactRoles.Accounts__r.Contacts" should not
+  // match when objectName is "Account" and the field actually belongs to Contact).
+  const objLower = objectName.toLowerCase();
+  let removed = false;
+  const updated = xmlContent.replace(blockRegex, (match: string) => {
+    const tableMatch = match.match(/<table>([\s\S]*?)<\/table>/i);
+    const tableVal = tableMatch ? tableMatch[1].trim().toLowerCase() : '';
+    if (tableVal) {
+      const segments = tableVal.split('.');
+      const lastSeg = segments[segments.length - 1].replace(/__r$/i, '');
+      if (!lastSeg.includes(objLower)) return match;
+    }
+    removed = true;
+    return '';
+  });
+  return { updated, removed };
 }
 
 // Removes a single <flagElement>true</flagElement> line from the objectPermissions block
@@ -924,6 +967,16 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
 function applyRefToXml(xml: string, ref: RemovedRef, filePath: string): { updated: string; removed: boolean } | null {
   if (ref.type === 'namespace') return resolveNsRemoval(xml, ref.name, filePath);
   if (ref.type === 'field') return removeFieldPermissionsFromXml(xml, ref.name);
+  if (ref.type === 'reportTypeColumn') {
+    // ref.name is the full SF error name (e.g. "Opportunity.Field__c").
+    // The XML stores only the bare field name in <field> and the object in <table>,
+    // so split and use the object-aware removal to avoid touching columns from
+    // a different object that happens to share the same field API name.
+    const dotIdx = ref.name.lastIndexOf('.');
+    const fieldPart = dotIdx >= 0 ? ref.name.substring(dotIdx + 1) : ref.name;
+    const objectName = dotIdx >= 0 ? ref.name.substring(0, dotIdx) : undefined;
+    return removeColumnFromReportType(xml, fieldPart, objectName);
+  }
   if (ref.type === 'userPermission') return removeUserPermissionFromXml(xml, ref.name);
   if (ref.type === 'objectFlag') {
     if (!ref.meta) return null;
@@ -1696,6 +1749,63 @@ function processUserLicenseFailure(
   return { handled: true, xmlContent };
 }
 
+function processReportTypeColumnFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  skippedFields: string[],
+  allSkippedFields: string[]
+): FailureResult {
+  const patterns = [
+    /no CustomField named (.+?) found/i,
+    /Entity of type 'CustomField' named '(.+?)' cannot be found/i,
+    /In field: field - no CustomField named (.+?) found/i,
+    /no CustomObject named (.+?) found/i,
+    /Entity of type 'CustomObject' named '(.+?)' cannot be found/i,
+  ];
+  let missingName: string | null = null;
+  for (const p of patterns) {
+    const m = p.exec(errorMessage);
+    if (m) {
+      missingName = m[1].trim();
+      break;
+    }
+  }
+  if (!missingName) return { handled: false, xmlContent };
+
+  const allWhitelisted = [...whitelist.fields, ...whitelist.objects];
+  if (shouldSkip(log, 'column', missingName, allWhitelisted, skippedFields, allSkippedFields)) {
+    return { handled: true, xmlContent };
+  }
+
+  log(`   Missing column reference: ${missingName}`);
+
+  // SF error includes the object prefix ("Opportunity.Field__c"). The XML <field> tag
+  // stores only the bare name, and <table> stores the object. Split and match both.
+  const dotIdx = missingName.lastIndexOf('.');
+  const fieldPart = dotIdx >= 0 ? missingName.substring(dotIdx + 1) : missingName;
+  const objectName = dotIdx >= 0 ? missingName.substring(0, dotIdx) : undefined;
+  const result = removeColumnFromReportType(xmlContent, fieldPart, objectName);
+
+  if (result.removed) {
+    log(`   Removed column for: ${missingName}`);
+    return {
+      handled: true,
+      xmlContent: result.updated,
+      removedRef: {
+        type: 'reportTypeColumn',
+        name: missingName,
+        label: `[Column] ${missingName}`,
+        deployError: errorMessage,
+      },
+    };
+  }
+
+  log(`   Column not found in XML: ${missingName} — already removed or not present.`);
+  return { handled: true, xmlContent };
+}
+
 function processRegisteredFailure(
   log: (msg: string) => void,
   errorMessage: string,
@@ -1887,6 +1997,16 @@ function processFailures(
       continue;
     }
 
+    // ── ReportType column removal — intercept field errors before generic handler ──
+    if (metadataType === 'ReportType') {
+      const rtResult = processReportTypeColumnFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
+      if (rtResult.handled) {
+        updatedXml = rtResult.xmlContent;
+        if (rtResult.removedRef) removedRefs.push(rtResult.removedRef);
+        continue;
+      }
+    }
+
     // ── CustomField ───────────────────────────────────────────────
     const fieldResult = processFieldFailure(log, err, updatedXml, whitelist, skippedFields, allSkippedFields);
     if (fieldResult.handled) {
@@ -1984,6 +2104,19 @@ function saveSweptFile(xml: string, filePath: string): void {
   }
 }
 
+function shouldSkipSweepRef(
+  ref: RemovedRef,
+  isReportType: boolean,
+  isLayoutOrReport: boolean,
+  isProfile: boolean,
+  name: string
+): boolean {
+  if (isReportType) return ref.type !== 'namespace' && ref.type !== 'reportTypeColumn';
+  if (isLayoutOrReport) return ref.type !== 'namespace';
+  if (ref.type === 'reportTypeColumn') return true;
+  return isProfileSweepSkip(isProfile, ref.type, name);
+}
+
 function sweepOtherFiles(
   log: (msg: string) => void,
   refs: RemovedRef[],
@@ -2005,11 +2138,10 @@ function sweepOtherFiles(
     let fileModified = false;
 
     const isProfile = filePath.endsWith('.profile-meta.xml');
-    const isLayoutOrReport =
-      filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml');
+    const isReportType = filePath.toLowerCase().endsWith('.reporttype-meta.xml');
+    const isLayoutOrReport = filePath.endsWith('.layout-meta.xml') || isReportType;
     for (const ref of refs) {
-      if (isLayoutOrReport && ref.type !== 'namespace') continue;
-      if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
+      if (shouldSkipSweepRef(ref, isReportType, isLayoutOrReport, isProfile, ref.name)) continue;
       const result = applyRefToXml(xml, ref, filePath);
       if (!result) continue;
       if (result.removed) {
@@ -2109,12 +2241,16 @@ function repoWideSweep(
     return;
   }
 
-  // Option 3: skip layouts + reportTypes entirely when no namespace refs were removed —
-  // those file types only contain namespace refs, so scanning them is pure waste otherwise.
+  // Skip file types that have no applicable ref types to avoid wasted I/O:
+  //   layouts      → only namespace refs apply
+  //   report types → namespace + reportTypeColumn refs apply
   const hasNamespaceRef = allRemovedRefs.some((r) => r.type === 'namespace');
-  const effectiveFiles = hasNamespaceRef
-    ? repoFiles
-    : repoFiles.filter((f) => !f.endsWith('.layout-meta.xml') && !f.toLowerCase().endsWith('.reporttype-meta.xml'));
+  const hasReportTypeColRef = allRemovedRefs.some((r) => r.type === 'reportTypeColumn');
+  const effectiveFiles = repoFiles.filter((f) => {
+    if (f.endsWith('.layout-meta.xml')) return hasNamespaceRef;
+    if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasNamespaceRef || hasReportTypeColRef;
+    return true; // permsets / profiles / PSGs always included
+  });
 
   log(`\n--- Repo-Wide Sweep (${effectiveFiles.length} file(s) outside batch) ---`);
   const modifiedFiles: string[] = [];
@@ -2132,12 +2268,11 @@ function repoWideSweep(
     let xml = readFileWithRetry(filePath);
     let fileModified = false;
     const isProfile = filePath.endsWith('.profile-meta.xml');
-    const isLayoutOrReport =
-      filePath.endsWith('.layout-meta.xml') || filePath.toLowerCase().endsWith('.reporttype-meta.xml');
+    const isReportType = filePath.toLowerCase().endsWith('.reporttype-meta.xml');
+    const isLayoutOrReport = filePath.endsWith('.layout-meta.xml') || isReportType;
 
     for (const ref of allRemovedRefs) {
-      if (isLayoutOrReport && ref.type !== 'namespace') continue;
-      if (isProfileSweepSkip(isProfile, ref.type, ref.name)) continue;
+      if (shouldSkipSweepRef(ref, isReportType, isLayoutOrReport, isProfile, ref.name)) continue;
       const result = applyRefToXml(xml, ref, filePath);
       if (!result) continue;
       if (result.removed) {
@@ -2696,6 +2831,9 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
   const saved = new Map<string, string>();
   for (const item of activeItems) {
     if (!fs.existsSync(item.filePath)) continue;
+    // ReportType files have no false-positive masking — skip save/restore so committed
+    // fixes persist on disk across iterations rather than being overwritten by restoreItems.
+    if (item.filePath.toLowerCase().endsWith('.reporttype-meta.xml')) continue;
     const orig = readFileWithRetry(item.filePath);
     let masked = maskWhitelistedEntries(orig, whitelist);
     if (item.filePath.endsWith('.profile-meta.xml')) {
@@ -3819,6 +3957,19 @@ function getItemOperation(promotionData: PromotionItem[], metadataType: string, 
   return item?.a?.toLowerCase() === 'full' ? 'FULL' : 'ADD';
 }
 
+function logItemList(
+  log: (msg: string) => void,
+  names: string[],
+  promotionData: PromotionItem[],
+  metadataType: string
+): void {
+  if (names.length === 0) {
+    log('   (none)');
+    return;
+  }
+  names.forEach((n) => log(`   - ${n} [${getItemOperation(promotionData, metadataType, n)}]`));
+}
+
 // Reads and parses either a Copado promotion.json or a package.xml into PromotionItem[].
 function loadInputFile(log: (msg: string) => void, inputFilePath: string): PromotionItem[] {
   const isXml = path.extname(inputFilePath).toLowerCase() === '.xml';
@@ -4066,9 +4217,13 @@ export default class DeployAndFix extends SfCommand<void> {
     // ================= LOAD & PARSE INPUT FILE =================
     const promotionData = loadInputFile(log, inputFilePath);
 
-    // Exclude RetrieveOnly items from validation — they are not being deployed in this package.
+    // Exclude RetrieveOnly and Delete items from validation — they are not being deployed.
     // For package.xml (no "a" field), treat all entries as deployable (preserve existing behavior).
-    const isDeployable = (i: PromotionItem): boolean => !i.a || !i.a.toLowerCase().startsWith('retrieve');
+    const isDeployable = (i: PromotionItem): boolean => {
+      if (!i.a) return true;
+      const op = i.a.toLowerCase();
+      return !op.startsWith('retrieve') && !op.startsWith('delete');
+    };
 
     const permSets = [
       ...new Set(promotionData.filter((i) => i.t === 'PermissionSet' && isDeployable(i)).map((i) => i.n)),
@@ -4081,6 +4236,9 @@ export default class DeployAndFix extends SfCommand<void> {
     ].sort();
     const profiles = [
       ...new Set(promotionData.filter((i) => i.t === 'Profile' && isDeployable(i)).map((i) => i.n)),
+    ].sort();
+    const reportTypes = [
+      ...new Set(promotionData.filter((i) => i.t === 'ReportType' && isDeployable(i)).map((i) => i.n)),
     ].sort();
     const whitelist: WhitelistMap = {
       fields: [
@@ -4140,7 +4298,9 @@ export default class DeployAndFix extends SfCommand<void> {
       ...permSetGroups.map((psg) => path.join(PSG_BASE_PATH, `${psg}.permissionsetgroup-meta.xml`)),
       ...profiles.map((p) => path.join(PROFILE_BASE_PATH, `${p}.profile-meta.xml`)),
       ...collectDir(LAYOUT_BASE_PATH, '.layout-meta.xml'),
-      ...collectDir(REPORT_TYPE_BASE_PATH, '.reporttype-meta.xml'),
+      // Only JSON batch report types — cross-sweep stays within the batch.
+      // Out-of-batch report types are handled by repoWideSweep at the end.
+      ...reportTypes.map((n) => path.join(REPORT_TYPE_BASE_PATH, `${n}.reportType-meta.xml`)),
     ];
 
     const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
@@ -4154,12 +4314,15 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Muting Permission Sets  : ${mutingPermSets.length} found in JSON (deployable)`);
     log(`Permission Set Groups   : ${permSetGroups.length} found in JSON (deployable)`);
     log(`Profiles                : ${profiles.length} found in JSON (deployable)`);
-    const retrieveOnly = promotionData.filter(
-      (i) => ['PermissionSet', 'PermissionSetGroup', 'Profile', 'MutingPermissionSet'].includes(i.t) && !isDeployable(i)
+    log(`Report Types            : ${reportTypes.length} found in JSON (deployable)`);
+    const nonDeployable = promotionData.filter(
+      (i) =>
+        ['PermissionSet', 'PermissionSetGroup', 'Profile', 'MutingPermissionSet', 'ReportType'].includes(i.t) &&
+        !isDeployable(i)
     );
-    if (retrieveOnly.length > 0) {
-      log(`Retrieve-Only (skipped) : ${retrieveOnly.length} — not validated`);
-      retrieveOnly.forEach((i) => log(`   - ${i.n} [${i.t}] (RetrieveOnly — excluded)`));
+    if (nonDeployable.length > 0) {
+      log(`Skipped (not deployed)  : ${nonDeployable.length} — not validated`);
+      nonDeployable.forEach((i) => log(`   - ${i.n} [${i.t}] (${i.a ?? 'unknown'} — excluded)`));
     }
     log(`Whitelisted total       : ${totalWhitelisted} items across all types (will never be removed)`);
     log(`  - CustomFields        : ${whitelist.fields.length}`);
@@ -4183,23 +4346,14 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nPermission Sets to process:');
     permSets.forEach((ps) => log(`   - ${ps} [${getItemOperation(promotionData, 'PermissionSet', ps)}]`));
     log('\nMuting Permission Sets to process:');
-    if (mutingPermSets.length > 0) {
-      mutingPermSets.forEach((mps) =>
-        log(`   - ${mps} [${getItemOperation(promotionData, 'MutingPermissionSet', mps)}]`)
-      );
-    } else {
-      log('   (none)');
-    }
+    logItemList(log, mutingPermSets, promotionData, 'MutingPermissionSet');
     log('\nPermission Set Groups to process:');
-    if (permSetGroups.length > 0) {
-      permSetGroups.forEach((psg) =>
-        log(`   - ${psg} [${getItemOperation(promotionData, 'PermissionSetGroup', psg)}]`)
-      );
-    } else {
-      log('   (none)');
-    }
+    logItemList(log, permSetGroups, promotionData, 'PermissionSetGroup');
     log('\nProfiles to process:');
     profiles.forEach((p) => log(`   - ${p} [${getItemOperation(promotionData, 'Profile', p)}]`));
+
+    log('\nReport Types to process:');
+    logItemList(log, reportTypes, promotionData, 'ReportType');
 
     logWhitelistDetails(log, whitelist);
 
@@ -4274,6 +4428,21 @@ export default class DeployAndFix extends SfCommand<void> {
         itemName: n,
         filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
         operation: getItemOperation(promotionData, 'Profile', n),
+        status: 'No Change',
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
+        allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
+        done: false,
+        calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
+      })),
+      ...reportTypes.map((n) => ({
+        metadataType: 'ReportType',
+        itemName: n,
+        filePath: path.join(REPORT_TYPE_BASE_PATH, `${n}.reportType-meta.xml`),
+        operation: getItemOperation(promotionData, 'ReportType', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -4419,6 +4588,21 @@ export default class DeployAndFix extends SfCommand<void> {
         )
       );
 
+    log('\nREPORT TYPES:');
+    if (summary.filter((r) => r.Type === 'ReportType').length > 0) {
+      summary
+        .filter((r) => r.Type === 'ReportType')
+        .forEach((r) =>
+          log(
+            `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+              r.SkippedFields || 'none'
+            }`
+          )
+        );
+    } else {
+      log('   (none)');
+    }
+
     // ================= CONCLUSION =================
     const passedClean = summary.filter((r) => r.Status === 'Success' || r.Status === 'No Change');
     const hadFixes = summary.filter((r) => r.Status === 'Fixed & Committed');
@@ -4446,6 +4630,8 @@ export default class DeployAndFix extends SfCommand<void> {
         ? 'MutingPS'
         : r.Type === 'PermissionSetGroup'
         ? 'PSG'
+        : r.Type === 'ReportType'
+        ? 'ReportType'
         : 'Profile',
       r.Name,
       r.Status,
