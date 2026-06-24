@@ -2799,13 +2799,16 @@ export function deduplicateXmlBlocks(xmlContent: string): { updated: string; rem
       `[ \\t]*<${escapedBlock}>${innerPattern}<${keyTag}>([^<]*)</${keyTag}>${innerPattern}</${escapedBlock}>[ \\t]*\\r?\\n?`,
       'g'
     );
-    updated = updated.replace(blockRegex, (match: string, keyValue: string) => {
-      const key = keyValue.trim();
-      if (seen.has(key)) {
+    updated = updated.replace(blockRegex, (match: string) => {
+      // Normalize whitespace so minor indentation differences don't prevent dedup detection,
+      // but compare full block content — two blocks with the same key but different values
+      // (e.g. same object, different permission flags) are NOT duplicates and must both survive.
+      const normalizedBlock = match.replace(/[ \t]+/g, ' ').trim();
+      if (seen.has(normalizedBlock)) {
         removedCount++;
         return '';
       }
-      seen.add(key);
+      seen.add(normalizedBlock);
       return match;
     });
   }
