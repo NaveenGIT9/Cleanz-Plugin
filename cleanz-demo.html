@@ -705,12 +705,8 @@
         <span class="hero-tag">PermissionSet</span>
         <span class="hero-tag">Profile</span>
         <span class="hero-tag">PermissionSetGroup</span>
-        <span class="hero-tag" style="opacity: 0.6" title="NS bulk removal &amp; repo sweep only"
-          >Layout (NS only)</span
-        >
-        <span class="hero-tag" style="opacity: 0.6" title="NS bulk removal &amp; repo sweep only"
-          >ReportType (NS only)</span
-        >
+        <span class="hero-tag">Layout</span>
+        <span class="hero-tag">ReportType</span>
         <span class="hero-tag">Copado-Aware</span>
         <span class="hero-tag">Namespace Detection</span>
         <span class="hero-tag">Cross-Sweep</span>
@@ -1093,7 +1089,7 @@
         <div class="section-title">Missing Component References — Auto-Fixed</div>
         <p class="section-desc">
           These are removed automatically when Salesforce reports them as missing. The entire XML block is stripped.
-          Applies to Permission Sets and Profiles.
+          Applies to Permission Sets, Profiles, and Layouts.
         </p>
 
         <table>
@@ -1175,6 +1171,19 @@
               <td><code>no RecordType named Account.OldRT found</code></td>
             </tr>
             <tr>
+              <td>
+                <strong>Report Type Columns</strong>
+                <span style="color: #0369a1; font-size: 11px">★ object-aware</span>
+              </td>
+              <td><code>&lt;columns&gt;</code> in ReportType</td>
+              <td>
+                <code>no CustomField named Opportunity.Score__c found</code> — only the block whose
+                <code>&lt;table&gt;</code> terminal segment matches the object is removed; compound paths like
+                <code>Opportunity.OpportunityContactRoles.Accounts__r.Contacts</code> are matched by last segment only
+                to avoid false removals on intermediate path nodes
+              </td>
+            </tr>
+            <tr>
               <td><strong>Profile Action Overrides — missing RecordType</strong></td>
               <td><code>&lt;profileActionOverrides&gt;</code> (by recordType)</td>
               <td>Detected by querying org before deploy — no error needed</td>
@@ -1183,6 +1192,33 @@
               <td><strong>Profile Action Overrides — missing Object</strong></td>
               <td><code>&lt;profileActionOverrides&gt;</code> (by pageOrSobjectType)</td>
               <td>Detected by querying org's EntityDefinition before deploy</td>
+            </tr>
+            <tr>
+              <td>
+                <strong>Layout — Missing Field</strong>
+                <span style="color: #0369a1; font-size: 11px">★ ADD-scoped</span>
+              </td>
+              <td><code>&lt;layoutItems&gt;</code> in Layout</td>
+              <td>
+                <code>In field: field - no CustomField named Opportunity.Score__c found</code> — skipped if the field is
+                being deployed as ADD in the same promotion
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Layout — Missing RelatedList Column</strong></td>
+              <td><code>&lt;fields&gt;</code> entry inside <code>&lt;relatedLists&gt;</code></td>
+              <td>
+                <code>In field: relatedList - no CustomField named CustomObj__c.Field__c found</code> — removes only the
+                specific column entry, not the whole related list block
+              </td>
+            </tr>
+            <tr>
+              <td><strong>Layout — Missing Related Object</strong></td>
+              <td><code>&lt;relatedLists&gt;</code> in Layout</td>
+              <td>
+                <code>Cannot find related list: SomeObject__r</code> — the entire related object/relationship is absent
+                from the target org; removes the whole block
+              </td>
             </tr>
           </tbody>
         </table>
@@ -1195,6 +1231,19 @@
               When a custom object is missing, CleanZ removes not just the <code>&lt;objectPermissions&gt;</code> block
               but also every <code>&lt;fieldPermissions&gt;</code> entry for that object's fields AND every
               <code>&lt;layoutAssignments&gt;</code> block referencing that object — all in one pass.
+            </p>
+          </div>
+        </div>
+
+        <div class="callout blue" style="margin-top: 10px">
+          <div class="callout-icon">ℹ</div>
+          <div>
+            <div class="callout-title blue">Layout Pre-Run Fixes (before first deploy)</div>
+            <p>
+              Duplicate fields (<code>Field: field, value:X appears more than once</code>) and malformed XML tags (<code
+                >Element layoutItems duplicated</code
+              >) in Layout files are fixed in a pre-run pass before the first deploy attempt — committed separately so
+              the fix history is clean.
             </p>
           </div>
         </div>
@@ -1384,7 +1433,8 @@
             <p style="font-size: 13px; color: #475569; margin-bottom: 12px">
               When <code>Account.Score__c</code> is found missing in <em>PermSet_A</em>, CleanZ immediately removes it
               from every other PermSet and Profile in the same promotion batch — without waiting for them to
-              individually fail the dry-run.
+              individually fail the dry-run. The same applies to ReportType columns: a field error on one ReportType
+              triggers an immediate cross-sweep across all other ReportTypes in the batch.
             </p>
 
             <div class="sweep-diagram">
@@ -1407,9 +1457,81 @@
             <h4 style="font-weight: 700; color: #0f172a; margin-bottom: 10px">🌍 Repo-Wide Sweep (End of Run)</h4>
             <p style="font-size: 13px; color: #475569; margin-bottom: 12px">
               After all files in the batch are clean, CleanZ scans <strong>every</strong> PermSet, Profile, and PSG in
-              the entire repo and applies the same missing-ref removals. Layout and ReportType files are also included —
-              but <em>only</em> if namespace refs were removed during the run (NS-scoped sweep).
+              the entire repo and applies the same missing-ref removals. Layout files are included for namespace refs.
+              ReportType files get their own dedicated repo-wide sweep — both namespace refs <em>and</em> column refs —
+              covering all out-of-batch ReportTypes in the repo.
             </p>
+            <div
+              style="
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                padding: 14px 16px;
+                margin-bottom: 12px;
+                font-size: 12.5px;
+                color: #475569;
+              "
+            >
+              <div
+                style="
+                  font-size: 11px;
+                  font-weight: 700;
+                  text-transform: uppercase;
+                  letter-spacing: 1px;
+                  color: #0369a1;
+                  margin-bottom: 8px;
+                "
+              >
+                ReportType — 3-Commit Sweep Structure
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 6px">
+                <div style="display: flex; gap: 10px; align-items: flex-start">
+                  <span
+                    style="
+                      background: #dbeafe;
+                      color: #1d4ed8;
+                      font-size: 11px;
+                      font-weight: 700;
+                      padding: 2px 8px;
+                      border-radius: 4px;
+                      flex-shrink: 0;
+                    "
+                    >Commit 1</span
+                  ><span>Fix column error on failing ReportType in batch + cross-sweep all other batch RTs</span>
+                </div>
+                <div style="display: flex; gap: 10px; align-items: flex-start">
+                  <span
+                    style="
+                      background: #dcfce7;
+                      color: #15803d;
+                      font-size: 11px;
+                      font-weight: 700;
+                      padding: 2px 8px;
+                      border-radius: 4px;
+                      flex-shrink: 0;
+                    "
+                    >Squash</span
+                  ><span>All error-fix + cross-sweep commits merged into one clean commit</span>
+                </div>
+                <div style="display: flex; gap: 10px; align-items: flex-start">
+                  <span
+                    style="
+                      background: #ede9fe;
+                      color: #6d28d9;
+                      font-size: 11px;
+                      font-weight: 700;
+                      padding: 2px 8px;
+                      border-radius: 4px;
+                      flex-shrink: 0;
+                    "
+                    >Commit 2</span
+                  ><span
+                    >Repo-wide sweep — same column removed from all out-of-batch ReportTypes across the entire
+                    repo</span
+                  >
+                </div>
+              </div>
+            </div>
 
             <div class="callout green">
               <div class="callout-icon">🚀</div>
