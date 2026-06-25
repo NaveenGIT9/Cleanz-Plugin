@@ -2377,10 +2377,11 @@ function repoWideSweep(
   //   layouts      → only namespace refs apply
   //   report types → namespace + reportTypeColumn refs apply
   const hasNamespaceRef = allRemovedRefs.some((r) => r.type === 'namespace');
-  const hasReportTypeColRef = allRemovedRefs.some((r) => r.type === 'reportTypeColumn');
+
   const effectiveFiles = repoFiles.filter((f) => {
     if (f.endsWith('.layout-meta.xml')) return hasNamespaceRef;
-    if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasNamespaceRef || hasReportTypeColRef;
+    // reportTypeColumn refs excluded from repo-wide sweep — each promotion fixes its own report types
+    if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasNamespaceRef;
     return true; // permsets / profiles / PSGs always included
   });
 
@@ -2404,6 +2405,8 @@ function repoWideSweep(
     const isLayoutOrReport = filePath.endsWith('.layout-meta.xml') || isReportType;
 
     for (const ref of allRemovedRefs) {
+      // reportTypeColumn refs never applied to out-of-batch report type files
+      if (isReportType && ref.type === 'reportTypeColumn') continue;
       if (shouldSkipSweepRef(ref, isReportType, isLayoutOrReport, isProfile, ref.name)) continue;
       const result = applyRefToXml(xml, ref, filePath);
       if (!result) continue;
