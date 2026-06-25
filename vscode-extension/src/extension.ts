@@ -22,9 +22,9 @@ export function activate(context: vscode.ExtensionContext) {
       type ActionItem = vscode.QuickPickItem & { action: 'validate' | 'dryrun' | 'purge' };
       const pick = await vscode.window.showQuickPick<ActionItem>(
         [
-          { label: '$(play) Validate + Fix', description: 'Fix refs and deploy to org', action: 'validate' },
-          { label: '$(eye)  Dry Run', description: 'Fix files only, no deploy commit', action: 'dryrun' },
-          { label: '$(search) Namespace Purge…', description: 'Remove all namespace references', action: 'purge' },
+          { label: '$(play) Validate + Fix', description: 'Fix refs based on errors and commit', action: 'validate' },
+          { label: '$(eye)  Dry Run', description: 'Fix refs based on errors - No Commit', action: 'dryrun' },
+          { label: '$(search) Namespace Purge', description: 'Remove all namespace references', action: 'purge' },
         ],
         {
           title: 'SF CleanZ',

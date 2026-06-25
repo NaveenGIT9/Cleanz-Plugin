@@ -598,7 +598,7 @@ function removeCustomPermissionFromXml(xmlContent: string, name: string): { upda
 function removeRecordTypeVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'recordTypeVisibilities', 'recordType', name);
 }
-function removeColumnFromReportType(
+export function removeColumnFromReportType(
   xmlContent: string,
   fieldName: string,
   objectName?: string
@@ -627,12 +627,34 @@ function removeColumnFromReportType(
     if (tableVal) {
       const segments = tableVal.split('.');
       const lastSeg = segments[segments.length - 1].replace(/__r$/i, '');
-      if (!lastSeg.includes(objLower)) return match;
+      // Match singular (opportunity) and y→ies plural (opportunities) — e.g. "opportunities".includes("opportunity") = false
+      const objBase = objLower.endsWith('y') ? objLower.slice(0, -1) + 'ie' : objLower;
+      if (!lastSeg.includes(objLower) && !lastSeg.includes(objBase)) return match;
     }
     removed = true;
     return '';
   });
-  return { updated, removed };
+  if (removed) return { updated, removed };
+
+  // Fallback: only activate when the bare field name does not appear at all in the XML.
+  // If the exact <field>fieldName</field> tag exists, the standard check already evaluated
+  // it and chose not to remove it (e.g. it belongs to a different object) — respect that.
+  // The fallback only handles the traversal case where the XML has a dotted prefix
+  // (e.g. "SBQQSC__RenewalOpportunity__c.ISR_Owner__c") so the bare name was never found.
+  const exactFieldPresent = new RegExp(`<field>[ \\t]*${escapedField}[ \\t]*</field>`, 'i').test(xmlContent);
+  if (exactFieldPresent) return { updated: xmlContent, removed: false };
+
+  // Count all <columns> blocks whose <field> ends with fieldName (covers traversal prefixes).
+  // Only remove if exactly 1 such block exists — if 2+, ambiguous which object, so skip.
+  const fallbackBlockRegex = new RegExp(
+    `[ \\t]*<columns>${inner}<field>[ \\t]*(?:[^<]*\\.)?${escapedField}[ \\t]*</field>${inner}</columns>[ \\t]*\\r?\\n?`,
+    'g'
+  );
+  const fallbackMatches = [...xmlContent.matchAll(fallbackBlockRegex)];
+  if (fallbackMatches.length === 1) {
+    return { updated: xmlContent.replace(fallbackBlockRegex, ''), removed: true };
+  }
+  return { updated: xmlContent, removed: false };
 }
 
 // Removes a single <flagElement>true</flagElement> line from the objectPermissions block

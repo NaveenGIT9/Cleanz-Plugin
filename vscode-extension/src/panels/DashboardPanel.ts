@@ -418,6 +418,7 @@ export class DashboardPanel {
           PermissionSetGroup: 'PermSetGroup',
           Profile: 'Profile',
           MutingPermissionSet: 'MutingPermSet',
+          ReportType: 'ReportType',
         };
         const raw = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')) as Array<{ t: string; n: string; a?: string }>;
         const seen = new Set<string>();
@@ -429,10 +430,16 @@ export class DashboardPanel {
             return true;
           });
         const skipped = allKnown
-          .filter((i) => (i.a ?? '').toLowerCase().startsWith('retrieve'))
+          .filter((i) => {
+            const op = (i.a ?? '').toLowerCase();
+            return op.startsWith('retrieve') || op.startsWith('delete');
+          })
           .map((i) => ({ name: i.n, reason: i.a ?? 'RetrieveOnly' }));
         const quick = allKnown
-          .filter((i) => !(i.a ?? '').toLowerCase().startsWith('retrieve'))
+          .filter((i) => {
+            const op = (i.a ?? '').toLowerCase();
+            return !op.startsWith('retrieve') && !op.startsWith('delete');
+          })
           .map((i) => ({
             name: i.n,
             type: typeMap[i.t],
@@ -448,7 +455,11 @@ export class DashboardPanel {
 
         // Build whitelist tags — all non-RetrieveOnly non-PS/Profile components being deployed.
         // These are pre-masked before validation so their refs in PermSets/Profiles are never removed.
-        const isDeployable = (i: { a?: string }) => !i.a || !i.a.toLowerCase().startsWith('retrieve');
+        const isDeployable = (i: { a?: string }) => {
+          if (!i.a) return true;
+          const op = i.a.toLowerCase();
+          return !op.startsWith('retrieve') && !op.startsWith('delete');
+        };
         const whitelistTypes: Record<string, string> = {
           ApexClass: 'ApexClass',
           ApexPage: 'VF Page',

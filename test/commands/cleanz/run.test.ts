@@ -22,6 +22,7 @@ import {
   getRootNodeName,
   maskPermSetFalsePositives,
   maskProfileFalsePositives,
+  removeColumnFromReportType,
   removeProfileActionOverridesWithMissingObject,
   removeProfileActionOverridesWithMissingRecordType,
   removeXmlBlock,
@@ -496,5 +497,60 @@ describe('Integration — realistic profile XML', () => {
       'Bad_Object__c',
     ]);
     expect(removedObjects).not.to.include('Bad_Object__c'); // whitelisted — keep it
+  });
+});
+
+// ─── removeColumnFromReportType ───────────────────────────────────────────────
+
+const makeRtXml = (blocks: Array<{ field: string; table: string }>) =>
+  blocks
+    .map((b) => `    <columns>\n        <field>${b.field}</field>\n        <table>${b.table}</table>\n    </columns>\n`)
+    .join('');
+
+describe('removeColumnFromReportType', () => {
+  it('standard check: removes column whose field + table last-segment match', () => {
+    const xml = makeRtXml([
+      { field: 'ISR_Owner__c', table: 'Opportunity' },
+      { field: 'Budget__c', table: 'Opportunity' },
+    ]);
+    const { updated, removed } = removeColumnFromReportType(xml, 'ISR_Owner__c', 'Opportunity');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('ISR_Owner__c');
+    expect(updated).to.include('Budget__c');
+  });
+
+  it('standard check: handles plural table name (Opportunities contains "opportunity")', () => {
+    const xml = makeRtXml([{ field: 'ISR_Owner__c', table: 'Opportunities' }]);
+    const { removed } = removeColumnFromReportType(xml, 'ISR_Owner__c', 'Opportunity');
+    expect(removed).to.be.true;
+  });
+
+  it('standard check: does not remove column on a different object', () => {
+    const xml = makeRtXml([{ field: 'ISR_Owner__c', table: 'Contact' }]);
+    const { removed, updated } = removeColumnFromReportType(xml, 'ISR_Owner__c', 'Opportunity');
+    expect(removed).to.be.false;
+    expect(updated).to.equal(xml);
+  });
+
+  it('fallback: removes traversal-form field when it is the only match', () => {
+    // SF error says Opportunity.ISR_Owner__c but XML has the traversal form
+    const xml = makeRtXml([
+      { field: 'SBQQSC__RenewalOpportunity__c.ISR_Owner__c', table: 'Opportunity' },
+      { field: 'Budget__c', table: 'Opportunity' },
+    ]);
+    const { updated, removed } = removeColumnFromReportType(xml, 'ISR_Owner__c', 'Opportunity');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('ISR_Owner__c');
+    expect(updated).to.include('Budget__c');
+  });
+
+  it('fallback: skips when multiple columns end with the same field name (ambiguous)', () => {
+    const xml = makeRtXml([
+      { field: 'SBQQSC__RenewalOpportunity__c.ISR_Owner__c', table: 'Opportunity' },
+      { field: 'ISR_Owner__c', table: 'Contact' },
+    ]);
+    const { removed, updated } = removeColumnFromReportType(xml, 'ISR_Owner__c', 'Opportunity');
+    expect(removed).to.be.false;
+    expect(updated).to.equal(xml);
   });
 });
