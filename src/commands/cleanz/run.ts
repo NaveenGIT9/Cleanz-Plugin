@@ -1242,7 +1242,9 @@ function runDeployProcess(
     const deployStart = Date.now();
     let queueState: 'unknown' | 'queued' | 'deploying' = 'unknown';
     let queryInFlight = false;
+    let deployDone = false; // set true on close so in-flight async callbacks don't log after completion
     const progressTimer = setInterval(() => {
+      if (deployDone) return;
       const elapsed = Date.now() - deployStart;
       const mins = Math.floor(elapsed / 60_000);
       const secs = Math.floor((elapsed % 60_000) / 1000);
@@ -1260,6 +1262,7 @@ function runDeployProcess(
       queryDeployQueueCount(targetOrg)
         .then((count) => {
           queryInFlight = false;
+          if (deployDone) return; // process already closed — discard stale result
           const e = Date.now() - deployStart;
           const m = Math.floor(e / 60_000);
           const s = Math.floor((e % 60_000) / 1000);
@@ -1277,17 +1280,20 @@ function runDeployProcess(
         })
         .catch(() => {
           queryInFlight = false;
+          if (deployDone) return;
           log(`   Deploying changes... ${mins}m ${secs}s elapsed (timeout: ${timeoutMins}m)`);
         });
     }, 30_000);
 
     const timer = setTimeout(() => {
+      deployDone = true;
       clearInterval(progressTimer);
       proc.kill();
       resolve('timeout');
     }, timeoutMins * 60 * 1000);
 
     proc.on('close', () => {
+      deployDone = true;
       clearInterval(progressTimer);
       clearTimeout(timer);
       outputStream.end();

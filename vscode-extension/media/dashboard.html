@@ -773,6 +773,22 @@
       .log-dim {
         color: #8aa0b8;
       }
+      .log-line.log-total-time {
+        margin-top: 6px;
+        margin-bottom: 4px;
+      }
+      .log-line.log-total-time .log-ts {
+        display: none;
+      }
+      .log-total-time-text {
+        font-size: 52px;
+        font-weight: 800;
+        color: #fbbf24;
+        letter-spacing: 0.02em;
+        line-height: 1.1;
+        text-shadow: 0 0 24px rgba(251, 191, 36, 0.45);
+        font-family: var(--mono);
+      }
 
       /* TAGS / WHITELIST */
       .tags-row {
@@ -1875,11 +1891,22 @@
         const panel = document.getElementById('logPanel');
         const ts = new Date().toLocaleTimeString('en-GB', { hour12: false });
         const line = document.createElement('div');
-        line.className = 'log-line';
         // Truncate very long lines to prevent rendering stalls
         const display = text.length > 400 ? text.slice(0, 400) + '…' : text;
-        line.innerHTML =
-          '<span class="log-ts">' + ts + '</span><span class="log-' + level + '">' + escHtml(display) + '</span>';
+        const isTotalTime = text && /^\s*Total time:/i.test(text);
+        if (isTotalTime) {
+          line.className = 'log-line log-total-time';
+          line.innerHTML =
+            '<span class="log-ts">' +
+            ts +
+            '</span><span class="log-total-time-text">' +
+            escHtml(display.trim()) +
+            '</span>';
+        } else {
+          line.className = 'log-line';
+          line.innerHTML =
+            '<span class="log-ts">' + ts + '</span><span class="log-' + level + '">' + escHtml(display) + '</span>';
+        }
         panel.appendChild(line);
         panel.scrollTop = panel.scrollHeight;
       }
