@@ -1126,10 +1126,18 @@ async function invokeDeployWithRetry(
     }
 
     let raw = '';
+    let preJsonText = ''; // warnings / error messages before the JSON body
     try {
-      raw = fs.readFileSync(outputFile, 'utf8');
-      const jsonStart = raw.indexOf('{');
-      if (jsonStart > 0) raw = raw.substring(jsonStart);
+      const fileContent = fs.readFileSync(outputFile, 'utf8');
+      const jsonStart = fileContent.indexOf('{');
+      if (jsonStart >= 0) {
+        // preJsonText = warnings printed before the JSON (empty string when JSON starts at 0)
+        preJsonText = fileContent.substring(0, jsonStart);
+        raw = fileContent.substring(jsonStart);
+      } else {
+        // No JSON at all — entire output is an error/warning message
+        preJsonText = fileContent;
+      }
     } catch {
       log('   Could not read deploy output — retrying...');
       // eslint-disable-next-line no-await-in-loop
@@ -1137,7 +1145,11 @@ async function invokeDeployWithRetry(
       continue;
     }
 
-    if (isTransientError(raw)) {
+    // Only check pre-JSON output for transient signals.
+    // Scanning the full JSON body causes false positives when component names contain
+    // words like "authentication", "network", or "session" that match the broad patterns.
+    // When no JSON was found, preJsonText holds the entire output (which IS the error text).
+    if (isTransientError(preJsonText)) {
       const backoff = getBackoffMs(attempt);
       log(`   Transient error detected — waiting ${backoff / 1000}s before retry...`);
       // eslint-disable-next-line no-await-in-loop
@@ -1804,6 +1816,37 @@ function processReportTypeColumnFailure(
   skippedFields: string[],
   allSkippedFields: string[]
 ): FailureResult {
+  // "Could not find field OperatingHours in table Account"
+  // Two-group pattern: group 1 = field, group 2 = table/object.
+  // Construct missingName as "Object.Field" to reuse the shared removal path.
+  const tableFieldMatch = /Could not find field (.+?) in table (.+)/i.exec(errorMessage);
+  if (tableFieldMatch) {
+    const fieldPart = tableFieldMatch[1].trim();
+    const objectName = tableFieldMatch[2].trim();
+    const missingName = `${objectName}.${fieldPart}`;
+    const allWhitelisted = [...whitelist.fields, ...whitelist.objects];
+    if (shouldSkip(log, 'column', missingName, allWhitelisted, skippedFields, allSkippedFields)) {
+      return { handled: true, xmlContent };
+    }
+    log(`   Missing column reference: ${missingName}`);
+    const result = removeColumnFromReportType(xmlContent, fieldPart, objectName);
+    if (result.removed) {
+      log(`   Removed column for: ${missingName}`);
+      return {
+        handled: true,
+        xmlContent: result.updated,
+        removedRef: {
+          type: 'reportTypeColumn',
+          name: missingName,
+          label: `[Column] ${missingName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   Column not found in XML: ${missingName} — already removed or not present.`);
+    return { handled: true, xmlContent };
+  }
+
   const patterns = [
     /no CustomField named (.+?) found/i,
     /Entity of type 'CustomField' named '(.+?)' cannot be found/i,

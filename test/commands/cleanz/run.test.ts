@@ -553,4 +553,18 @@ describe('removeColumnFromReportType', () => {
     expect(removed).to.be.false;
     expect(updated).to.equal(xml);
   });
+
+  it('"Could not find field X in table Y" format: removes column by bare field name + object', () => {
+    // Error: "Could not find field OperatingHours in table Account"
+    // CleanZ parses this as fieldPart="OperatingHours", objectName="Account"
+    // and calls removeColumnFromReportType(xml, "OperatingHours", "Account").
+    const xml = makeRtXml([
+      { field: 'OperatingHours', table: 'Account' },
+      { field: 'AnnualRevenue', table: 'Account' },
+    ]);
+    const { updated, removed } = removeColumnFromReportType(xml, 'OperatingHours', 'Account');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('OperatingHours');
+    expect(updated).to.include('AnnualRevenue');
+  });
 });
