@@ -126,7 +126,8 @@ type RefType =
   | 'customMetadataType' // customMetadataTypeAccesses block referencing a missing __mdt type
   | 'customPermission' // customPermissions block referencing a missing CustomPermission
   | 'recordTypeVisibility' // recordTypeVisibilities block referencing a missing RecordType
-  | 'reportTypeColumn'; // columns block in a ReportType referencing a missing field/object
+  | 'reportTypeColumn' // columns block in a ReportType referencing a missing field/object
+  | 'reportTypeJoin'; // join block in a ReportType referencing a missing relationship
 
 type RemovedRef = {
   type: RefType;
@@ -657,6 +658,83 @@ export function removeColumnFromReportType(
   return { updated: xmlContent, removed: false };
 }
 
+// Stack-based helper: finds the innermost <join>…</join> block that contains `pos`.
+function findContainingJoinBlock(xml: string, pos: number): { start: number; end: number } | null {
+  const openRe = /<join>/g;
+  const closeRe = /<\/join>/g;
+  const JOIN_CLOSE_LEN = '</join>'.length;
+  type Ev = { pos: number; type: 'open' | 'close' };
+  const events: Ev[] = [];
+  let m: RegExpExecArray | null;
+  openRe.lastIndex = 0;
+  while ((m = openRe.exec(xml)) !== null) events.push({ pos: m.index, type: 'open' });
+  closeRe.lastIndex = 0;
+  while ((m = closeRe.exec(xml)) !== null) events.push({ pos: m.index + JOIN_CLOSE_LEN, type: 'close' });
+  events.sort((a, b) => a.pos - b.pos);
+
+  const matched: Array<{ start: number; end: number }> = [];
+  const stack: number[] = [];
+  for (const ev of events) {
+    if (ev.type === 'open') {
+      stack.push(ev.pos);
+    } else {
+      const start = stack.pop();
+      if (start !== undefined) matched.push({ start, end: ev.pos });
+    }
+  }
+  // Return the smallest (innermost) span that fully contains pos
+  return (
+    matched.filter((j) => j.start < pos && j.end > pos).sort((a, b) => a.end - a.start - (b.end - b.start))[0] ?? null
+  );
+}
+
+// Removes the <join> block for `relationshipName` (at any nesting level) plus all <columns>
+// whose <table> path contains that relationship as a path segment, then prunes any <sections>
+// that are left with no <columns>.
+export function removeJoinFromReportType(
+  xmlContent: string,
+  relationshipName: string
+): { updated: string; removed: boolean } {
+  const escapedRel = relationshipName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const relTagRe = new RegExp(`<relationship>[\\s]*${escapedRel}[\\s]*<\\/relationship>`, 'i');
+  const relMatch = relTagRe.exec(xmlContent);
+  if (!relMatch) return { updated: xmlContent, removed: false };
+
+  // ── 1. Remove the containing <join> block ──────────────────────────────────
+  const joinBlock = findContainingJoinBlock(xmlContent, relMatch.index);
+  if (!joinBlock) return { updated: xmlContent, removed: false };
+
+  // Extend start backward to include the leading line-indent so we don't leave a blank line
+  let trimStart = joinBlock.start;
+  while (trimStart > 0 && (xmlContent[trimStart - 1] === ' ' || xmlContent[trimStart - 1] === '\t')) {
+    trimStart--;
+  }
+  // If the char before the indent is a newline, eat it so the whole line disappears
+  if (trimStart > 0 && xmlContent[trimStart - 1] === '\n') trimStart--;
+
+  // Extend end forward past a trailing newline
+  let trimEnd = joinBlock.end;
+  if (xmlContent[trimEnd] === '\r') trimEnd++;
+  if (xmlContent[trimEnd] === '\n') trimEnd++;
+
+  let updated = xmlContent.slice(0, trimStart) + xmlContent.slice(trimEnd);
+
+  // ── 2. Remove all <columns> whose <table> contains the relationship as a segment ─
+  const relNameLower = relationshipName.toLowerCase();
+  const colBlockRe = /[ \t]*<columns>(?:(?!<columns>)[\s\S])*?<\/columns>[ \t]*\r?\n?/g;
+  updated = updated.replace(colBlockRe, (match) => {
+    const tbl = /<table>([\s\S]*?)<\/table>/i.exec(match)?.[1]?.trim() ?? '';
+    const segments = tbl.split('.').map((s) => s.toLowerCase());
+    return segments.includes(relNameLower) ? '' : match;
+  });
+
+  // ── 3. Prune <sections> blocks that have no <columns> remaining ────────────
+  const emptySectionRe = /[ \t]*<sections>(?:(?!<columns>)[\s\S])*?<\/sections>[ \t]*\r?\n?/g;
+  updated = updated.replace(emptySectionRe, '');
+
+  return { updated, removed: true };
+}
+
 // Removes a single <flagElement>true</flagElement> line from the objectPermissions block
 // for the given object — used when "The user license doesn't allow the permission: X" fires.
 // Only removes the flag when its value is "true"; if already false/absent, no-op.
@@ -1005,6 +1083,12 @@ function applyRefToXml(xml: string, ref: RemovedRef, filePath: string): { update
     const objectName = dotIdx >= 0 ? ref.name.substring(0, dotIdx) : undefined;
     return removeColumnFromReportType(xml, fieldPart, objectName);
   }
+  if (ref.type === 'reportTypeJoin') {
+    // ref.name is "ObjectName.RelationshipName" — extract just the relationship part.
+    const dotIdx = ref.name.lastIndexOf('.');
+    const relName = dotIdx >= 0 ? ref.name.substring(dotIdx + 1) : ref.name;
+    return removeJoinFromReportType(xml, relName);
+  }
   if (ref.type === 'userPermission') return removeUserPermissionFromXml(xml, ref.name);
   if (ref.type === 'objectFlag') {
     if (!ref.meta) return null;
@@ -1046,6 +1130,17 @@ function removeLayoutRelatedListByName(
 function removeRelatedListFieldEntry(xmlContent: string, fullFieldName: string): { updated: string; removed: boolean } {
   const escaped = fullFieldName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const regex = new RegExp(`[ \\t]*<fields>[ \\t]*${escaped}[ \\t]*</fields>[ \\t]*\\r?\\n?`, 'gi');
+  const updated = xmlContent.replace(regex, '');
+  return { updated, removed: updated !== xmlContent };
+}
+
+// Remove a <customButtons>name</customButtons> entry (bare button name, no object prefix).
+export function removeCustomButtonEntry(
+  xmlContent: string,
+  bareButtonName: string
+): { updated: string; removed: boolean } {
+  const escaped = bareButtonName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const regex = new RegExp(`[ \\t]*<customButtons>[ \\t]*${escaped}[ \\t]*</customButtons>[ \\t]*\\r?\\n?`, 'gi');
   const updated = xmlContent.replace(regex, '');
   return { updated, removed: updated !== xmlContent };
 }
@@ -1902,6 +1997,47 @@ function processReportTypeColumnFailure(
   return { handled: true, xmlContent };
 }
 
+function processReportTypeRelationshipFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  whitelist: WhitelistMap,
+  skippedFields: string[],
+  allSkippedFields: string[]
+): FailureResult {
+  // "No such relationship FakeRel__r on object Account"
+  const m = /No such relationship (.+?) on object (.+)/i.exec(errorMessage);
+  if (!m) return { handled: false, xmlContent };
+
+  const relName = m[1].trim();
+  const objectName = m[2].trim();
+  const missingName = `${objectName}.${relName}`;
+
+  const allWhitelisted = [...whitelist.fields, ...whitelist.objects];
+  if (shouldSkip(log, 'join', missingName, allWhitelisted, skippedFields, allSkippedFields)) {
+    return { handled: true, xmlContent };
+  }
+
+  log(`   Missing relationship join: ${missingName}`);
+  const result = removeJoinFromReportType(xmlContent, relName);
+  if (result.removed) {
+    log(`   Removed join + related columns/sections for: ${relName}`);
+    return {
+      handled: true,
+      xmlContent: result.updated,
+      removedRef: {
+        type: 'reportTypeJoin',
+        name: missingName,
+        label: `[Join] ${missingName}`,
+        deployError: errorMessage,
+      },
+    };
+  }
+
+  log(`   Join not found in XML: ${relName} — already removed or not present.`);
+  return { handled: true, xmlContent };
+}
+
 function processLayoutFailure(
   log: (msg: string) => void,
   errorMessage: string,
@@ -1942,41 +2078,20 @@ function processLayoutFailure(
     return { handled: true, xmlContent };
   }
 
-  // Missing field referenced by a relatedList column: In field: relatedList - no CustomField named X found
-  const rlFieldMatch = /In field: relatedList - no CustomField named (.+?) found/i.exec(errorMessage);
-  if (rlFieldMatch) {
-    const fullFieldName = rlFieldMatch[1].trim();
+  // Missing related list itself (custom obj lookup doesn't exist):
+  //   "In field: relatedList - no CustomField named Obj__c.Lookup__c found"
+  // The X is the <relatedList> value (relationship identifier), not a <fields> entry.
+  const rlRefMatch = /In field: relatedList - no CustomField named (.+?) found/i.exec(errorMessage);
+  if (rlRefMatch) {
+    const relatedListName = rlRefMatch[1].trim();
     const isInBatchAsAdd = promotionData.some(
-      (i) => i.t === 'CustomField' && i.n === fullFieldName && (!i.a || i.a.toLowerCase().startsWith('add'))
+      (i) => i.t === 'CustomField' && i.n === relatedListName && (!i.a || i.a.toLowerCase().startsWith('add'))
     );
     if (isInBatchAsAdd) {
-      log(`   [Layout] Skipping relatedList column — ${fullFieldName} is ADD in batch`);
+      log(`   [Layout] Skipping relatedList — ${relatedListName} is ADD in batch`);
       return { handled: true, xmlContent };
     }
-    log(`   [Layout] Missing relatedList column field: ${fullFieldName}`);
-    const { updated, removed } = removeRelatedListFieldEntry(xmlContent, fullFieldName);
-    if (removed) {
-      log(`   [Layout] Removed <fields> entry for: ${fullFieldName}`);
-      return {
-        handled: true,
-        xmlContent: updated,
-        removedRef: {
-          type: 'field',
-          name: fullFieldName,
-          label: `[Layout.relatedList.field] ${fullFieldName}`,
-          deployError: errorMessage,
-        },
-      };
-    }
-    log(`   [Layout] <fields> entry not found for: ${fullFieldName}`);
-    return { handled: true, xmlContent };
-  }
-
-  // Missing relatedList object: Cannot find related list: RelationshipName
-  const rlMatch = /Cannot find related list:\s*(.+)/i.exec(errorMessage);
-  if (rlMatch) {
-    const relatedListName = rlMatch[1].trim();
-    log(`   [Layout] Missing relatedList: ${relatedListName}`);
+    log(`   [Layout] Missing relatedList (lookup field not found): ${relatedListName}`);
     const { updated, removed } = removeLayoutRelatedListByName(xmlContent, relatedListName);
     if (removed) {
       log(`   [Layout] Removed relatedLists block for: ${relatedListName}`);
@@ -1995,7 +2110,157 @@ function processLayoutFailure(
     return { handled: true, xmlContent };
   }
 
+  // Missing column field inside a real related list:
+  //   "Invalid field:FakeField__c in related list:RelatedContactList"
+  const invalidRlFieldMatch = /Invalid field:(.+?) in related list:(.+)/i.exec(errorMessage);
+  if (invalidRlFieldMatch) {
+    const fieldName = invalidRlFieldMatch[1].trim();
+    const isInBatchAsAdd = promotionData.some(
+      (i) => i.t === 'CustomField' && i.n === fieldName && (!i.a || i.a.toLowerCase().startsWith('add'))
+    );
+    if (isInBatchAsAdd) {
+      log(`   [Layout] Skipping relatedList column — ${fieldName} is ADD in batch`);
+      return { handled: true, xmlContent };
+    }
+    log(`   [Layout] Invalid relatedList column field: ${fieldName}`);
+    const { updated, removed } = removeRelatedListFieldEntry(xmlContent, fieldName);
+    if (removed) {
+      log(`   [Layout] Removed <fields> entry for: ${fieldName}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: fieldName,
+          label: `[Layout.relatedList.field] ${fieldName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] <fields> entry not found for: ${fieldName}`);
+    return { handled: true, xmlContent };
+  }
+
+  // Missing relatedList object (wrong list name format):
+  //   "Cannot find related list: RelationshipName"
+  const rlMatch = /Cannot find related list:\s*(.+)/i.exec(errorMessage);
+  if (rlMatch) {
+    const relatedListName = rlMatch[1].trim();
+    log(`   [Layout] Cannot find relatedList: ${relatedListName}`);
+    const { updated, removed } = removeLayoutRelatedListByName(xmlContent, relatedListName);
+    if (removed) {
+      log(`   [Layout] Removed relatedLists block for: ${relatedListName}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: relatedListName,
+          label: `[Layout.relatedList] ${relatedListName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] relatedLists block not found for: ${relatedListName}`);
+    return { handled: true, xmlContent };
+  }
+
+  const cbResult = handleLayoutCustomButtonFailure(log, errorMessage, xmlContent, promotionData);
+  if (cbResult !== null) return cbResult;
+
+  const qaResult = handleLayoutQuickActionFailure(log, errorMessage, xmlContent, promotionData);
+  if (qaResult !== null) return qaResult;
+
   return { handled: false, xmlContent };
+}
+
+// Missing custom button (WebLink):
+//   "In field: customButtons - no WebLink named Account.ButtonName found"
+// SF prepends the object name; the <customButtons> element holds just the bare name.
+function handleLayoutCustomButtonFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  promotionData: PromotionItem[]
+): FailureResult | null {
+  const m = /In field: customButtons - no WebLink named (.+?) found/i.exec(errorMessage);
+  if (!m) return null;
+  const fullName = m[1].trim();
+  const dotIdx = fullName.lastIndexOf('.');
+  const bareButton = dotIdx >= 0 ? fullName.substring(dotIdx + 1) : fullName;
+  const isInBatchAsAdd = promotionData.some(
+    (i) =>
+      i.t === 'WebLink' && (i.n === fullName || i.n === bareButton) && (!i.a || i.a.toLowerCase().startsWith('add'))
+  );
+  if (isInBatchAsAdd) {
+    log(`   [Layout] Skipping customButton — ${fullName} is ADD in batch`);
+    return { handled: true, xmlContent };
+  }
+  log(`   [Layout] Missing custom button: ${fullName}`);
+  const { updated, removed } = removeCustomButtonEntry(xmlContent, bareButton);
+  if (removed) {
+    log(`   [Layout] Removed <customButtons> entry for: ${fullName}`);
+    return {
+      handled: true,
+      xmlContent: updated,
+      removedRef: {
+        type: 'field',
+        name: fullName,
+        label: `[Layout.customButton] ${fullName}`,
+        deployError: errorMessage,
+      },
+    };
+  }
+  log(`   [Layout] <customButtons> entry not found for: ${fullName}`);
+  return { handled: true, xmlContent };
+}
+
+// Missing QuickAction (covers both <quickActionList> and <platformActionList>):
+//   "In field: QuickAction - no QuickAction named Account.ActionName found"
+function handleLayoutQuickActionFailure(
+  log: (msg: string) => void,
+  errorMessage: string,
+  xmlContent: string,
+  promotionData: PromotionItem[]
+): FailureResult | null {
+  const m = /In field: QuickAction - no QuickAction named (.+?) found/i.exec(errorMessage);
+  if (!m) return null;
+  const quickActionName = m[1].trim();
+  const isInBatchAsAdd = promotionData.some(
+    (i) => i.t === 'QuickAction' && i.n === quickActionName && (!i.a || i.a.toLowerCase().startsWith('add'))
+  );
+  if (isInBatchAsAdd) {
+    log(`   [Layout] Skipping QuickAction — ${quickActionName} is ADD in batch`);
+    return { handled: true, xmlContent };
+  }
+  log(`   [Layout] Missing QuickAction: ${quickActionName}`);
+  let updated = xmlContent;
+  let removed = false;
+  const qaList = removeXmlBlock(updated, 'quickActionListItems', 'quickActionName', quickActionName);
+  if (qaList.removed) {
+    updated = qaList.updated;
+    removed = true;
+  }
+  const paList = removeXmlBlock(updated, 'platformActionListItems', 'actionName', quickActionName);
+  if (paList.removed) {
+    updated = paList.updated;
+    removed = true;
+  }
+  if (removed) {
+    log(`   [Layout] Removed QuickAction references for: ${quickActionName}`);
+    return {
+      handled: true,
+      xmlContent: updated,
+      removedRef: {
+        type: 'field',
+        name: quickActionName,
+        label: `[Layout.QuickAction] ${quickActionName}`,
+        deployError: errorMessage,
+      },
+    };
+  }
+  log(`   [Layout] QuickAction references not found for: ${quickActionName}`);
+  return { handled: true, xmlContent };
 }
 
 function processRegisteredFailure(
@@ -2188,6 +2453,23 @@ function processFailures(
     if (/You must specify a page or object/i.test(err)) {
       log('   [ProfileActionOverride] page/object error — handled by pre-check');
       continue;
+    }
+
+    // ── ReportType: relationship join removal (must run before column handler) ──
+    if (metadataType === 'ReportType') {
+      const rtRelResult = processReportTypeRelationshipFailure(
+        log,
+        err,
+        updatedXml,
+        whitelist,
+        skippedFields,
+        allSkippedFields
+      );
+      if (rtRelResult.handled) {
+        updatedXml = rtRelResult.xmlContent;
+        if (rtRelResult.removedRef) removedRefs.push(rtRelResult.removedRef);
+        continue;
+      }
     }
 
     // ── ReportType column removal — intercept field errors before generic handler ──

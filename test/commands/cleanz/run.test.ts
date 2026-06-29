@@ -23,6 +23,8 @@ import {
   maskPermSetFalsePositives,
   maskProfileFalsePositives,
   removeColumnFromReportType,
+  removeCustomButtonEntry,
+  removeJoinFromReportType,
   removeProfileActionOverridesWithMissingObject,
   removeProfileActionOverridesWithMissingRecordType,
   removeXmlBlock,
@@ -566,5 +568,222 @@ describe('removeColumnFromReportType', () => {
     expect(removed).to.be.true;
     expect(updated).not.to.include('OperatingHours');
     expect(updated).to.include('AnnualRevenue');
+  });
+});
+
+// ─── removeJoinFromReportType ──────────────────────────────────────────────────
+
+const makeRtWithJoin = (
+  relName: string,
+  joinColField: string,
+  baseColField = 'Name'
+) => `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <baseObject>Account</baseObject>
+    <join>
+        <outerJoin>true</outerJoin>
+        <relationship>${relName}</relationship>
+    </join>
+    <label>Test</label>
+    <sections>
+        <columns>
+            <checkedByDefault>true</checkedByDefault>
+            <field>${baseColField}</field>
+            <table>Account</table>
+        </columns>
+        <masterLabel>Accounts</masterLabel>
+    </sections>
+    <sections>
+        <columns>
+            <checkedByDefault>false</checkedByDefault>
+            <field>${joinColField}</field>
+            <table>Account.${relName}</table>
+        </columns>
+        <masterLabel>Join Object</masterLabel>
+    </sections>
+</ReportType>
+`;
+
+describe('removeJoinFromReportType', () => {
+  it('removes the <join> block for the named relationship', () => {
+    const xml = makeRtWithJoin('FakeRel__r', 'Name');
+    const { updated, removed } = removeJoinFromReportType(xml, 'FakeRel__r');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('<relationship>FakeRel__r</relationship>');
+    expect(updated).not.to.include('<join>');
+  });
+
+  it('removes all <columns> whose <table> path contains the relationship', () => {
+    const xml = makeRtWithJoin('FakeRel__r', 'SomeField__c');
+    const { updated } = removeJoinFromReportType(xml, 'FakeRel__r');
+    expect(updated).not.to.include('Account.FakeRel__r');
+    expect(updated).not.to.include('SomeField__c');
+  });
+
+  it('keeps columns and sections that belong to other objects', () => {
+    const xml = makeRtWithJoin('FakeRel__r', 'Name');
+    const { updated } = removeJoinFromReportType(xml, 'FakeRel__r');
+    // Account section (Name field, table=Account) must survive
+    expect(updated).to.include('<field>Name</field>');
+    expect(updated).to.include('<table>Account</table>');
+  });
+
+  it('removes the <sections> block that becomes empty after column removal', () => {
+    const xml = makeRtWithJoin('FakeRel__r', 'Name');
+    const { updated } = removeJoinFromReportType(xml, 'FakeRel__r');
+    // The join section had only one column — should be gone entirely
+    expect(updated).not.to.include('Join Object');
+  });
+
+  it('returns removed=false when the relationship is not in the XML', () => {
+    const xml = makeRtWithJoin('RealRel__r', 'Name');
+    const { removed } = removeJoinFromReportType(xml, 'NonExistentRel__r');
+    expect(removed).to.be.false;
+  });
+
+  it('handles nested join — removes inner join block only, keeps outer', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType xmlns="http://soap.sforce.com/2006/04/metadata">
+    <baseObject>Account</baseObject>
+    <join>
+        <join>
+            <outerJoin>true</outerJoin>
+            <relationship>FakeInnerRel__r</relationship>
+        </join>
+        <outerJoin>false</outerJoin>
+        <relationship>Contacts</relationship>
+    </join>
+    <label>Test</label>
+    <sections>
+        <columns>
+            <checkedByDefault>true</checkedByDefault>
+            <field>Name</field>
+            <table>Account</table>
+        </columns>
+        <masterLabel>Accounts</masterLabel>
+    </sections>
+    <sections>
+        <columns>
+            <checkedByDefault>false</checkedByDefault>
+            <field>Email</field>
+            <table>Account.Contacts</table>
+        </columns>
+        <masterLabel>Contacts</masterLabel>
+    </sections>
+    <sections>
+        <columns>
+            <checkedByDefault>false</checkedByDefault>
+            <field>SomeField__c</field>
+            <table>Account.Contacts.FakeInnerRel__r</table>
+        </columns>
+        <masterLabel>Fake Inner</masterLabel>
+    </sections>
+</ReportType>
+`;
+    const { updated, removed } = removeJoinFromReportType(xml, 'FakeInnerRel__r');
+    expect(removed).to.be.true;
+    // Outer Contacts join must remain
+    expect(updated).to.include('<relationship>Contacts</relationship>');
+    // Inner fake join must be gone
+    expect(updated).not.to.include('<relationship>FakeInnerRel__r</relationship>');
+    // Contacts section column must survive
+    expect(updated).to.include('Account.Contacts');
+    // Fake inner section must be gone
+    expect(updated).not.to.include('Account.Contacts.FakeInnerRel__r');
+  });
+});
+
+// ─── removeCustomButtonEntry ──────────────────────────────────────────────────
+
+const makeLayoutWithButtons = (...buttons: string[]) => `<?xml version="1.0" encoding="UTF-8"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+${buttons.map((b) => `    <customButtons>${b}</customButtons>`).join('\n')}
+    <layoutSections/>
+</Layout>
+`;
+
+describe('removeCustomButtonEntry', () => {
+  it('removes the matching <customButtons> entry', () => {
+    const xml = makeLayoutWithButtons('FakeButton__c', 'RealButton');
+    const { updated, removed } = removeCustomButtonEntry(xml, 'FakeButton__c');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('FakeButton__c');
+    expect(updated).to.include('RealButton');
+  });
+
+  it('returns removed=false when the button is not present', () => {
+    const xml = makeLayoutWithButtons('RealButton');
+    const { removed } = removeCustomButtonEntry(xml, 'NonExistent__c');
+    expect(removed).to.be.false;
+  });
+
+  it('removes only the matching entry when multiple buttons exist', () => {
+    const xml = makeLayoutWithButtons('ButtonA', 'ButtonB', 'ButtonC');
+    const { updated, removed } = removeCustomButtonEntry(xml, 'ButtonB');
+    expect(removed).to.be.true;
+    expect(updated).to.include('ButtonA');
+    expect(updated).not.to.include('ButtonB');
+    expect(updated).to.include('ButtonC');
+  });
+});
+
+// ─── removeXmlBlock: quickActionListItems / platformActionListItems ────────────
+
+const makeLayoutWithQuickActions = (qaName: string, paName: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+    <quickActionList>
+        <quickActionListItems>
+            <quickActionName>FeedItem.TextPost</quickActionName>
+        </quickActionListItems>
+        <quickActionListItems>
+            <quickActionName>${qaName}</quickActionName>
+        </quickActionListItems>
+    </quickActionList>
+    <platformActionList>
+        <actionListContext>Record</actionListContext>
+        <platformActionListItems>
+            <actionName>Edit</actionName>
+            <actionType>StandardButton</actionType>
+            <sortOrder>0</sortOrder>
+        </platformActionListItems>
+        <platformActionListItems>
+            <actionName>${paName}</actionName>
+            <actionType>QuickAction</actionType>
+            <sortOrder>1</sortOrder>
+        </platformActionListItems>
+    </platformActionList>
+</Layout>
+`;
+
+describe('removeXmlBlock for quickAction layout items', () => {
+  it('removes a quickActionListItems block by quickActionName', () => {
+    const xml = makeLayoutWithQuickActions('Account.FakeQA', 'Account.OtherPA');
+    const { updated, removed } = removeXmlBlock(xml, 'quickActionListItems', 'quickActionName', 'Account.FakeQA');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('<quickActionName>Account.FakeQA</quickActionName>');
+    expect(updated).to.include('FeedItem.TextPost');
+    expect(updated).to.include('Account.OtherPA'); // platformActionList entry untouched
+  });
+
+  it('removes a platformActionListItems block by actionName', () => {
+    const xml = makeLayoutWithQuickActions('Account.OtherQA', 'Account.FakePA');
+    const { updated, removed } = removeXmlBlock(xml, 'platformActionListItems', 'actionName', 'Account.FakePA');
+    expect(removed).to.be.true;
+    expect(updated).not.to.include('<actionName>Account.FakePA</actionName>');
+    expect(updated).to.include('Edit');
+    expect(updated).to.include('StandardButton');
+    expect(updated).to.include('Account.OtherQA'); // quickActionList entry untouched
+  });
+
+  it('keeps other quickActionListItems when removing one', () => {
+    const xml = makeLayoutWithQuickActions('Account.FakeQA', 'Account.FakeQA');
+    const { updated } = removeXmlBlock(xml, 'quickActionListItems', 'quickActionName', 'Account.FakeQA');
+    expect(updated).to.include('FeedItem.TextPost');
+  });
+
+  it('returns removed=false when the action is not in the list', () => {
+    const xml = makeLayoutWithQuickActions('Account.OtherQA', 'Account.OtherQA');
+    const { removed } = removeXmlBlock(xml, 'quickActionListItems', 'quickActionName', 'Account.FakeQA');
+    expect(removed).to.be.false;
   });
 });

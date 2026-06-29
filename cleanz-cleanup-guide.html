@@ -1,0 +1,1735 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CleanZ — What Gets Cleaned &amp; How</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        background: #f8fafc;
+        color: #1e293b;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      /* ── HERO ── */
+      .hero {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 60%, #0369a1 100%);
+        color: #fff;
+        padding: 48px 60px 40px;
+      }
+      .hero-badge {
+        display: inline-block;
+        background: rgba(14, 165, 233, 0.25);
+        border: 1px solid rgba(14, 165, 233, 0.5);
+        color: #7dd3fc;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+        padding: 4px 12px;
+        border-radius: 20px;
+        margin-bottom: 14px;
+      }
+      .hero h1 {
+        font-size: 34px;
+        font-weight: 800;
+        letter-spacing: -0.5px;
+        margin-bottom: 8px;
+      }
+      .hero h1 span {
+        color: #38bdf8;
+      }
+      .hero p {
+        color: #94a3b8;
+        font-size: 15px;
+        max-width: 700px;
+      }
+      .hero-tags {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+        flex-wrap: wrap;
+      }
+      .hero-tag {
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #cbd5e1;
+        font-size: 12px;
+        padding: 4px 12px;
+        border-radius: 6px;
+      }
+
+      /* ── LAYOUT ── */
+      .container {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 48px;
+      }
+      .section {
+        padding: 48px 0 36px;
+        border-bottom: 1px solid #e2e8f0;
+      }
+      .section:last-child {
+        border-bottom: none;
+      }
+      .section-label {
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: #0369a1;
+        margin-bottom: 6px;
+      }
+      .section-title {
+        font-size: 22px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 10px;
+      }
+      .section-desc {
+        color: #475569;
+        max-width: 820px;
+        margin-bottom: 28px;
+      }
+
+      /* ── METADATA TYPE PILL ── */
+      .type-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 16px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 700;
+        margin-bottom: 28px;
+      }
+      .type-pill.purple {
+        background: #ede9fe;
+        color: #6d28d9;
+        border: 1.5px solid #c4b5fd;
+      }
+      .type-pill.blue {
+        background: #dbeafe;
+        color: #1d4ed8;
+        border: 1.5px solid #93c5fd;
+      }
+      .type-pill.green {
+        background: #dcfce7;
+        color: #15803d;
+        border: 1.5px solid #86efac;
+      }
+      .type-pill.amber {
+        background: #fef3c7;
+        color: #92400e;
+        border: 1.5px solid #fcd34d;
+      }
+
+      /* ── ERROR → REMOVAL CARD ── */
+      .er-card {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        margin-bottom: 20px;
+        overflow: hidden;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+      }
+      .er-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 20px;
+        border-bottom: 1px solid #f1f5f9;
+        background: #fafafa;
+      }
+      .er-num {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: #0369a1;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .er-title {
+        font-weight: 700;
+        font-size: 14px;
+        color: #0f172a;
+      }
+      .er-body {
+        padding: 18px 20px;
+      }
+
+      /* ── STEP ROW: error → block ── */
+      .step-row {
+        display: grid;
+        grid-template-columns: 1fr 40px 1fr;
+        gap: 0;
+        align-items: start;
+        margin-bottom: 14px;
+      }
+      .step-row.three-col {
+        grid-template-columns: 1fr 30px 1fr 30px 1fr;
+      }
+      .step-arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding-top: 18px;
+        font-size: 20px;
+        color: #94a3b8;
+      }
+
+      /* ── BOX TYPES ── */
+      .box {
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 13px;
+      }
+      .box-label {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin-bottom: 6px;
+        opacity: 0.7;
+      }
+      .box.error-box {
+        background: #fef2f2;
+        border: 1.5px solid #fca5a5;
+        color: #991b1b;
+      }
+      .box.xml-before {
+        background: #fff8e7;
+        border: 1.5px solid #fcd34d;
+        color: #78350f;
+      }
+      .box.xml-after {
+        background: #f0fdf4;
+        border: 1.5px solid #86efac;
+        color: #14532d;
+      }
+      .box.xml-after .xml-gone {
+        text-decoration: line-through;
+        opacity: 0.45;
+      }
+      .box.info-box {
+        background: #eff6ff;
+        border: 1.5px solid #93c5fd;
+        color: #1e40af;
+      }
+      .box.warn-box {
+        background: #fffbeb;
+        border: 1.5px solid #fcd34d;
+        color: #78350f;
+      }
+
+      code {
+        font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+        font-size: 12px;
+        white-space: pre;
+        display: block;
+        line-height: 1.8;
+      }
+      code .hl {
+        background: #fde68a;
+        border-radius: 2px;
+      } /* highlight match */
+      code .del {
+        background: #fee2e2;
+        border-radius: 2px;
+        text-decoration: line-through;
+        opacity: 0.55;
+      } /* deleted line */
+      code .dim {
+        opacity: 0.45;
+      }
+
+      /* ── ROUTE BADGE ── */
+      .route-badge {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.7px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      .route-badge.primary {
+        background: #dbeafe;
+        color: #1d4ed8;
+      }
+      .route-badge.fallback {
+        background: #faf5ff;
+        color: #6d28d9;
+        border: 1px solid #c4b5fd;
+      }
+      .route-badge.skip {
+        background: #f0fdf4;
+        color: #15803d;
+        border: 1px solid #86efac;
+      }
+      .route-badge.guard {
+        background: #fff1f2;
+        color: #9f1239;
+        border: 1px solid #fda4af;
+      }
+
+      /* ── OVERVIEW FLOW ── */
+      .ov-flow {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0;
+        margin: 24px 0;
+      }
+      .ov-step {
+        flex: 1;
+        min-width: 130px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+      }
+      .ov-box {
+        width: 100%;
+        padding: 10px 8px;
+        border-radius: 10px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.4;
+      }
+      .ov-box.red {
+        background: #fef2f2;
+        border: 1.5px solid #fca5a5;
+        color: #b91c1c;
+      }
+      .ov-box.amber {
+        background: #fffbeb;
+        border: 1.5px solid #fcd34d;
+        color: #92400e;
+      }
+      .ov-box.blue {
+        background: #eff6ff;
+        border: 1.5px solid #93c5fd;
+        color: #1d4ed8;
+      }
+      .ov-box.green {
+        background: #f0fdf4;
+        border: 1.5px solid #86efac;
+        color: #15803d;
+      }
+      .ov-box.purple {
+        background: #faf5ff;
+        border: 1.5px solid #c4b5fd;
+        color: #6d28d9;
+      }
+      .ov-arrow {
+        font-size: 20px;
+        color: #94a3b8;
+        padding: 0 4px;
+        flex-shrink: 0;
+        align-self: center;
+      }
+
+      /* ── NOTE ── */
+      .note {
+        background: #f0f9ff;
+        border-left: 4px solid #38bdf8;
+        border-radius: 0 8px 8px 0;
+        padding: 12px 16px;
+        font-size: 13px;
+        color: #0c4a6e;
+        margin: 16px 0;
+      }
+      .note strong {
+        color: #0369a1;
+      }
+
+      /* ── TABLE ── */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 16px 0;
+        font-size: 13px;
+      }
+      th {
+        background: #f1f5f9;
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 700;
+        color: #374151;
+        border: 1px solid #e2e8f0;
+      }
+      td {
+        padding: 9px 14px;
+        border: 1px solid #e2e8f0;
+        vertical-align: top;
+        color: #374151;
+      }
+      tr:nth-child(even) td {
+        background: #f8fafc;
+      }
+      td.mono {
+        font-family: 'Cascadia Code', Consolas, monospace;
+        font-size: 12px;
+        color: #7c3aed;
+      }
+
+      /* ── TOC ── */
+      .toc {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 20px 24px;
+        margin: 32px 0;
+        display: inline-block;
+        min-width: 300px;
+      }
+      .toc-title {
+        font-weight: 700;
+        font-size: 13px;
+        color: #0f172a;
+        margin-bottom: 10px;
+      }
+      .toc a {
+        display: block;
+        color: #0369a1;
+        text-decoration: none;
+        padding: 3px 0;
+        font-size: 13px;
+      }
+      .toc a:hover {
+        text-decoration: underline;
+      }
+      .toc-indent {
+        padding-left: 16px;
+      }
+
+      /* ── SECTION ANCHOR ── */
+      .anchor {
+        display: block;
+        position: relative;
+        top: -80px;
+        visibility: hidden;
+      }
+
+      /* ── DIVIDER ── */
+      .er-divider {
+        border: none;
+        border-top: 1px dashed #e2e8f0;
+        margin: 14px 0;
+      }
+
+      @media (max-width: 700px) {
+        .hero {
+          padding: 32px 20px;
+        }
+        .container {
+          padding: 0 16px;
+        }
+        .step-row,
+        .step-row.three-col {
+          grid-template-columns: 1fr;
+        }
+        .step-arrow {
+          padding: 4px 0;
+          transform: rotate(90deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- ═══════════════════════════════════ HERO ═══════════════════════════════════ -->
+    <div class="hero">
+      <div class="hero-badge">CleanZ Reference Guide</div>
+      <h1>What Gets <span>Cleaned</span> &amp; How</h1>
+      <p>
+        For every Salesforce deployment error, this page shows exactly which XML block CleanZ removes — and all the
+        alternate routes it takes when the standard match doesn't find anything. Written so anyone can follow it.
+      </p>
+      <div class="hero-tags">
+        <span class="hero-tag">Permission Sets</span>
+        <span class="hero-tag">Profiles</span>
+        <span class="hero-tag">Report Types</span>
+        <span class="hero-tag">Layouts</span>
+      </div>
+    </div>
+
+    <div class="container">
+      <!-- ═══════════════ HOW IT WORKS OVERVIEW ═══════════════ -->
+      <div class="section">
+        <span class="anchor" id="overview"></span>
+        <div class="section-label">Overview</div>
+        <div class="section-title">The Basic Flow — Same for Every File</div>
+        <div class="section-desc">
+          CleanZ tries to deploy the file. If Salesforce returns an error, CleanZ reads the error message, figures out
+          what is missing, removes that exact XML block, and tries again. It keeps looping until the file deploys clean.
+        </div>
+
+        <div class="ov-flow">
+          <div class="ov-step">
+            <div class="ov-box red">Salesforce<br />returns error</div>
+          </div>
+          <div class="ov-arrow">→</div>
+          <div class="ov-step">
+            <div class="ov-box amber">CleanZ reads<br />error message</div>
+          </div>
+          <div class="ov-arrow">→</div>
+          <div class="ov-step">
+            <div class="ov-box blue">Finds the<br />broken XML block</div>
+          </div>
+          <div class="ov-arrow">→</div>
+          <div class="ov-step">
+            <div class="ov-box purple">Deletes the<br />block from file</div>
+          </div>
+          <div class="ov-arrow">→</div>
+          <div class="ov-step">
+            <div class="ov-box green">Deploys again<br />✓ Clean</div>
+          </div>
+        </div>
+
+        <div class="toc">
+          <div class="toc-title">Jump to a section</div>
+          <a href="#permsets">Permission Sets</a>
+          <a href="#profiles">Profiles</a>
+          <a href="#reporttypes">Report Types</a>
+          <a href="#layouts">Layouts</a>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════
+           PERMISSION SETS
+           ═══════════════════════════════════════════════════════ -->
+      <div class="section">
+        <span class="anchor" id="permsets"></span>
+        <span class="type-pill purple">📋 Permission Sets &amp; Permission Set Groups</span>
+        <div class="section-title">Permission Sets</div>
+        <div class="section-desc">
+          A permission set gives users access to fields, classes, objects, flows, etc. If any of those things no longer
+          exist in the org, Salesforce throws an error. CleanZ removes the matching block for that missing item.
+        </div>
+
+        <!-- 1. Field -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">1</div>
+            <div class="er-title">Missing Custom Field</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no CustomField named <span class="hl">Opportunity.Budget__c</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;fieldPermissions&gt; &lt;editable&gt;true&lt;/editable&gt;
+                    &lt;field&gt;Opportunity.Budget__c&lt;/field&gt; &lt;readable&gt;true&lt;/readable&gt;
+                    &lt;/fieldPermissions&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+            <div class="note">
+              CleanZ extracts <strong>Opportunity.Budget__c</strong> from the error, then finds the
+              <code style="display: inline">&lt;fieldPermissions&gt;</code> block where
+              <code style="display: inline">&lt;field&gt;</code> matches exactly.
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Apex Class -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">2</div>
+            <div class="er-title">Missing Apex Class</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no ApexClass named <span class="hl">MyOldClass</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;classAccesses&gt; &lt;apexClass&gt;MyOldClass&lt;/apexClass&gt;
+                    &lt;enabled&gt;true&lt;/enabled&gt; &lt;/classAccesses&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Apex Page -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">3</div>
+            <div class="er-title">Missing Apex Page (Visualforce)</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no ApexPage named <span class="hl">MyOldPage</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;pageAccesses&gt; &lt;apexPage&gt;MyOldPage&lt;/apexPage&gt; &lt;enabled&gt;true&lt;/enabled&gt;
+                    &lt;/pageAccesses&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Custom Tab -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">4</div>
+            <div class="er-title">Missing Custom Tab</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no CustomTab named <span class="hl">MyObject__c</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;tabVisibilities&gt; &lt;tab&gt;MyObject__c&lt;/tab&gt;
+                    &lt;visibility&gt;DefaultOn&lt;/visibility&gt; &lt;/tabVisibilities&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Custom Object -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">5</div>
+            <div class="er-title">Missing Custom Object</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no CustomObject named <span class="hl">OldObject__c</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;objectPermissions&gt; &lt;object&gt;OldObject__c&lt;/object&gt;
+                    &lt;allowRead&gt;true&lt;/allowRead&gt; &lt;allowCreate&gt;true&lt;/allowCreate&gt; ...
+                    &lt;/objectPermissions&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. Custom Metadata Type -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">6</div>
+            <div class="er-title">Missing Custom Metadata Type</div>
+          </div>
+          <div class="er-body">
+            <div class="note" style="margin-bottom: 14px">
+              <strong>Important:</strong> The error says "CustomObject" but the field hint is
+              <code style="display: inline">customMetadataType</code> — CleanZ checks this hint first so it removes the
+              right block, not <code style="display: inline">&lt;objectPermissions&gt;</code>.
+            </div>
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >In field: <span class="hl">customMetadataType</span> - no CustomObject named
+                  <span class="hl">My_Config__mdt</span> found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;customMetadataTypeAccesses&gt; &lt;name&gt;My_Config__mdt&lt;/name&gt;
+                    &lt;enabled&gt;true&lt;/enabled&gt; &lt;/customMetadataTypeAccesses&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 7. Custom Permission -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">7</div>
+            <div class="er-title">Missing Custom Permission</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >In field: customPermission - no CustomPermission named
+                  <span class="hl">My_Custom_Perm</span> found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;customPermissions&gt; &lt;enabled&gt;true&lt;/enabled&gt;
+                    &lt;name&gt;My_Custom_Perm&lt;/name&gt; &lt;/customPermissions&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 8. Record Type -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">8</div>
+            <div class="er-title">Missing Record Type</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>In field: recordType - no RecordType named <span class="hl">Opportunity.Old_RT</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;recordTypeVisibilities&gt; &lt;recordType&gt;Opportunity.Old_RT&lt;/recordType&gt;
+                    &lt;visible&gt;true&lt;/visible&gt; &lt;/recordTypeVisibilities&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 9. Flow -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">9</div>
+            <div class="er-title">Missing Flow</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no Flow named <span class="hl">My_Old_Flow</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;flowAccesses&gt; &lt;enabled&gt;true&lt;/enabled&gt; &lt;flow&gt;My_Old_Flow&lt;/flow&gt;
+                    &lt;/flowAccesses&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 10. Layout -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">10</div>
+            <div class="er-title">Missing Layout Assignment</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no Layout named <span class="hl">Account-Account Layout</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;layoutAssignments&gt; &lt;layout&gt;Account-Account Layout&lt;/layout&gt;
+                    &lt;/layoutAssignments&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 11. App -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">11</div>
+            <div class="er-title">Missing Custom Application</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no CustomApplication named <span class="hl">Old_Sales_App</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;applicationVisibilities&gt; &lt;application&gt;Old_Sales_App&lt;/application&gt;
+                    &lt;visible&gt;true&lt;/visible&gt; &lt;/applicationVisibilities&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 12. Unknown User Permission -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">12</div>
+            <div class="er-title">Unknown User Permission</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>Unknown user permission: <span class="hl">ViewAllData</span></code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;userPermissions&gt; &lt;enabled&gt;true&lt;/enabled&gt; &lt;name&gt;ViewAllData&lt;/name&gt;
+                    &lt;/userPermissions&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 13. User License -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">13</div>
+            <div class="er-title">User License Does Not Allow a Permission Flag</div>
+          </div>
+          <div class="er-body">
+            <div class="note" style="margin-bottom: 14px">
+              This does <strong>not</strong> delete the whole block — it only sets the offending flag to
+              <code style="display: inline">false</code>.
+            </div>
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >The user license doesn't allow the permission: <span class="hl">Modify All</span>
+                  <span class="hl">CodeBuilder__Alert__e</span></code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Line Removed Inside Block</div>
+                <code>
+                  &lt;objectPermissions&gt; &lt;object&gt;CodeBuilder__Alert__e&lt;/object&gt;
+                  &lt;allowRead&gt;true&lt;/allowRead&gt;
+                  <span class="del"> &lt;modifyAllRecords&gt;true&lt;/modifyAllRecords&gt;</span>
+                  &lt;/objectPermissions&gt;</code
+                >
+              </div>
+            </div>
+            <table>
+              <tr>
+                <th>Error says</th>
+                <th>XML flag removed</th>
+              </tr>
+              <tr>
+                <td>Modify All</td>
+                <td class="mono">&lt;modifyAllRecords&gt;</td>
+              </tr>
+              <tr>
+                <td>View All</td>
+                <td class="mono">&lt;viewAllRecords&gt;</td>
+              </tr>
+              <tr>
+                <td>Read</td>
+                <td class="mono">&lt;allowRead&gt;</td>
+              </tr>
+              <tr>
+                <td>Create</td>
+                <td class="mono">&lt;allowCreate&gt;</td>
+              </tr>
+              <tr>
+                <td>Edit</td>
+                <td class="mono">&lt;allowEdit&gt;</td>
+              </tr>
+              <tr>
+                <td>Delete</td>
+                <td class="mono">&lt;allowDelete&gt;</td>
+              </tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════
+           PROFILES
+           ═══════════════════════════════════════════════════════ -->
+      <div class="section">
+        <span class="anchor" id="profiles"></span>
+        <span class="type-pill blue">👤 Profiles</span>
+        <div class="section-title">Profiles (ADD Operation)</div>
+        <div class="section-desc">
+          Profiles are very different from permission sets. Copado's TRIM process strips most sections from a profile
+          before deploying, so Salesforce never sees them and never throws errors for them. CleanZ only handles the
+          three things Copado actually enforces for an ADD profile.
+        </div>
+
+        <div class="note" style="margin-bottom: 24px">
+          <strong>Why not all 13 like permission sets?</strong><br />
+          Copado TRIM removes fields, classes, objects, pages, tabs, record types, layouts, apps, custom permissions,
+          and custom metadata from profiles before deployment. Those sections are gone before Salesforce even looks — so
+          no errors ever fire for them. CleanZ only needs to handle what actually reaches Salesforce.
+        </div>
+
+        <!-- Profile 1: Flow -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">1</div>
+            <div class="er-title">Missing Flow</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>no Flow named <span class="hl">My_Old_Flow</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;flowAccesses&gt; &lt;enabled&gt;true&lt;/enabled&gt; &lt;flow&gt;My_Old_Flow&lt;/flow&gt;
+                    &lt;/flowAccesses&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Profile 2: userPermission -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">2</div>
+            <div class="er-title">Unknown User Permission</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>Unknown user permission: <span class="hl">ViewAllData</span></code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;userPermissions&gt; &lt;enabled&gt;true&lt;/enabled&gt; &lt;name&gt;ViewAllData&lt;/name&gt;
+                    &lt;/userPermissions&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Profile 3: FlexiPage -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">3</div>
+            <div class="er-title">Missing Lightning Page (FlexiPage) in profileActionOverrides</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >The <span class="hl">OldDashboard</span> Lightning page doesn't exist or isn't valid — OR — no
+                  FlexiPage named <span class="hl">OldDashboard</span> found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;profileActionOverrides&gt; &lt;actionName&gt;View&lt;/actionName&gt;
+                    &lt;content&gt;OldDashboard&lt;/content&gt; &lt;formFactor&gt;Large&lt;/formFactor&gt;
+                    &lt;pageOrSobjectType&gt;Account&lt;/pageOrSobjectType&gt; &lt;type&gt;Flexipage&lt;/type&gt;
+                    &lt;/profileActionOverrides&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Profile 4: profileActionOverrides pre-check -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">4</div>
+            <div class="er-title">profileActionOverrides — Missing Object or Record Type (Pre-check)</div>
+          </div>
+          <div class="er-body">
+            <div class="note" style="margin-bottom: 14px">
+              This is a <strong>pre-deploy check</strong> — CleanZ scans the profile XML before deployment and removes
+              profileActionOverrides blocks that point to objects or record types that don't exist in the org, without
+              waiting for an error.
+            </div>
+            <div class="step-row">
+              <div class="box info-box">
+                <div class="box-label">What CleanZ Checks Before Deploy</div>
+                <code
+                  >Each &lt;profileActionOverrides&gt; block's &lt;pageOrSobjectType&gt; and &lt;recordType&gt; values
+                  are checked against the org. If the object or record type is missing → the whole block is
+                  removed.</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;profileActionOverrides&gt; &lt;actionName&gt;View&lt;/actionName&gt;
+                    &lt;content&gt;SomePage&lt;/content&gt;
+                    &lt;pageOrSobjectType&gt;DeletedObj__c&lt;/pageOrSobjectType&gt;
+                    &lt;recordType&gt;DeletedObj__c.Old_RT&lt;/recordType&gt; &lt;type&gt;Flexipage&lt;/type&gt;
+                    &lt;/profileActionOverrides&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- What is NOT cleaned -->
+        <div class="box warn-box" style="margin-top: 8px">
+          <div class="box-label">What CleanZ Does NOT Clean for Profiles (Copado TRIM handles these)</div>
+          <code
+            >fieldPermissions → Copado strips before deploy, no error fires classAccesses → same pageAccesses → same
+            tabVisibilities → same objectPermissions → same (for custom __c objects) recordTypeVisibilities → same
+            layoutAssignments → same applicationVisibilities → same customPermissions → same customMetadataTypeAccesses
+            → same</code
+          >
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════
+           REPORT TYPES
+           ═══════════════════════════════════════════════════════ -->
+      <div class="section">
+        <span class="anchor" id="reporttypes"></span>
+        <span class="type-pill green">📊 Report Types</span>
+        <div class="section-title">Report Types</div>
+        <div class="section-desc">
+          A report type defines which fields and relationships can appear in a report. CleanZ handles two kinds of
+          error: a missing <strong>field</strong> (removes the
+          <code style="display: inline">&lt;columns&gt;</code> block) and a missing
+          <strong>relationship</strong> (removes the entire <code style="display: inline">&lt;join&gt;</code>
+          block and all column entries that used it). For missing fields, CleanZ tries three routes in order.
+        </div>
+
+        <!-- How columns are structured -->
+        <div class="box info-box" style="margin-bottom: 24px">
+          <div class="box-label">How a &lt;columns&gt; block looks in XML</div>
+          <code>
+            &lt;columns&gt; &lt;field&gt;Budget__c&lt;/field&gt; ← field name (bare, no object prefix)
+            &lt;table&gt;Opportunity&lt;/table&gt; ← which object this field belongs to &lt;checkedByDefault/&gt;
+            &lt;/columns&gt;</code
+          >
+        </div>
+
+        <!-- Route 1 -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">1</div>
+            <div class="er-title">Standard Route — Field + Object Both Found</div>
+          </div>
+          <div class="er-body">
+            <span class="route-badge primary">Primary Route</span>
+            <span style="font-size: 13px; color: #475569">Used in the vast majority of cases</span>
+
+            <div class="step-row three-col" style="margin-top: 14px">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >no CustomField named
+                  <span class="hl">Opportunity.Budget__c</span>
+                  found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box info-box">
+                <div class="box-label">CleanZ Splits the Name</div>
+                <code>Object → <span class="hl">Opportunity</span> Field → <span class="hl">Budget__c</span></code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed</div>
+                <code
+                  ><span class="del">
+                    &lt;columns&gt; &lt;field&gt;Budget__c&lt;/field&gt; &lt;table&gt;Opportunity&lt;/table&gt;
+                    &lt;/columns&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+
+            <hr class="er-divider" />
+            <div class="box info-box">
+              <div class="box-label">How CleanZ Matches the &lt;table&gt; Value</div>
+              <code
+                >The &lt;table&gt; value is not always a plain object name. CleanZ looks at only the
+                <strong>last segment</strong> of the path. Examples: Opportunity → last segment:
+                <span class="hl">Opportunity</span> ✓ matches Accounts.Opportunities → last segment:
+                <span class="hl">Opportunities</span> ✓ matches (plural) User.Opportunity$CreatedById → last segment:
+                <span class="hl">Opportunity$CreatedById</span> ✓ contains "opportunity" Opportunities__r → strip __r →
+                <span class="hl">Opportunities</span> ✓ matches (plural) For y → ies plural (opportunity →
+                opportunities): "opportunities" does NOT contain "opportunity" as a substring. CleanZ also checks the
+                stem: "opportunitie" IS inside "opportunities". ✓</code
+              >
+            </div>
+          </div>
+        </div>
+
+        <!-- Route 2: Traversal Fallback -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">2</div>
+            <div class="er-title">Traversal Fallback — Field is in Lookup Form in XML</div>
+          </div>
+          <div class="er-body">
+            <span class="route-badge fallback">Fallback Route</span>
+            <span style="font-size: 13px; color: #475569">Used when standard route finds nothing</span>
+
+            <div class="note" style="margin: 14px 0">
+              Sometimes the SF error says <strong>Opportunity.ISR_Owner__c</strong> but the XML stores the field as
+              <strong>SBQQSC__RenewalOpportunity__c.ISR_Owner__c</strong>
+              (a lookup relationship prefix). Standard matching finds no
+              <code style="display: inline">&lt;field&gt;ISR_Owner__c&lt;/field&gt;</code> because the tag has the full
+              lookup path. The fallback handles this.
+            </div>
+
+            <div class="step-row three-col">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >no CustomField named
+                  <span class="hl">Opportunity.ISR_Owner__c</span>
+                  found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-before">
+                <div class="box-label">What XML Actually Has</div>
+                <code>
+                  &lt;columns&gt; &lt;field&gt;<span class="hl">SBQQSC__RenewalOpportunity__c .ISR_Owner__c</span
+                  >&lt;/field&gt; &lt;table&gt;Opportunity&lt;/table&gt; &lt;/columns&gt;</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed (fallback)</div>
+                <code
+                  ><span class="del">
+                    &lt;columns&gt; &lt;field&gt;SBQQSC__RenewalOpportunity__c .ISR_Owner__c&lt;/field&gt;
+                    &lt;table&gt;Opportunity&lt;/table&gt; &lt;/columns&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+
+            <hr class="er-divider" />
+            <div class="box info-box" style="margin-top: 0">
+              <div class="box-label">Fallback Decision Logic</div>
+              <code
+                >Standard route found nothing. Bare field name absent from XML → fallback activates. Count all
+                &lt;columns&gt; blocks where &lt;field&gt; ENDS WITH "ISR_Owner__c": Count = 1 → Remove it. It must be
+                the broken one. ✓ Count ≥ 2 → Skip. Can't tell which object it belongs to. ⚠ manual fix needed</code
+              >
+            </div>
+          </div>
+        </div>
+
+        <!-- Guard: When fallback does NOT fire -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">⚠</div>
+            <div class="er-title">Guard — When the Fallback Does NOT Fire</div>
+          </div>
+          <div class="er-body">
+            <span class="route-badge guard">Safety Guard</span>
+
+            <div class="note" style="margin: 14px 0">
+              If the bare field name IS found in the XML but the object doesn't match, CleanZ already made a decision in
+              the standard route — it kept the block because the object was different. The fallback respects that
+              decision and does not run.
+            </div>
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Error</div>
+                <code>Opportunity.ISR_Owner__c</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box warn-box">
+                <div class="box-label">XML Has (Different Object)</div>
+                <code>
+                  &lt;columns&gt; &lt;field&gt;ISR_Owner__c&lt;/field&gt; &lt;table&gt;Contact&lt;/table&gt; ← Contact,
+                  not Opportunity &lt;/columns&gt;</code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              Standard route: field found but table is Contact → keep it. Fallback: bare field IS present →
+              <strong>fallback does not run</strong>. Result: nothing removed. Manual fix required.
+            </div>
+          </div>
+        </div>
+
+        <!-- RT: Missing relationship (join block) -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">3</div>
+            <div class="er-title">Missing Relationship — Entire Join Block Removed</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >No such relationship
+                  <span class="hl">OldRelationship__r</span>
+                  on object <span class="hl">Account</span></code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Everything for that relationship removed</div>
+                <code
+                  ><span class="del">
+                    &lt;join&gt; &lt;outerJoin&gt;true&lt;/outerJoin&gt;
+                    &lt;relationship&gt;OldRelationship__r&lt;/relationship&gt; &lt;/join&gt;</span
+                  >
+
+                  &lt;sections&gt; &lt;columns&gt; &lt;field&gt;Name&lt;/field&gt;
+                  <span class="del"> &lt;table&gt;Account.OldRelationship__r&lt;/table&gt;</span>
+                  &lt;/columns&gt; ... &lt;/sections&gt;</code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              CleanZ removes the <code style="display: inline">&lt;join&gt;</code> block AND every
+              <code style="display: inline">&lt;columns&gt;</code> entry whose
+              <code style="display: inline">&lt;table&gt;</code> path contains the relationship name. If a
+              <code style="display: inline">&lt;sections&gt;</code> block becomes completely empty after column removal,
+              it is pruned too. A stack-based parser handles nested
+              <code style="display: inline">&lt;join&gt;</code> structures safely — only the matching join is removed,
+              outer joins stay intact.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════
+           LAYOUTS
+           ═══════════════════════════════════════════════════════ -->
+      <div class="section">
+        <span class="anchor" id="layouts"></span>
+        <span class="type-pill amber">🗂 Layouts</span>
+        <div class="section-title">Layouts</div>
+        <div class="section-desc">
+          Layouts define which fields, buttons, actions, and related lists appear on a record page. CleanZ handles
+          <strong>six</strong> distinct layout error patterns, all discovered from live Salesforce Metadata API
+          responses. Each has a safety check: if the missing item is part of the current promotion as an ADD operation,
+          CleanZ skips it.
+        </div>
+
+        <!-- How layout XML is structured -->
+        <div class="box info-box" style="margin-bottom: 24px">
+          <div class="box-label">Key XML sections in a Layout file</div>
+          <code
+            >&lt;Layout&gt; &lt;customButtons&gt;SendEmail&lt;/customButtons&gt; ← custom button name (bare, no object
+            prefix) &lt;layoutSections&gt; ← page section &lt;layoutColumns&gt; &lt;layoutItems&gt;
+            &lt;field&gt;Budget__c&lt;/field&gt; ← field in the section &lt;/layoutItems&gt; &lt;/layoutColumns&gt;
+            &lt;/layoutSections&gt; &lt;quickActionList&gt; ← quick action bar &lt;quickActionListItems&gt;
+            &lt;quickActionName&gt;Account.NewContact&lt;/quickActionName&gt; &lt;/quickActionListItems&gt;
+            &lt;/quickActionList&gt; &lt;platformActionList&gt; ← platform action panel &lt;platformActionListItems&gt;
+            &lt;actionName&gt;Account.NewContact&lt;/actionName&gt; &lt;actionType&gt;QuickAction&lt;/actionType&gt;
+            &lt;/platformActionListItems&gt; &lt;/platformActionList&gt; &lt;relatedLists&gt; ← related list panel
+            &lt;fields&gt;FULL_NAME&lt;/fields&gt; ← column shown in the list &lt;fields&gt;CONTACT.EMAIL&lt;/fields&gt;
+            &lt;relatedList&gt;RelatedContactList&lt;/relatedList&gt; ← which related list (standard)
+            &lt;/relatedLists&gt; &lt;relatedLists&gt; ← custom-object related list &lt;fields&gt;NAME&lt;/fields&gt;
+            &lt;relatedList&gt;OldObj__c.LookupField__c&lt;/relatedList&gt; ← object + lookup field
+            &lt;/relatedLists&gt; &lt;/Layout&gt;</code
+          >
+        </div>
+
+        <!-- 1. Layout section field -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">1</div>
+            <div class="er-title">Missing Field in a Layout Section</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>In field: field - no CustomField named <span class="hl">Account.Old_Field__c</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;layoutItems&gt; &lt;behavior&gt;Edit&lt;/behavior&gt; &lt;field&gt;Old_Field__c&lt;/field&gt;
+                    &lt;/layoutItems&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              The object prefix (<code style="display: inline">Account.</code>) is stripped — only the bare field name
+              <code style="display: inline">Old_Field__c</code> is matched in the layout XML.
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Custom button -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">2</div>
+            <div class="er-title">Missing Custom Button (WebLink)</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>In field: customButtons - no WebLink named <span class="hl">Account.SendEmail</span> found</code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Entry Removed from XML</div>
+                <code><span class="del"> &lt;customButtons&gt;SendEmail&lt;/customButtons&gt;</span></code>
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              SF includes the object name in the error (<code style="display: inline">Account.SendEmail</code>) but the
+              XML element holds only the bare button name (<code style="display: inline">SendEmail</code>). CleanZ
+              strips the object prefix before matching.
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Quick Action -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">3</div>
+            <div class="er-title">Missing Quick Action</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >In field: QuickAction - no QuickAction named <span class="hl">Account.OldAction</span> found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Both Entries Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;quickActionListItems&gt; &lt;quickActionName&gt;Account.OldAction&lt;/quickActionName&gt;
+                    &lt;/quickActionListItems&gt;</span
+                  >
+
+                  <span class="del">
+                    &lt;platformActionListItems&gt; &lt;actionName&gt;Account.OldAction&lt;/actionName&gt;
+                    &lt;actionType&gt;QuickAction&lt;/actionType&gt; &lt;sortOrder&gt;1&lt;/sortOrder&gt;
+                    &lt;/platformActionListItems&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              One SF error covers <em>both</em> places the action can appear. CleanZ removes from
+              <code style="display: inline">&lt;quickActionList&gt;</code> <strong>and</strong> from
+              <code style="display: inline">&lt;platformActionList&gt;</code>
+              in a single pass so neither reference remains.
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Invalid field in a related list column -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">4</div>
+            <div class="er-title">Invalid Column Field Inside a Related List</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >Invalid field:<span class="hl">Old_Field__c</span> in related list:<span class="hl"
+                    >RelatedContactList</span
+                  ></code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Entry Removed — Related List Block Kept</div>
+                <code>
+                  &lt;relatedLists&gt; &lt;fields&gt;FULL_NAME&lt;/fields&gt; &lt;fields&gt;CONTACT.EMAIL&lt;/fields&gt;
+                  <span class="del"> &lt;fields&gt;Old_Field__c&lt;/fields&gt;</span>
+                  &lt;relatedList&gt;RelatedContactList&lt;/relatedList&gt; &lt;/relatedLists&gt;</code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              Only the single bad <code style="display: inline">&lt;fields&gt;</code> line is removed. The related list
+              panel itself and all other column entries stay intact.
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Missing related list (lookup field / custom object doesn't exist) -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">5</div>
+            <div class="er-title">Missing Related List — Custom Object Lookup No Longer Exists</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code
+                  >In field: relatedList - no CustomField named
+                  <span class="hl">OldObj__c.LookupField__c</span> found</code
+                >
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Whole Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;relatedLists&gt; &lt;fields&gt;NAME&lt;/fields&gt;
+                    &lt;relatedList&gt;OldObj__c.LookupField__c&lt;/relatedList&gt; &lt;/relatedLists&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              The value in <code style="display: inline">&lt;relatedList&gt;</code> for a custom-object related list is
+              <code style="display: inline">ObjectName__c.LookupField__c</code> (the lookup field that creates the
+              relationship). When that field no longer exists, SF reports it as "no CustomField named …". CleanZ removes
+              the <strong>entire <code style="display: inline">&lt;relatedLists&gt;</code> block</strong> — not just a
+              column field.
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. Cannot find related list -->
+        <div class="er-card">
+          <div class="er-header">
+            <div class="er-num">6</div>
+            <div class="er-title">Related List Name Not Recognised</div>
+          </div>
+          <div class="er-body">
+            <div class="step-row">
+              <div class="box error-box">
+                <div class="box-label">Salesforce Error</div>
+                <code>Cannot find related list: <span class="hl">RelatedOpportunityList</span></code>
+              </div>
+              <div class="step-arrow">→</div>
+              <div class="box xml-after">
+                <div class="box-label">Whole Block Removed from XML</div>
+                <code
+                  ><span class="del">
+                    &lt;relatedLists&gt; &lt;fields&gt;NAME&lt;/fields&gt; &lt;fields&gt;AMOUNT&lt;/fields&gt;
+                    &lt;relatedList&gt;RelatedOpportunityList&lt;/relatedList&gt; &lt;/relatedLists&gt;</span
+                  ></code
+                >
+              </div>
+            </div>
+            <div class="note" style="margin-top: 14px">
+              Standard related lists use names like <code style="display: inline">RelatedContactList</code>,
+              <code style="display: inline">RelatedCaseList</code>,
+              <code style="display: inline">RelatedOpportunityList</code>. If the name is wrong or the feature is
+              disabled in the target org, SF returns this error. The entire block is removed.
+            </div>
+          </div>
+        </div>
+
+        <!-- Summary table -->
+        <table style="margin-top: 24px">
+          <tr>
+            <th>#</th>
+            <th>Salesforce Error Pattern</th>
+            <th>What CleanZ Removes</th>
+            <th>Scope</th>
+          </tr>
+          <tr>
+            <td>1</td>
+            <td class="mono">In field: field - no CustomField named X found</td>
+            <td>The <code>&lt;layoutItems&gt;</code> block for that field</td>
+            <td>Single field entry</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td class="mono">In field: customButtons - no WebLink named X found</td>
+            <td>The <code>&lt;customButtons&gt;</code> line for that button</td>
+            <td>Single button entry</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td class="mono">In field: QuickAction - no QuickAction named X found</td>
+            <td><code>&lt;quickActionListItems&gt;</code> + <code>&lt;platformActionListItems&gt;</code></td>
+            <td>Both action list entries</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td class="mono">Invalid field:X in related list:Y</td>
+            <td>The single <code>&lt;fields&gt;</code> line inside the related list</td>
+            <td>Single column entry</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td class="mono">In field: relatedList - no CustomField named Obj__c.Fld__c found</td>
+            <td>The entire <code>&lt;relatedLists&gt;</code> block</td>
+            <td>Whole related list</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td class="mono">Cannot find related list: X</td>
+            <td>The entire <code>&lt;relatedLists&gt;</code> block</td>
+            <td>Whole related list</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- ═══════════════ QUICK SUMMARY ═══════════════ -->
+      <div class="section">
+        <div class="section-label">Summary</div>
+        <div class="section-title">Full Error → Block Mapping at a Glance</div>
+
+        <table>
+          <tr>
+            <th>Metadata Type</th>
+            <th>Salesforce Error Contains</th>
+            <th>XML Block Removed</th>
+          </tr>
+          <tr style="background: #f0f9ff">
+            <td colspan="3" style="font-weight: 700; color: #0369a1; font-size: 12px; padding: 8px 14px">
+              PERMISSION SETS (ADD) — all errors below are handled
+            </td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no CustomField named X found</td>
+            <td class="mono">&lt;fieldPermissions&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no ApexClass named X found</td>
+            <td class="mono">&lt;classAccesses&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no ApexPage named X found</td>
+            <td class="mono">&lt;pageAccesses&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no CustomTab named X found</td>
+            <td class="mono">&lt;tabVisibilities&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no CustomObject named X found</td>
+            <td class="mono">&lt;objectPermissions&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">customMetadataType - no CustomObject named X found</td>
+            <td class="mono">&lt;customMetadataTypeAccesses&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no CustomPermission named X found</td>
+            <td class="mono">&lt;customPermissions&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no RecordType named X found</td>
+            <td class="mono">&lt;recordTypeVisibilities&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no Flow named X found</td>
+            <td class="mono">&lt;flowAccesses&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no Layout named X found</td>
+            <td class="mono">&lt;layoutAssignments&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">no CustomApplication named X found</td>
+            <td class="mono">&lt;applicationVisibilities&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">Unknown user permission: X</td>
+            <td class="mono">&lt;userPermissions&gt;</td>
+          </tr>
+          <tr>
+            <td>PermSet</td>
+            <td class="mono">user license doesn't allow: Modify All X</td>
+            <td class="mono">&lt;modifyAllRecords&gt; line only</td>
+          </tr>
+          <tr style="background: #f0f9ff">
+            <td colspan="3" style="font-weight: 700; color: #0369a1; font-size: 12px; padding: 8px 14px">
+              PROFILES (ADD) — only 4 things reach Salesforce, rest stripped by Copado TRIM
+            </td>
+          </tr>
+          <tr>
+            <td>Profile</td>
+            <td class="mono">no Flow named X found</td>
+            <td class="mono">&lt;flowAccesses&gt;</td>
+          </tr>
+          <tr>
+            <td>Profile</td>
+            <td class="mono">Unknown user permission: X</td>
+            <td class="mono">&lt;userPermissions&gt;</td>
+          </tr>
+          <tr>
+            <td>Profile</td>
+            <td class="mono">Lightning page doesn't exist / no FlexiPage named X</td>
+            <td class="mono">&lt;profileActionOverrides&gt;</td>
+          </tr>
+          <tr>
+            <td>Profile</td>
+            <td class="mono">Pre-check: missing object or RT in profileActionOverrides</td>
+            <td class="mono">&lt;profileActionOverrides&gt;</td>
+          </tr>
+          <tr style="background: #f0f9ff">
+            <td colspan="3" style="font-weight: 700; color: #0369a1; font-size: 12px; padding: 8px 14px">
+              REPORT TYPES
+            </td>
+          </tr>
+          <tr>
+            <td>Report Type</td>
+            <td class="mono">no CustomField named Obj.Field__c found</td>
+            <td class="mono">&lt;columns&gt; (standard or fallback route)</td>
+          </tr>
+          <tr>
+            <td>Report Type</td>
+            <td class="mono">No such relationship X on object Y</td>
+            <td class="mono">&lt;join&gt; block + all &lt;columns&gt; for that path</td>
+          </tr>
+          <tr style="background: #f0f9ff">
+            <td colspan="3" style="font-weight: 700; color: #0369a1; font-size: 12px; padding: 8px 14px">
+              LAYOUTS — 6 patterns (all verified against live Salesforce API)
+            </td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">In field: field - no CustomField named X found</td>
+            <td class="mono">&lt;layoutItems&gt; entry</td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">In field: customButtons - no WebLink named X found</td>
+            <td class="mono">&lt;customButtons&gt; entry (bare name, no object prefix)</td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">In field: QuickAction - no QuickAction named X found</td>
+            <td class="mono">&lt;quickActionListItems&gt; + &lt;platformActionListItems&gt;</td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">Invalid field:X in related list:Y</td>
+            <td class="mono">&lt;fields&gt; line inside &lt;relatedLists&gt;</td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">In field: relatedList - no CustomField named Obj__c.Fld__c found</td>
+            <td class="mono">Entire &lt;relatedLists&gt; block (lookup field missing)</td>
+          </tr>
+          <tr>
+            <td>Layout</td>
+            <td class="mono">Cannot find related list: X</td>
+            <td class="mono">Entire &lt;relatedLists&gt; block</td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="padding: 28px 0; color: #94a3b8; font-size: 12px">
+        CleanZ — Internal Reference &bull; rbk-sfdc-release &bull; v1.0.8 &bull; Layout patterns verified against live
+        Salesforce API (TRNDEV1)
+      </div>
+    </div>
+  </body>
+</html>
