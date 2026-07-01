@@ -429,7 +429,7 @@ export function removeXmlBlock(
   blockTag: string,
   keyTag: string,
   missingName: string
-): { updated: string; removed: boolean } {
+): { updated: string; removed: boolean; fixed?: boolean } {
   const escapedName = missingName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const escapedBlock = blockTag.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
   const innerPattern = `(?:(?!<${escapedBlock}>)[\\s\\S])*?`;
@@ -438,7 +438,23 @@ export function removeXmlBlock(
     'g'
   );
   const updated = xmlContent.replace(blockRegex, '');
-  return { updated, removed: updated !== xmlContent };
+  if (updated !== xmlContent) return { updated, removed: true };
+
+  // Exact match failed — check if the key element has malformed content (newlines / trailing
+  // semicolons) that normalises to the same name.  Fix it in place instead of removing.
+  const keyRegex = new RegExp(`(<${keyTag}>)([\\s\\S]*?)(<\\/${keyTag}>)`, 'g');
+  let fixed = false;
+  const fixedXml = xmlContent.replace(keyRegex, (_match, open: string, content: string, close: string) => {
+    const normalised = content.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim().replace(/;+$/, '').trim();
+    if (normalised === missingName) {
+      fixed = true;
+      return `${open}${missingName}${close}`;
+    }
+    return _match;
+  });
+  if (fixed) return { updated: fixedXml, removed: false, fixed: true };
+
+  return { updated: xmlContent, removed: false };
 }
 
 function removeApplicationVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
@@ -888,6 +904,33 @@ function extractNamespaceFromError(errorMessage: string): string | null {
   return ns;
 }
 
+// Checks whether the SF CLI session for the target org is active.
+// Returns { connected: true } or { connected: false, reason: string }.
+function checkOrgConnected(targetOrg: string): Promise<{ connected: boolean; reason: string }> {
+  return new Promise((resolve) => {
+    const proc = spawn('sf', ['org', 'display', '--target-org', targetOrg, '--json'], { shell: true });
+    let output = '';
+    proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
+    proc.stderr.on('data', (d: Buffer) => { output += d.toString(); });
+    proc.on('close', () => {
+      try {
+        const jsonStart = output.indexOf('{');
+        const parsed = JSON.parse(jsonStart >= 0 ? output.substring(jsonStart) : output) as {
+          result?: { connectedStatus?: string };
+        };
+        const status = parsed?.result?.connectedStatus ?? '';
+        if (status === 'Connected') {
+          resolve({ connected: true, reason: '' });
+        } else {
+          resolve({ connected: false, reason: status || 'Unknown — run: sf org display --target-org ' + targetOrg });
+        }
+      } catch {
+        resolve({ connected: false, reason: 'Could not parse sf org display output — org alias may not exist' });
+      }
+    });
+  });
+}
+
 // Shared SF CLI query helper — returns records array or [] on failure.
 // useTooling=true → adds --use-tooling-api (Tooling API); false → regular SOQL.
 function runSfQuery<T extends object>(targetOrg: string, quotedQuery: string, useTooling: boolean): Promise<T[]> {
@@ -1072,7 +1115,14 @@ function bulkRemoveNamespaceRefs(xmlContent: string, namespace: string): { updat
 
 function applyRefToXml(xml: string, ref: RemovedRef, filePath: string): { updated: string; removed: boolean } | null {
   if (ref.type === 'namespace') return resolveNsRemoval(xml, ref.name, filePath);
-  if (ref.type === 'field') return removeFieldPermissionsFromXml(xml, ref.name);
+  if (ref.type === 'field') {
+    if (filePath.endsWith('.layout-meta.xml')) {
+      const dotIdx = ref.name.lastIndexOf('.');
+      const bareField = dotIdx >= 0 ? ref.name.substring(dotIdx + 1) : ref.name;
+      return removeLayoutItemByField(xml, bareField);
+    }
+    return removeFieldPermissionsFromXml(xml, ref.name);
+  }
   if (ref.type === 'reportTypeColumn') {
     // ref.name is the full SF error name (e.g. "Opportunity.Field__c").
     // The XML stores only the bare field name in <field> and the object in <table>,
@@ -1268,7 +1318,7 @@ async function invokeDeployWithRetry(
     const errText = `${result.message ?? ''} ${result.name ?? ''}`;
     if (!result.result && isTransientError(errText)) {
       const backoff = getBackoffMs(attempt);
-      log(`   Transient SF CLI error (${result.name ?? 'unknown'}) — waiting ${backoff / 1000}s before retry...`);
+      log(`   Transient SF CLI error (${result.name ?? 'unknown'}) — ${(result.message ?? '').substring(0, 200)} — waiting ${backoff / 1000}s before retry...`);
       // eslint-disable-next-line no-await-in-loop
       await sleep(backoff);
       attempt = 0;
@@ -1649,7 +1699,7 @@ type MetadataHandler = {
   label: string;
   refType: RefType;
   whitelistKey: keyof WhitelistMap; // required — all registered types are standalone components with a whitelist
-  removeFn: (xml: string, name: string) => { updated: string; removed: boolean };
+  removeFn: (xml: string, name: string) => { updated: string; removed: boolean; fixed?: boolean };
   displayTag: string;
 };
 
@@ -2272,12 +2322,16 @@ function processRegisteredFailure(
   allSkippedFields: string[],
   metadataType: string
 ): FailureResult {
+  // Salesforce sometimes splits error messages across newlines (e.g. flow name on its own line).
+  // Normalise to a single line before pattern matching so regexes don't miss cross-line matches.
+  const normalisedMessage = errorMessage.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
   for (const handler of METADATA_HANDLERS) {
     let name: string | null = null;
     for (const pattern of handler.patterns) {
-      const m = pattern.exec(errorMessage);
+      const m = pattern.exec(normalisedMessage);
       if (m) {
-        name = m[1].trim();
+        // Strip trailing semicolons that Salesforce occasionally appends to the ref name.
+        name = m[1].trim().replace(/;+$/, '');
         break;
       }
     }
@@ -2347,7 +2401,7 @@ function processRegisteredFailure(
     }
 
     log(`   Missing ${handler.label}: ${name}`);
-    const { updated, removed } = handler.removeFn(xmlContent, name);
+    const { updated, removed, fixed } = handler.removeFn(xmlContent, name);
     if (removed) {
       log(`   Removed ${handler.label} block for: ${name}`);
       return {
@@ -2357,6 +2411,19 @@ function processRegisteredFailure(
           type: handler.refType,
           name,
           label: handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    if (fixed) {
+      log(`   Fixed malformed ${handler.label} reference (had newlines/semicolons): ${name}`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: handler.refType,
+          name,
+          label: `[Fixed] ${handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`}`,
           deployError: errorMessage,
         },
       };
@@ -2410,6 +2477,14 @@ function processFailures(
     // ── Tab settings errors — validation-only, Copado real deploys ignore these ──
     if (/You can't edit tab settings for .+, as it's not a valid tab/i.test(err)) {
       log(`   [TabSettings] Ignoring validation-only error: ${err}`);
+      continue;
+    }
+
+    // ── Parent entity failed to deploy — cascade validation error only ──
+    // Layout/child metadata fails because its parent object failed validation before it.
+    // Copado real deployments handle ordering correctly so this never occurs in production deploys.
+    if (/Parent entity failed to deploy/i.test(err)) {
+      log(`   [ParentEntityFailed] Ignoring cascade validation-only error: ${err}`);
       continue;
     }
 
@@ -2597,7 +2672,7 @@ function shouldSkipSweepRef(
   name: string
 ): boolean {
   if (isReportType) return ref.type !== 'namespace' && ref.type !== 'reportTypeColumn';
-  if (isLayoutOrReport) return ref.type !== 'namespace';
+  if (isLayoutOrReport) return ref.type !== 'namespace' && ref.type !== 'field';
   if (ref.type === 'reportTypeColumn') return true;
   return isProfileSweepSkip(isProfile, ref.type, name);
 }
@@ -2730,9 +2805,10 @@ function repoWideSweep(
   //   layouts      → only namespace refs apply
   //   report types → namespace + reportTypeColumn refs apply
   const hasNamespaceRef = allRemovedRefs.some((r) => r.type === 'namespace');
+  const hasFieldRef = allRemovedRefs.some((r) => r.type === 'field');
 
   const effectiveFiles = repoFiles.filter((f) => {
-    if (f.endsWith('.layout-meta.xml')) return hasNamespaceRef;
+    if (f.endsWith('.layout-meta.xml')) return hasNamespaceRef || hasFieldRef;
     // reportTypeColumn refs excluded from repo-wide sweep — each promotion fixes its own report types
     if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasNamespaceRef;
     return true; // permsets / profiles / PSGs always included
@@ -4878,6 +4954,25 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\nStarting script...');
     log('\n======================================================');
     const startTime = Date.now();
+
+    // Verify org session is active before doing anything — avoids 13 cryptic retry
+    // loops when the SF CLI refresh token has expired.
+    log('Checking org connectivity...');
+    // eslint-disable-next-line no-await-in-loop
+    const orgCheck = await checkOrgConnected(targetOrg);
+    if (!orgCheck.connected) {
+      log('');
+      log('ERROR: SF CLI session for the target org is not active.');
+      log(`  Reason : ${orgCheck.reason}`);
+      log(`  Org    : ${targetOrg}`);
+      log('');
+      log('Please re-authenticate and try again:');
+      log(`  sf org login web --alias ${targetOrg}`);
+      log('  (or use JWT auth if this org uses a connected app)');
+      log('');
+      throw new Error(`Org session expired or invalid for: ${targetOrg}`);
+    }
+    log('Org session active. Proceeding...');
 
     // Pre-load all installed package namespaces from the org once upfront.
     // This avoids an extra SF CLI call on the first namespace error and ensures
