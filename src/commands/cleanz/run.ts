@@ -5137,7 +5137,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log('\n######################################################');
     log(
-      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${permSetGroups.length} PSG(s) + ${profiles.length} Profile(s)`
+      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${permSetGroups.length} PSG(s) + ${profiles.length} Profile(s) + ${reportTypes.length} ReportType(s) + ${layouts.length} Layout(s)`
     );
     log('######################################################');
 
