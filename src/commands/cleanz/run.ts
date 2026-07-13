@@ -910,8 +910,12 @@ function checkOrgConnected(targetOrg: string): Promise<{ connected: boolean; rea
   return new Promise((resolve) => {
     const proc = spawn('sf', ['org', 'display', '--target-org', targetOrg, '--json'], { shell: true });
     let output = '';
-    proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
-    proc.stderr.on('data', (d: Buffer) => { output += d.toString(); });
+    proc.stdout.on('data', (d: Buffer) => {
+      output += d.toString();
+    });
+    proc.stderr.on('data', (d: Buffer) => {
+      output += d.toString();
+    });
     proc.on('close', () => {
       try {
         const jsonStart = output.indexOf('{');
@@ -1118,7 +1122,19 @@ function applyRefToXml(xml: string, ref: RemovedRef, filePath: string): { update
   if (ref.type === 'field') {
     if (filePath.endsWith('.layout-meta.xml')) {
       const dotIdx = ref.name.lastIndexOf('.');
+      const objectName = dotIdx >= 0 ? ref.name.substring(0, dotIdx) : '';
       const bareField = dotIdx >= 0 ? ref.name.substring(dotIdx + 1) : ref.name;
+      // Object-scope check: only remove from layouts that belong to the same object as the
+      // missing field. A layout filename is always "ObjectName-Layout Label.layout-meta.xml",
+      // so the part before the first hyphen is the owning object. Without this check,
+      // "CPQ_Rate_Card_Line__c.Sort_Order__c" would incorrectly strip Sort_Order__c from a
+      // CX_Related_Quick_Link__mdt layout where that field belongs to a different object.
+      if (objectName) {
+        const layoutObject = path.basename(filePath).split('-')[0];
+        if (layoutObject.toLowerCase() !== objectName.toLowerCase()) {
+          return { updated: xml, removed: false };
+        }
+      }
       return removeLayoutItemByField(xml, bareField);
     }
     return removeFieldPermissionsFromXml(xml, ref.name);
@@ -1318,7 +1334,12 @@ async function invokeDeployWithRetry(
     const errText = `${result.message ?? ''} ${result.name ?? ''}`;
     if (!result.result && isTransientError(errText)) {
       const backoff = getBackoffMs(attempt);
-      log(`   Transient SF CLI error (${result.name ?? 'unknown'}) — ${(result.message ?? '').substring(0, 200)} — waiting ${backoff / 1000}s before retry...`);
+      log(
+        `   Transient SF CLI error (${result.name ?? 'unknown'}) — ${(result.message ?? '').substring(
+          0,
+          200
+        )} — waiting ${backoff / 1000}s before retry...`
+      );
       // eslint-disable-next-line no-await-in-loop
       await sleep(backoff);
       attempt = 0;
@@ -2423,7 +2444,9 @@ function processRegisteredFailure(
         removedRef: {
           type: handler.refType,
           name,
-          label: `[Fixed] ${handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`}`,
+          label: `[Fixed] ${
+            handler.displayTag.endsWith(':') ? `${handler.displayTag}${name}` : `${handler.displayTag} ${name}`
+          }`,
           deployError: errorMessage,
         },
       };
@@ -2664,6 +2687,15 @@ function saveSweptFile(xml: string, filePath: string): void {
   }
 }
 
+// Returns the broad metadata family for a file path.
+// Permsets, profiles, muting permsets, and PSGs are all treated as one family
+// so they can cross-sweep each other freely.
+function getMetadataFamily(filePath: string): 'layout' | 'reportType' | 'permset' {
+  if (filePath.endsWith('.layout-meta.xml')) return 'layout';
+  if (filePath.toLowerCase().endsWith('.reporttype-meta.xml')) return 'reportType';
+  return 'permset';
+}
+
 function shouldSkipSweepRef(
   ref: RemovedRef,
   isReportType: boolean,
@@ -2688,6 +2720,13 @@ function sweepOtherFiles(
 ): void {
   if (refs.length === 0) return;
 
+  // Determine the source metadata family from the source file path(s).
+  // All refs in a single sweepOtherFiles call originate from the same source file.
+  const sourceFamily = [...skipPaths].reduce<'layout' | 'reportType' | 'permset'>(
+    (_, p) => getMetadataFamily(p),
+    'permset'
+  );
+
   log('\n   [Sweep] Removing same missing refs from all other files in batch...');
   const modifiedFiles: string[] = [];
 
@@ -2697,10 +2736,15 @@ function sweepOtherFiles(
     let xml = readFileWithRetry(filePath);
     let fileModified = false;
 
+    const targetFamily = getMetadataFamily(filePath);
     const isProfile = filePath.endsWith('.profile-meta.xml');
     const isReportType = filePath.toLowerCase().endsWith('.reporttype-meta.xml');
     const isLayoutOrReport = filePath.endsWith('.layout-meta.xml') || isReportType;
     for (const ref of refs) {
+      // Type-scoped sweep: non-namespace refs only cross-sweep within the same metadata family.
+      // Permset errors must not strip fields from layouts (different object context),
+      // and layout errors must not strip fieldPermissions from permsets.
+      if (ref.type !== 'namespace' && targetFamily !== sourceFamily) continue;
       if (shouldSkipSweepRef(ref, isReportType, isLayoutOrReport, isProfile, ref.name)) continue;
       const result = applyRefToXml(xml, ref, filePath);
       if (!result) continue;
@@ -2743,41 +2787,63 @@ function sweepOtherFiles(
   }
 }
 
-function collectBatchRefs(batchItems: BatchItem[]): RemovedRef[] {
-  const seen = new Set<string>();
-  const refs: RemovedRef[] = [];
-  for (const item of batchItems) {
-    for (const ref of item.allRemovedRefs) {
-      if (!seen.has(ref.label)) {
-        seen.add(ref.label);
-        refs.push(ref);
-      }
-    }
-  }
-  return refs;
-}
-
 // ===============================================================
 // REPO-WIDE SWEEP
 // After all JSON batch items are fixed, sweep every permset/profile
 // in the entire repo (outside the batch) and make ONE commit.
 // ===============================================================
 
-function repoWideSweep(
-  log: (msg: string) => void,
-  allRemovedRefs: RemovedRef[],
-  batchFilePaths: Set<string>,
-  repoPath: string,
-  dryRun: boolean
-): void {
-  if (allRemovedRefs.length === 0) return;
+type FamilyGroupedRefs = {
+  permsetRefs: RemovedRef[];
+  layoutRefs: RemovedRef[];
+  reportTypeRefs: RemovedRef[];
+  nsRefs: RemovedRef[];
+};
 
-  // Collect ALL permset/profile/mutingpermset files in the repo.
-  const psDir = path.join(repoPath, 'force-app', 'main', 'default', 'permissionsets');
-  const mpsDir = path.join(repoPath, 'force-app', 'main', 'default', 'mutingpermissionsets');
-  const profileDir = path.join(repoPath, 'force-app', 'main', 'default', 'profiles');
+// Groups each batch item's removed refs by the metadata family of the source file.
+// Namespace refs go into nsRefs (they sweep across all families).
+function groupBatchRefsByFamily(batchItems: BatchItem[]): FamilyGroupedRefs {
+  const permsetRefs: RemovedRef[] = [];
+  const layoutRefs: RemovedRef[] = [];
+  const reportTypeRefs: RemovedRef[] = [];
+  const nsRefs: RemovedRef[] = [];
+  const seen = new Set<string>();
+  for (const item of batchItems) {
+    const family = getMetadataFamily(item.filePath);
+    for (const ref of item.allRemovedRefs) {
+      if (seen.has(ref.label)) continue;
+      seen.add(ref.label);
+      if (ref.type === 'namespace') nsRefs.push(ref);
+      else if (family === 'layout') layoutRefs.push(ref);
+      else if (family === 'reportType') reportTypeRefs.push(ref);
+      else permsetRefs.push(ref);
+    }
+  }
+  return { permsetRefs, layoutRefs, reportTypeRefs, nsRefs };
+}
 
-  const collectFiles = (dir: string, ext: string): string[] => {
+// Returns the refs that should be applied to a given target file,
+// scoped to the file's metadata family plus namespace refs (which apply everywhere).
+function refsForTarget(filePath: string, grouped: FamilyGroupedRefs): RemovedRef[] {
+  const family = getMetadataFamily(filePath);
+  return [
+    ...grouped.nsRefs,
+    ...(family === 'layout' ? grouped.layoutRefs : []),
+    ...(family === 'reportType' ? grouped.reportTypeRefs : []),
+    ...(family === 'permset' ? grouped.permsetRefs : []),
+  ];
+}
+
+// Collects all metadata files in the repo that are eligible for the repo-wide sweep,
+// excluding files already in the batch and file types with no applicable refs.
+function collectRepoSweepFiles(repoPath: string, batchFilePaths: Set<string>, grouped: FamilyGroupedRefs): string[] {
+  const { permsetRefs, layoutRefs, reportTypeRefs, nsRefs } = grouped;
+  const hasPermsetRef = permsetRefs.length > 0 || nsRefs.length > 0;
+  const hasLayoutRef = layoutRefs.length > 0 || nsRefs.length > 0;
+  const hasReportTypeRef = reportTypeRefs.length > 0 || nsRefs.length > 0;
+
+  const base = path.join(repoPath, 'force-app', 'main', 'default');
+  const scanDir = (dir: string, ext: string): string[] => {
     if (!fs.existsSync(dir)) return [];
     return fs
       .readdirSync(dir)
@@ -2785,40 +2851,45 @@ function repoWideSweep(
       .map((f) => path.join(dir, f));
   };
 
-  const layoutDir = path.join(repoPath, 'force-app', 'main', 'default', 'layouts');
-  const reportTypeDir = path.join(repoPath, 'force-app', 'main', 'default', 'reportTypes');
+  return [
+    ...scanDir(path.join(base, 'permissionsets'), '.permissionset-meta.xml'),
+    ...scanDir(path.join(base, 'mutingpermissionsets'), '.mutingpermissionset-meta.xml'),
+    ...scanDir(path.join(base, 'profiles'), '.profile-meta.xml'),
+    ...scanDir(path.join(base, 'layouts'), '.layout-meta.xml'),
+    ...scanDir(path.join(base, 'reportTypes'), '.reportType-meta.xml'),
+  ]
+    .filter((f) => !batchFilePaths.has(f))
+    .filter((f) => {
+      if (f.endsWith('.layout-meta.xml')) return hasLayoutRef;
+      // reportTypeColumn refs excluded from repo-wide sweep — each promotion fixes its own report types
+      if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasReportTypeRef;
+      return hasPermsetRef;
+    });
+}
 
-  const repoFiles = [
-    ...collectFiles(psDir, '.permissionset-meta.xml'),
-    ...collectFiles(mpsDir, '.mutingpermissionset-meta.xml'),
-    ...collectFiles(profileDir, '.profile-meta.xml'),
-    ...collectFiles(layoutDir, '.layout-meta.xml'),
-    ...collectFiles(reportTypeDir, '.reportType-meta.xml'),
-  ].filter((f) => !batchFilePaths.has(f)); // exclude files already in the batch
+function repoWideSweep(
+  log: (msg: string) => void,
+  batchItems: BatchItem[],
+  batchFilePaths: Set<string>,
+  repoPath: string,
+  dryRun: boolean
+): void {
+  const grouped = groupBatchRefsByFamily(batchItems);
+  const { permsetRefs, layoutRefs, reportTypeRefs, nsRefs } = grouped;
+  const allRemovedRefs = [...permsetRefs, ...layoutRefs, ...reportTypeRefs, ...nsRefs];
+  if (allRemovedRefs.length === 0) return;
 
-  if (repoFiles.length === 0) {
+  const effectiveFiles = collectRepoSweepFiles(repoPath, batchFilePaths, grouped);
+  if (effectiveFiles.length === 0) {
     log('\n   [Repo Sweep] No files outside the batch to sweep.');
     return;
   }
-
-  // Skip file types that have no applicable ref types to avoid wasted I/O:
-  //   layouts      → only namespace refs apply
-  //   report types → namespace + reportTypeColumn refs apply
-  const hasNamespaceRef = allRemovedRefs.some((r) => r.type === 'namespace');
-  const hasFieldRef = allRemovedRefs.some((r) => r.type === 'field');
-
-  const effectiveFiles = repoFiles.filter((f) => {
-    if (f.endsWith('.layout-meta.xml')) return hasNamespaceRef || hasFieldRef;
-    // reportTypeColumn refs excluded from repo-wide sweep — each promotion fixes its own report types
-    if (f.toLowerCase().endsWith('.reporttype-meta.xml')) return hasNamespaceRef;
-    return true; // permsets / profiles / PSGs always included
-  });
 
   log(`\n--- Repo-Wide Sweep (${effectiveFiles.length} file(s) outside batch) ---`);
   const modifiedFiles: string[] = [];
   const removedRefLabels = new Set<string>();
 
-  // Option 1: emit progress every 50 files so the UI heartbeat never shows "Deploy in progress"
+  // emit progress every 50 files so the UI heartbeat never shows "Deploy in progress"
   const PROGRESS_INTERVAL = 50;
 
   for (let i = 0; i < effectiveFiles.length; i++) {
@@ -2833,7 +2904,7 @@ function repoWideSweep(
     const isReportType = filePath.toLowerCase().endsWith('.reporttype-meta.xml');
     const isLayoutOrReport = filePath.endsWith('.layout-meta.xml') || isReportType;
 
-    for (const ref of allRemovedRefs) {
+    for (const ref of refsForTarget(filePath, grouped)) {
       // reportTypeColumn refs never applied to out-of-batch report type files
       if (isReportType && ref.type === 'reportTypeColumn') continue;
       if (shouldSkipSweepRef(ref, isReportType, isLayoutOrReport, isProfile, ref.name)) continue;
@@ -4756,6 +4827,7 @@ export default class DeployAndFix extends SfCommand<void> {
     }),
   };
 
+  // eslint-disable-next-line complexity
   public async run(): Promise<void> {
     const { flags } = await this.parse(DeployAndFix);
     const verbose = flags.verbose;
@@ -5340,7 +5412,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
     // ================= REPO-WIDE SWEEP =================
     // Runs after the squash so it appears as a clean separate commit at the end.
-    repoWideSweep(log, collectBatchRefs(batchItems), new Set(allFilePaths), REPO_PATH, dryRun);
+    repoWideSweep(log, batchItems, new Set(allFilePaths), REPO_PATH, dryRun);
 
     const elapsedMs = Date.now() - startTime;
     const elapsedMins = Math.floor(elapsedMs / 60_000);
