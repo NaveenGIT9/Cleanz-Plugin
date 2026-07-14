@@ -18,6 +18,14 @@
 #   git_json               = {$Context.Repository.Credential}
 #   destinationInstanceUrl = {$Destination.Credential.Endpoint}
 #   destinationSessionid   = {$Destination.Credential.SessionId}
+#   sourceInstanceUrl      = {$Source.Credential.Endpoint}     ← pipeline org URL
+#   sourceSessionid        = {$Source.Credential.SessionId}    ← pipeline org session
+#
+# sourceInstanceUrl/sourceSessionid must point to the Copado pipeline org (RBKPIPEQA)
+# where copado__Promotion__c and ContentDocumentLink records live. Step 4 uses them to
+# fetch the exact Copado component list. If missing or wrong org, Step 4 falls back to
+# git diff (less accurate — picks up any permset changed in the branch, not just the
+# promoted components).
 #
 set -euo pipefail
 trap 'echo "##### Error on line $LINENO — exit code $?"' ERR
@@ -132,77 +140,174 @@ echo "  -> SF CLI display cleanz-dest:"
 sf org display --target-org cleanz-dest 2>&1 | grep -E "(Username|Status|Instance)" | head -4 || true
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
-# ── Step 4: Build component list from git diff ────────────────────────────────
-# No Copado org session available in the container — derive the components
-# directly from the git branch instead of querying ContentDocumentLink.
-# We diff the promotion branch against the default remote branch (main/master)
-# and collect any PermissionSet/MutingPermissionSet/PSG/Profile/Layout/ReportType
-# files that changed. Only those are passed to cleanz.
-copado -p "pre_cleanz | Step 4: Building component list from git diff"
-
-# Find the default remote branch (main or master)
-DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo "main")
-echo "  -> Default branch: $DEFAULT_BRANCH"
-
-# Get all files changed in this promotion branch vs the default branch
-CHANGED_FILES=$(git diff "origin/${DEFAULT_BRANCH}...HEAD" --name-only 2>/dev/null || \
-                git diff "HEAD~1..HEAD" --name-only 2>/dev/null || echo "")
-echo "  -> Changed files: $(echo "$CHANGED_FILES" | grep -c . || echo 0)"
+# ── Step 4: Build component list from Copado ContentDocumentLink ──────────────
+# Primary: query ContentDocumentLink on the Promotion record from the pipeline org
+# (sourceInstanceUrl + sourceSessionid) — this gives the exact set of components
+# Copado is promoting, matching the same JSON cleanz uses interactively.
+# Fallback: git diff against the default branch. Less accurate because it includes
+# ANY permset/profile changed in the branch, not just the promoted components.
+copado -p "pre_cleanz | Step 4: Building component list (Copado attachment → git diff fallback)"
 
 node << 'NODE_EOF'
 'use strict';
 const { execSync } = require('child_process');
-const fs = require('fs');
+const https  = require('https');
+const fs     = require('fs');
+const { URL } = require('url');
 
 const OUTPUT_FILE = '/tmp/copado_promotion_changes.json';
 
-// Map file extension to cleanz metadata type
 const EXT_MAP = {
-  '.permissionset-meta.xml':        'PermissionSet',
-  '.mutingpermissionset-meta.xml':  'MutingPermissionSet',
-  '.permissionsetgroup-meta.xml':   'PermissionSetGroup',
-  '.profile-meta.xml':              'Profile',
-  '.layout-meta.xml':               'Layout',
-  '.reportType-meta.xml':           'ReportType',
+  '.permissionset-meta.xml':       'PermissionSet',
+  '.mutingpermissionset-meta.xml': 'MutingPermissionSet',
+  '.permissionsetgroup-meta.xml':  'PermissionSetGroup',
+  '.profile-meta.xml':             'Profile',
+  '.layout-meta.xml':              'Layout',
+  '.reportType-meta.xml':          'ReportType',
 };
 
-// Get changed files (passed via env from the shell above)
-let changedFiles = [];
-try {
-    const defaultBranch = execSync(
-        "git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}'",
-        { encoding: 'utf8' }
-    ).trim() || 'main';
-
-    const raw = execSync(
-        `git diff origin/${defaultBranch}...HEAD --name-only 2>/dev/null || git diff HEAD~1..HEAD --name-only`,
-        { encoding: 'utf8' }
-    );
-    changedFiles = raw.trim().split('\n').filter(Boolean);
-} catch (e) {
-    console.error('  Warning: git diff failed — ' + e.message);
+// ── helpers ──────────────────────────────────────────────────────────────────
+function httpsGet(urlStr, token) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(urlStr);
+        const req = https.request(
+            { hostname: u.hostname, path: u.pathname + u.search,
+              method: 'GET', headers: { Authorization: 'Bearer ' + token } },
+            (r) => {
+                const chunks = [];
+                r.on('data', c => chunks.push(c));
+                r.on('end', () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString() }));
+            }
+        );
+        req.on('error', reject);
+        req.end();
+    });
 }
 
-const items = [];
-for (const file of changedFiles) {
-    for (const [ext, type] of Object.entries(EXT_MAP)) {
-        if (file.endsWith(ext)) {
-            const basename = file.split('/').pop().replace(ext, '');
-            items.push({ t: type, n: basename, a: 'Add' });
-            break;
+// ── primary: query ContentDocumentLink from the pipeline/source org ───────────
+async function tryCopadoAttachment() {
+    const promotionId  = process.env.promotionId;
+    const sourceUrl    = (process.env.sourceInstanceUrl || '').replace(/\/+$/, '');
+    const sourceToken  = process.env.sourceSessionid;
+
+    if (!promotionId || !sourceUrl || !sourceToken) {
+        if (!sourceUrl || !sourceToken)
+            console.log('  [Step 4] sourceInstanceUrl/sourceSessionid not set — using git diff fallback');
+        return null;
+    }
+
+    console.log(`  [Step 4] Querying Copado attachments for promotion ${promotionId} at ${sourceUrl}`);
+
+    // 1. Find JSON ContentDocuments linked to this promotion
+    const soql = `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId `
+               + `FROM ContentDocumentLink `
+               + `WHERE LinkedEntityId = '${promotionId}' `
+               + `AND ContentDocument.FileExtension = 'json' `
+               + `ORDER BY ContentDocument.CreatedDate DESC LIMIT 20`;
+    let queryRes;
+    try {
+        queryRes = await httpsGet(
+            sourceUrl + '/services/data/v62.0/query?q=' + encodeURIComponent(soql),
+            sourceToken
+        );
+    } catch (e) {
+        console.log('  [Step 4] Source org query error: ' + e.message + ' — using git diff fallback');
+        return null;
+    }
+
+    if (queryRes.status !== 200) {
+        console.log(`  [Step 4] ContentDocumentLink query returned HTTP ${queryRes.status} — using git diff fallback`);
+        return null;
+    }
+
+    const records = JSON.parse(queryRes.body).records || [];
+    console.log(`  [Step 4] Found ${records.length} JSON attachment(s) on promotion`);
+
+    // 2. Download each attachment and find the Copado component list
+    for (const rec of records) {
+        const versionId = rec.ContentDocument && rec.ContentDocument.LatestPublishedVersionId;
+        const title     = (rec.ContentDocument && rec.ContentDocument.Title) || '';
+        if (!versionId) continue;
+
+        let vRes;
+        try {
+            vRes = await httpsGet(
+                sourceUrl + '/services/data/v62.0/sobjects/ContentVersion/' + versionId + '/VersionData',
+                sourceToken
+            );
+        } catch { continue; }
+
+        if (vRes.status !== 200) continue;
+
+        let parsed;
+        try { parsed = JSON.parse(vRes.body); } catch { continue; }
+
+        // Validate: must be an array of objects with at least t (type) and n (name)
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].t && parsed[0].n) {
+            console.log(`  [Step 4] Using Copado attachment: "${title}" — ${parsed.length} item(s)`);
+            return parsed;
         }
     }
+
+    console.log('  [Step 4] No valid Copado component list found in attachments — using git diff fallback');
+    return null;
 }
 
-const ps  = items.filter((i) => i.t === 'PermissionSet').length;
-const mps = items.filter((i) => i.t === 'MutingPermissionSet').length;
-const psg = items.filter((i) => i.t === 'PermissionSetGroup').length;
-const pr  = items.filter((i) => i.t === 'Profile').length;
-const rt  = items.filter((i) => i.t === 'ReportType').length;
-const ly  = items.filter((i) => i.t === 'Layout').length;
+// ── fallback: derive from git diff ───────────────────────────────────────────
+function buildFromGitDiff() {
+    console.log('  [Step 4] Building component list from git diff (less accurate)');
+    let changedFiles = [];
+    try {
+        const defaultBranch = execSync(
+            "git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}'",
+            { encoding: 'utf8' }
+        ).trim() || 'main';
 
-console.log(`  -> ${items.length} cleanable items | PS:${ps} MPS:${mps} PSG:${psg} Profile:${pr} ReportType:${rt} Layout:${ly}`);
-fs.writeFileSync(OUTPUT_FILE, JSON.stringify(items, null, 2), 'utf8');
+        const raw = execSync(
+            `git diff origin/${defaultBranch}...HEAD --name-only 2>/dev/null || git diff HEAD~1..HEAD --name-only`,
+            { encoding: 'utf8' }
+        );
+        changedFiles = raw.trim().split('\n').filter(Boolean);
+        console.log(`  [Step 4] git diff vs origin/${defaultBranch}: ${changedFiles.length} changed file(s)`);
+    } catch (e) {
+        console.error('  [Step 4] git diff failed: ' + e.message);
+    }
+
+    const items = [];
+    for (const file of changedFiles) {
+        for (const [ext, type] of Object.entries(EXT_MAP)) {
+            if (file.endsWith(ext)) {
+                const basename = file.split('/').pop().replace(ext, '');
+                items.push({ t: type, n: basename, a: 'Add' });
+                break;
+            }
+        }
+    }
+    return items;
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+(async () => {
+    let items  = await tryCopadoAttachment();
+    const src  = items ? 'Copado ContentDocumentLink' : 'git diff';
+    if (!items) items = buildFromGitDiff();
+
+    const ps  = items.filter((i) => i.t === 'PermissionSet').length;
+    const mps = items.filter((i) => i.t === 'MutingPermissionSet').length;
+    const psg = items.filter((i) => i.t === 'PermissionSetGroup').length;
+    const pr  = items.filter((i) => i.t === 'Profile').length;
+    const rt  = items.filter((i) => i.t === 'ReportType').length;
+    const ly  = items.filter((i) => i.t === 'Layout').length;
+
+    console.log(`  [Step 4] Source: ${src}`);
+    console.log(`  [Step 4] ${items.length} cleanable item(s) | PS:${ps} MPS:${mps} PSG:${psg} Profile:${pr} ReportType:${rt} Layout:${ly}`);
+    items.filter(i => ['PermissionSet','MutingPermissionSet','PermissionSetGroup'].includes(i.t))
+         .forEach(i => console.log(`     - ${i.n} [${i.t}]`));
+    items.filter(i => i.t === 'Profile').forEach(i => console.log(`     - ${i.n} [Profile]`));
+    items.filter(i => i.t === 'Layout').forEach(i => console.log(`     - ${i.n} [Layout]`));
+
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(items, null, 2), 'utf8');
+})();
 NODE_EOF
 
 # If the attachment wasn't found, the JSON is [] — nothing for cleanz to fix.
