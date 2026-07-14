@@ -5029,24 +5029,29 @@ export default class DeployAndFix extends SfCommand<void> {
     log('\n======================================================');
     const startTime = Date.now();
 
-    // Verify org session is active before doing anything — avoids 13 cryptic retry
-    // loops when the SF CLI refresh token has expired.
-    log('Checking org connectivity...');
-    // eslint-disable-next-line no-await-in-loop
-    const orgCheck = await checkOrgConnected(targetOrg);
-    if (!orgCheck.connected) {
-      log('');
-      log('ERROR: SF CLI session for the target org is not active.');
-      log(`  Reason : ${orgCheck.reason}`);
-      log(`  Org    : ${targetOrg}`);
-      log('');
-      log('Please re-authenticate and try again:');
-      log(`  sf org login web --alias ${targetOrg}`);
-      log('  (or use JWT auth if this org uses a connected app)');
-      log('');
-      throw new Error(`Org session expired or invalid for: ${targetOrg}`);
+    // In non-interactive (CI/Copado) mode, skip the pre-flight connectivity check.
+    // The auth file is written by the calling script; any auth issues will surface
+    // from the first actual SF CLI deploy call with a clear error message.
+    if (!flags['json-path']) {
+      log('Checking org connectivity...');
+      // eslint-disable-next-line no-await-in-loop
+      const orgCheck = await checkOrgConnected(targetOrg);
+      if (!orgCheck.connected) {
+        log('');
+        log('ERROR: SF CLI session for the target org is not active.');
+        log(`  Reason : ${orgCheck.reason}`);
+        log(`  Org    : ${targetOrg}`);
+        log('');
+        log('Please re-authenticate and try again:');
+        log(`  sf org login web --alias ${targetOrg}`);
+        log('  (or use JWT auth if this org uses a connected app)');
+        log('');
+        throw new Error(`Org session expired or invalid for: ${targetOrg}`);
+      }
+      log('Org session active. Proceeding...');
+    } else {
+      log('Non-interactive mode — skipping org connectivity pre-check.');
     }
-    log('Org session active. Proceeding...');
 
     // Pre-load all installed package namespaces from the org once upfront.
     // This avoids an extra SF CLI call on the first namespace error and ensures

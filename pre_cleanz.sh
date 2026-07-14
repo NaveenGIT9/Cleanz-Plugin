@@ -51,9 +51,11 @@ echo "  -> cleanz plugin linked: $CLEANZ_PLUGIN_DIR"
 copado -p "pre_cleanz | Step 3: Authenticating SF CLI to destination org"
 node << 'AUTH_EOF'
 'use strict';
-const fs   = require('fs');
-const path = require('path');
-const os   = require('os');
+const https  = require('https');
+const fs     = require('fs');
+const path   = require('path');
+const os     = require('os');
+const { URL } = require('url');
 
 const instanceUrl = (process.env.destinationInstanceUrl || '').replace(/\/+$/, '');
 const sessionId   = process.env.destinationSessionid;
@@ -63,25 +65,76 @@ if (!instanceUrl || !sessionId) {
     process.exit(1);
 }
 
-// SF CLI reads auth from ~/.sfdx/<username>.json
-// We use a fixed username that matches the ORG_ALIAS set in bash.
-const authDir  = path.join(os.homedir(), '.sfdx');
-const authFile = path.join(authDir, 'cleanz-dest.json');
+function sfGet(urlPath) {
+    return new Promise((resolve, reject) => {
+        const url = new URL(urlPath, instanceUrl);
+        const options = {
+            hostname: url.hostname,
+            path:     url.pathname + url.search,
+            method:   'GET',
+            headers: { 'Authorization': 'Bearer ' + sessionId },
+        };
+        const req = https.request(options, (res) => {
+            const chunks = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+        });
+        req.on('error', reject);
+        req.end();
+    });
+}
 
-if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+(async () => {
+    // Fetch real username + org ID from the org — required for a valid SF CLI auth file.
+    const uiRes = await sfGet('/services/oauth2/userinfo');
+    if (uiRes.status !== 200) {
+        console.error('userinfo failed (' + uiRes.status + '): ' + uiRes.body.toString());
+        process.exit(1);
+    }
+    const ui       = JSON.parse(uiRes.body.toString());
+    const username = ui.preferred_username || ui.email;
+    const orgId    = ui.organization_id    || '';
+    if (!username) {
+        console.error('Could not resolve username from userinfo: ' + uiRes.body.toString());
+        process.exit(1);
+    }
+    console.log('  -> Org username: ' + username + '  orgId: ' + orgId);
 
-const authObj = {
-    orgId:       'cleanz-dest',
-    username:    'cleanz-dest',
-    accessToken: sessionId,
-    instanceUrl: instanceUrl,
-    loginUrl:    instanceUrl,
-    isDevHub:    false,
-    created:     new Date().toISOString(),
-};
+    // Determine loginUrl: test.salesforce.com for sandboxes, login.salesforce.com for prod.
+    const isSandbox = instanceUrl.includes('.sandbox.') || instanceUrl.includes('--')
+                   || (orgId && orgId.charAt(8) === '1');
+    const loginUrl  = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
 
-fs.writeFileSync(authFile, JSON.stringify(authObj, null, 2), 'utf8');
-console.log('  -> Auth file written: ' + authFile);
+    // Write SF CLI auth file with real Salesforce username + org ID.
+    const authDir  = path.join(os.homedir(), '.sfdx');
+    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
+
+    const authObj = {
+        orgId:       orgId,
+        username:    username,
+        accessToken: sessionId,
+        instanceUrl: instanceUrl,
+        loginUrl:    loginUrl,
+        clientId:    'PlatformCLI',
+        isDevHub:    false,
+    };
+    const authFile = path.join(authDir, username + '.json');
+    fs.writeFileSync(authFile, JSON.stringify(authObj, null, 2), 'utf8');
+    console.log('  -> Auth file: ' + authFile);
+
+    // Write SF CLI alias so --target-org cleanz-dest resolves to the real username.
+    const sfDir     = path.join(os.homedir(), '.sf');
+    if (!fs.existsSync(sfDir)) fs.mkdirSync(sfDir, { recursive: true });
+    const aliasFile = path.join(sfDir, 'alias.json');
+    let aliases = { orgs: {} };
+    if (fs.existsSync(aliasFile)) {
+        try { aliases = JSON.parse(fs.readFileSync(aliasFile, 'utf8')); } catch {}
+    }
+    if (!aliases.orgs) aliases.orgs = {};
+    aliases.orgs['cleanz-dest'] = username;
+    fs.writeFileSync(aliasFile, JSON.stringify(aliases, null, 2), 'utf8');
+    console.log('  -> Alias cleanz-dest -> ' + username);
+})();
 AUTH_EOF
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
