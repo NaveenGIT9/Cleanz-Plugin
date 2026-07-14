@@ -98,6 +98,9 @@ const promotionId  = process.env.promotionId;
 const API_VERSION  = 'v62.0';
 const OUTPUT_FILE  = '/tmp/copado_promotion_changes.json';
 
+console.log(`  -> instanceUrl:  ${instanceUrl}`);
+console.log(`  -> promotionId:  ${promotionId || '(empty/undefined)'}`);
+
 if (!instanceUrl || !sessionId || !promotionId) {
     console.error('Missing required env vars: destinationInstanceUrl, destinationSessionid, promotionId');
     process.exit(1);
