@@ -47,95 +47,41 @@ sf plugins link "$CLEANZ_PLUGIN_DIR" --no-prompt 2>/dev/null || sf plugins link 
 echo "  -> cleanz plugin linked: $CLEANZ_PLUGIN_DIR"
 
 # ── Step 3: Auth SF CLI against destination org ───────────────────────────────
-# Writes an ~/.sfdx auth file so cleanz can run dry-run deploys against the org.
+# Uses the official "sf org login access-token" command so SF CLI writes the auth
+# to its own store (~/.sf/orgs/ in v2) — no manual file writes that break on
+# version-specific paths.
 copado -p "pre_cleanz | Step 3: Authenticating SF CLI to destination org"
-node << 'AUTH_EOF'
-'use strict';
-const https  = require('https');
-const fs     = require('fs');
-const path   = require('path');
-const os     = require('os');
-const { URL } = require('url');
 
+# Verify token is live and log the username (userinfo is a cheap GET, no auth needed).
+node << 'VERIFY_EOF'
+'use strict';
+const https = require('https');
+const { URL } = require('url');
 const instanceUrl = (process.env.destinationInstanceUrl || '').replace(/\/+$/, '');
 const sessionId   = process.env.destinationSessionid;
-
-if (!instanceUrl || !sessionId) {
-    console.error('Missing destinationInstanceUrl or destinationSessionid');
-    process.exit(1);
-}
-
-function sfGet(urlPath) {
-    return new Promise((resolve, reject) => {
-        const url = new URL(urlPath, instanceUrl);
-        const options = {
-            hostname: url.hostname,
-            path:     url.pathname + url.search,
-            method:   'GET',
-            headers: { 'Authorization': 'Bearer ' + sessionId },
-        };
-        const req = https.request(options, (res) => {
-            const chunks = [];
-            res.on('data', (c) => chunks.push(c));
-            res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
-        });
-        req.on('error', reject);
-        req.end();
+if (!instanceUrl || !sessionId) { console.error('Missing destinationInstanceUrl or destinationSessionid'); process.exit(1); }
+const parsed = new URL('/services/oauth2/userinfo', instanceUrl);
+const req = https.request({ hostname: parsed.hostname, path: parsed.pathname, method: 'GET',
+    headers: { 'Authorization': 'Bearer ' + sessionId } }, (res) => {
+    const buf = [];
+    res.on('data', (c) => buf.push(c));
+    res.on('end', () => {
+        if (res.statusCode !== 200) { console.error('userinfo failed (' + res.statusCode + ')'); process.exit(1); }
+        const ui = JSON.parse(Buffer.concat(buf).toString());
+        console.log('  -> Session valid for: ' + (ui.preferred_username || ui.email) + '  orgId: ' + (ui.organization_id || '?'));
     });
-}
+});
+req.on('error', (e) => { console.error('userinfo error: ' + e.message); process.exit(1); });
+req.end();
+VERIFY_EOF
 
-(async () => {
-    // Fetch real username + org ID from the org — required for a valid SF CLI auth file.
-    const uiRes = await sfGet('/services/oauth2/userinfo');
-    if (uiRes.status !== 200) {
-        console.error('userinfo failed (' + uiRes.status + '): ' + uiRes.body.toString());
-        process.exit(1);
-    }
-    const ui       = JSON.parse(uiRes.body.toString());
-    const username = ui.preferred_username || ui.email;
-    const orgId    = ui.organization_id    || '';
-    if (!username) {
-        console.error('Could not resolve username from userinfo: ' + uiRes.body.toString());
-        process.exit(1);
-    }
-    console.log('  -> Org username: ' + username + '  orgId: ' + orgId);
-
-    // Determine loginUrl: test.salesforce.com for sandboxes, login.salesforce.com for prod.
-    const isSandbox = instanceUrl.includes('.sandbox.') || instanceUrl.includes('--')
-                   || (orgId && orgId.charAt(8) === '1');
-    const loginUrl  = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
-
-    // Write SF CLI auth file with real Salesforce username + org ID.
-    const authDir  = path.join(os.homedir(), '.sfdx');
-    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
-
-    const authObj = {
-        orgId:       orgId,
-        username:    username,
-        accessToken: sessionId,
-        instanceUrl: instanceUrl,
-        loginUrl:    loginUrl,
-        clientId:    'PlatformCLI',
-        isDevHub:    false,
-    };
-    const authFile = path.join(authDir, username + '.json');
-    fs.writeFileSync(authFile, JSON.stringify(authObj, null, 2), 'utf8');
-    console.log('  -> Auth file: ' + authFile);
-
-    // Write SF CLI alias so --target-org cleanz-dest resolves to the real username.
-    const sfDir     = path.join(os.homedir(), '.sf');
-    if (!fs.existsSync(sfDir)) fs.mkdirSync(sfDir, { recursive: true });
-    const aliasFile = path.join(sfDir, 'alias.json');
-    let aliases = { orgs: {} };
-    if (fs.existsSync(aliasFile)) {
-        try { aliases = JSON.parse(fs.readFileSync(aliasFile, 'utf8')); } catch {}
-    }
-    if (!aliases.orgs) aliases.orgs = {};
-    aliases.orgs['cleanz-dest'] = username;
-    fs.writeFileSync(aliasFile, JSON.stringify(aliases, null, 2), 'utf8');
-    console.log('  -> Alias cleanz-dest -> ' + username);
-})();
-AUTH_EOF
+# Register the org with SF CLI using the official access-token login.
+# sf org login access-token reads the token from stdin when stdin is not a TTY.
+# --no-prompt skips the interactive "are you sure?" warning.
+printf '%s\n' "$destinationSessionid" | sf org login access-token \
+  --instance-url "$destinationInstanceUrl" \
+  --alias         "$ORG_ALIAS" \
+  --no-prompt
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
 # ── Step 4: Build component list from git diff ────────────────────────────────
