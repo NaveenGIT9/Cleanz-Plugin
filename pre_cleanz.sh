@@ -47,53 +47,68 @@ sf plugins link "$CLEANZ_PLUGIN_DIR" --no-prompt 2>/dev/null || sf plugins link 
 echo "  -> cleanz plugin linked: $CLEANZ_PLUGIN_DIR"
 
 # ── Step 3: Auth SF CLI against destination org ───────────────────────────────
-# Uses the official "sf org login access-token" command so SF CLI writes the auth
-# to its own store (~/.sf/orgs/ in v2) — no manual file writes that break on
-# version-specific paths.
+# "sf org login access-token" has a strict internal regex that rejects Copado's
+# SOAP session token format (e.g. base64 = padding, special chars).
+# Bypass it entirely: write the auth files directly to the SF CLI v2 store so
+# the token is stored as-is and used as a Bearer header without re-validation.
 copado -p "pre_cleanz | Step 3: Authenticating SF CLI to destination org"
-
-# Verify token is live, log username, and write orgId to a temp file.
-# sf org login access-token requires the token in "<orgId>!<rawToken>" format —
-# Copado's {$Destination.Credential.SessionId} is the raw token without that prefix.
-node << 'VERIFY_EOF'
+node << 'AUTH_EOF'
 'use strict';
 const https = require('https');
 const fs    = require('fs');
+const path  = require('path');
+const os    = require('os');
 const { URL } = require('url');
+
 const instanceUrl = (process.env.destinationInstanceUrl || '').replace(/\/+$/, '');
 const sessionId   = process.env.destinationSessionid;
 if (!instanceUrl || !sessionId) { console.error('Missing destinationInstanceUrl or destinationSessionid'); process.exit(1); }
-const parsed = new URL('/services/oauth2/userinfo', instanceUrl);
-const req = https.request({ hostname: parsed.hostname, path: parsed.pathname, method: 'GET',
-    headers: { 'Authorization': 'Bearer ' + sessionId } }, (res) => {
-    const buf = [];
-    res.on('data', (c) => buf.push(c));
-    res.on('end', () => {
-        if (res.statusCode !== 200) { console.error('userinfo failed (' + res.statusCode + ')'); process.exit(1); }
-        const ui = JSON.parse(Buffer.concat(buf).toString());
-        const username = ui.preferred_username || ui.email;
-        const orgId    = ui.organization_id || '';
-        console.log('  -> Session valid for: ' + username + '  orgId: ' + orgId);
-        fs.writeFileSync('/tmp/cleanz_orgid.txt', orgId, 'utf8');
+
+(async () => {
+    // Fetch real username + orgId — needed for the auth file names.
+    const parsed = new URL('/services/oauth2/userinfo', instanceUrl);
+    const uiRes = await new Promise((res, rej) => {
+        const req = https.request({ hostname: parsed.hostname, path: parsed.pathname,
+            method: 'GET', headers: { 'Authorization': 'Bearer ' + sessionId } }, (r) => {
+            const buf = [];
+            r.on('data', c => buf.push(c));
+            r.on('end', () => res({ status: r.statusCode, body: Buffer.concat(buf).toString() }));
+        });
+        req.on('error', rej);
+        req.end();
     });
-});
-req.on('error', (e) => { console.error('userinfo error: ' + e.message); process.exit(1); });
-req.end();
-VERIFY_EOF
+    if (uiRes.status !== 200) { console.error('userinfo failed (' + uiRes.status + '): ' + uiRes.body); process.exit(1); }
+    const ui       = JSON.parse(uiRes.body);
+    const username = ui.preferred_username || ui.email;
+    const orgId    = ui.organization_id || '';
+    const isSandbox = instanceUrl.includes('--') || instanceUrl.includes('.sandbox.');
+    const loginUrl  = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
+    console.log('  -> Session valid for: ' + username + '  orgId: ' + orgId);
 
-# Build the correctly formatted token.  If Copado already includes the prefix
-# (some envs do), use as-is; otherwise prepend the orgId.
-CLEANZ_ORG_ID=$(cat /tmp/cleanz_orgid.txt)
-if echo "$destinationSessionid" | grep -q '!'; then
-    CLEANZ_TOKEN="$destinationSessionid"
-else
-    CLEANZ_TOKEN="${CLEANZ_ORG_ID}!${destinationSessionid}"
-fi
+    const authObj = { orgId, username, accessToken: sessionId, instanceUrl, loginUrl, clientId: 'PlatformCLI', isDevHub: false };
 
-printf '%s\n' "$CLEANZ_TOKEN" | sf org login access-token \
-  --instance-url "$destinationInstanceUrl" \
-  --alias         "$ORG_ALIAS" \
-  --no-prompt
+    // SF CLI v2 (@salesforce/core v5) reads auth from ~/.sf/orgs/<username>.json
+    const sfOrgsDir = path.join(os.homedir(), '.sf', 'orgs');
+    fs.mkdirSync(sfOrgsDir, { recursive: true });
+    fs.writeFileSync(path.join(sfOrgsDir, username + '.json'), JSON.stringify(authObj, null, 2), 'utf8');
+    console.log('  -> SF CLI v2 auth: ~/.sf/orgs/' + username + '.json');
+
+    // SF CLI v1 fallback — ~/.sfdx/<username>.json
+    const sfdxDir = path.join(os.homedir(), '.sfdx');
+    fs.mkdirSync(sfdxDir, { recursive: true });
+    fs.writeFileSync(path.join(sfdxDir, username + '.json'), JSON.stringify(authObj, null, 2), 'utf8');
+    console.log('  -> SF CLI v1 auth: ~/.sfdx/' + username + '.json');
+
+    // Alias: cleanz-dest → real username  (~/.sf/alias.json)
+    const aliasFile = path.join(os.homedir(), '.sf', 'alias.json');
+    let aliases = { orgs: {} };
+    if (fs.existsSync(aliasFile)) { try { aliases = JSON.parse(fs.readFileSync(aliasFile, 'utf8')); } catch {} }
+    if (!aliases.orgs) aliases.orgs = {};
+    aliases.orgs['cleanz-dest'] = username;
+    fs.writeFileSync(aliasFile, JSON.stringify(aliases, null, 2), 'utf8');
+    console.log('  -> Alias cleanz-dest -> ' + username);
+})();
+AUTH_EOF
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
 # ── Step 4: Build component list from git diff ────────────────────────────────
