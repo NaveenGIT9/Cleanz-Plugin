@@ -85,19 +85,24 @@ if (!instanceUrl || !sessionId) { console.error('Missing destinationInstanceUrl 
     const loginUrl  = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
     console.log('  -> Session valid for: ' + username + '  orgId: ' + orgId);
 
-    const authObj = { orgId, username, accessToken: sessionId, instanceUrl, loginUrl, clientId: 'PlatformCLI', isDevHub: false };
+    function writeAuth(dir, filename, uname) {
+        fs.mkdirSync(dir, { recursive: true });
+        const obj = { orgId, username: uname, accessToken: sessionId,
+                      instanceUrl, loginUrl, clientId: 'PlatformCLI', isDevHub: false };
+        fs.writeFileSync(path.join(dir, filename + '.json'), JSON.stringify(obj, null, 2), 'utf8');
+    }
 
-    // SF CLI v2 (@salesforce/core v5) reads auth from ~/.sf/orgs/<username>.json
     const sfOrgsDir = path.join(os.homedir(), '.sf', 'orgs');
-    fs.mkdirSync(sfOrgsDir, { recursive: true });
-    fs.writeFileSync(path.join(sfOrgsDir, username + '.json'), JSON.stringify(authObj, null, 2), 'utf8');
-    console.log('  -> SF CLI v2 auth: ~/.sf/orgs/' + username + '.json');
+    const sfdxDir   = path.join(os.homedir(), '.sfdx');
 
-    // SF CLI v1 fallback — ~/.sfdx/<username>.json
-    const sfdxDir = path.join(os.homedir(), '.sfdx');
-    fs.mkdirSync(sfdxDir, { recursive: true });
-    fs.writeFileSync(path.join(sfdxDir, username + '.json'), JSON.stringify(authObj, null, 2), 'utf8');
-    console.log('  -> SF CLI v1 auth: ~/.sfdx/' + username + '.json');
+    // Write under real username (for alias-based lookup)
+    writeAuth(sfOrgsDir, username, username);
+    writeAuth(sfdxDir,   username, username);
+    // ALSO write under 'cleanz-dest' so --target-org cleanz-dest finds the file
+    // directly even if alias resolution doesn't work in this SF CLI version.
+    writeAuth(sfOrgsDir, 'cleanz-dest', username);
+    writeAuth(sfdxDir,   'cleanz-dest', username);
+    console.log('  -> Auth written for ' + username + ' and cleanz-dest in ~/.sf/orgs/ + ~/.sfdx/');
 
     // Alias: cleanz-dest → real username  (~/.sf/alias.json)
     const aliasFile = path.join(os.homedir(), '.sf', 'alias.json');
@@ -109,6 +114,12 @@ if (!instanceUrl || !sessionId) { console.error('Missing destinationInstanceUrl 
     console.log('  -> Alias cleanz-dest -> ' + username);
 })();
 AUTH_EOF
+
+# Verify SF CLI can actually resolve cleanz-dest before handing to cleanz.
+echo "  -> SF CLI org list (filtered):"
+sf org list 2>&1 | grep -iE "(trnqa|cleanz|No orgs)" | head -5 || true
+echo "  -> SF CLI display cleanz-dest:"
+sf org display --target-org cleanz-dest 2>&1 | grep -E "(Username|Status|Instance)" | head -4 || true
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
 # ── Step 4: Build component list from git diff ────────────────────────────────
