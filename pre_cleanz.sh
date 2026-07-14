@@ -81,14 +81,24 @@ if (!instanceUrl || !sessionId) { console.error('Missing destinationInstanceUrl 
     const ui       = JSON.parse(uiRes.body);
     const username = ui.preferred_username || ui.email;
     const orgId    = ui.organization_id || '';
-    const isSandbox = instanceUrl.includes('--') || instanceUrl.includes('.sandbox.');
+
+    // Copado's destinationInstanceUrl may be the generic login URL (test.salesforce.com)
+    // not the org's real instance URL.  Extract the real URL from userinfo.urls.custom_domain
+    // (present in most orgs) or from the profile field.  Using the real instance URL is
+    // required for Metadata API deploy calls — test.salesforce.com returns HTTP 405.
+    const realInstanceUrl = (ui.urls && ui.urls.custom_domain)
+        ? ui.urls.custom_domain.replace(/\/+$/, '')
+        : (ui.profile ? ((ui.profile.match(/^(https:\/\/[^\/]+)/) || [])[1] || instanceUrl) : instanceUrl);
+
+    const isSandbox = realInstanceUrl.includes('--') || realInstanceUrl.includes('.sandbox.');
     const loginUrl  = isSandbox ? 'https://test.salesforce.com' : 'https://login.salesforce.com';
     console.log('  -> Session valid for: ' + username + '  orgId: ' + orgId);
+    console.log('  -> Instance URL used: ' + realInstanceUrl);
 
     function writeAuth(dir, filename, uname) {
         fs.mkdirSync(dir, { recursive: true });
         const obj = { orgId, username: uname, accessToken: sessionId,
-                      instanceUrl, loginUrl, clientId: 'PlatformCLI', isDevHub: false };
+                      instanceUrl: realInstanceUrl, loginUrl, clientId: 'PlatformCLI', isDevHub: false };
         fs.writeFileSync(path.join(dir, filename + '.json'), JSON.stringify(obj, null, 2), 'utf8');
     }
 
