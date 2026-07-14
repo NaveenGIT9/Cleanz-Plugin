@@ -231,4 +231,5 @@ elif [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+git push origin "$branch"
 copado -p "pre_cleanz | Complete — branch is clean, SFDX Deploy can proceed"
