@@ -34,13 +34,6 @@ API_VERSION="v62.0"
 copado -p "pre_cleanz | Step 1: Cloning promotion branch: $branch"
 copado-git-get "$branch"
 
-# DEBUG: print Copado-injected env vars so we can identify the pipeline org session
-echo "=== DEBUG env vars ==="
-env | grep -iE '^(SF_|COPADO_|INSTANCE_URL|SESSION_ID|ENDPOINT|METADATA_URL)' \
-  | sed 's/=.*/=***/' | sort || true
-echo "=== SFDX auth files ==="
-ls ~/.sfdx/ 2>/dev/null || echo "(none)"
-echo "==="
 
 # ── Step 2: Install sf cleanz plugin (fat tgz — no npm download needed) ──────
 # Fat tgz ships with node_modules (prod-only). We extract it and use
@@ -92,114 +85,77 @@ console.log('  -> Auth file written: ' + authFile);
 AUTH_EOF
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
-# ── Step 4: Fetch "Copado Promotion changes" ContentDocument ─────────────────
-copado -p "pre_cleanz | Step 4: Fetching promotion components JSON from Salesforce"
+# ── Step 4: Build component list from git diff ────────────────────────────────
+# No Copado org session available in the container — derive the components
+# directly from the git branch instead of querying ContentDocumentLink.
+# We diff the promotion branch against the default remote branch (main/master)
+# and collect any PermissionSet/MutingPermissionSet/PSG/Profile/Layout/ReportType
+# files that changed. Only those are passed to cleanz.
+copado -p "pre_cleanz | Step 4: Building component list from git diff"
+
+# Find the default remote branch (main or master)
+DEFAULT_BRANCH=$(git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || echo "main")
+echo "  -> Default branch: $DEFAULT_BRANCH"
+
+# Get all files changed in this promotion branch vs the default branch
+CHANGED_FILES=$(git diff "origin/${DEFAULT_BRANCH}...HEAD" --name-only 2>/dev/null || \
+                git diff "HEAD~1..HEAD" --name-only 2>/dev/null || echo "")
+echo "  -> Changed files: $(echo "$CHANGED_FILES" | grep -c . || echo 0)"
+
 node << 'NODE_EOF'
 'use strict';
-const https  = require('https');
-const fs     = require('fs');
-const { URL } = require('url');
+const { execSync } = require('child_process');
+const fs = require('fs');
 
-const instanceUrl  = (process.env.destinationInstanceUrl || '').replace(/\/+$/, '');
-const sessionId    = process.env.destinationSessionid;
-const promotionId  = process.env.promotionId;
-const API_VERSION  = 'v62.0';
-const OUTPUT_FILE  = '/tmp/copado_promotion_changes.json';
+const OUTPUT_FILE = '/tmp/copado_promotion_changes.json';
 
-console.log(`  -> instanceUrl:  ${instanceUrl}`);
-console.log(`  -> promotionId:  ${promotionId || '(empty/undefined)'}`);
+// Map file extension to cleanz metadata type
+const EXT_MAP = {
+  '.permissionset-meta.xml':        'PermissionSet',
+  '.mutingpermissionset-meta.xml':  'MutingPermissionSet',
+  '.permissionsetgroup-meta.xml':   'PermissionSetGroup',
+  '.profile-meta.xml':              'Profile',
+  '.layout-meta.xml':               'Layout',
+  '.reportType-meta.xml':           'ReportType',
+};
 
-if (!instanceUrl || !sessionId || !promotionId) {
-    console.error('Missing required env vars: destinationInstanceUrl, destinationSessionid, promotionId');
-    process.exit(1);
+// Get changed files (passed via env from the shell above)
+let changedFiles = [];
+try {
+    const defaultBranch = execSync(
+        "git remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}'",
+        { encoding: 'utf8' }
+    ).trim() || 'main';
+
+    const raw = execSync(
+        `git diff origin/${defaultBranch}...HEAD --name-only 2>/dev/null || git diff HEAD~1..HEAD --name-only`,
+        { encoding: 'utf8' }
+    );
+    changedFiles = raw.trim().split('\n').filter(Boolean);
+} catch (e) {
+    console.error('  Warning: git diff failed — ' + e.message);
 }
 
-function sfGet(urlPath) {
-    return new Promise((resolve, reject) => {
-        const url = new URL(urlPath, instanceUrl);
-        const options = {
-            hostname: url.hostname,
-            path:     url.pathname + url.search,
-            method:   'GET',
-            headers: {
-                'Authorization': 'Bearer ' + sessionId,
-                'Content-Type':  'application/json',
-            },
-        };
-        const req = https.request(options, (res) => {
-            const chunks = [];
-            res.on('data', (c) => chunks.push(c));
-            res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
-        });
-        req.on('error', reject);
-        req.end();
-    });
+const items = [];
+for (const file of changedFiles) {
+    for (const [ext, type] of Object.entries(EXT_MAP)) {
+        if (file.endsWith(ext)) {
+            const basename = file.split('/').pop().replace(ext, '');
+            items.push({ t: type, n: basename, a: 'Add' });
+            break;
+        }
+    }
 }
 
-(async () => {
-    // 1. Find the ContentDocumentId via ContentDocumentLink
-    const soql = `SELECT ContentDocumentId, ContentDocument.Title `
-               + `FROM ContentDocumentLink `
-               + `WHERE LinkedEntityId = '${promotionId}' `
-               + `AND ContentDocument.Title = 'Copado Promotion changes' `
-               + `LIMIT 1`;
-    const qRes = await sfGet(`/services/data/${API_VERSION}/query?q=${encodeURIComponent(soql)}`);
-    if (qRes.status !== 200) {
-        console.error(`ContentDocumentLink query failed (HTTP ${qRes.status}): ${qRes.body.toString()}`);
-        process.exit(1);
-    }
-    const links = JSON.parse(qRes.body.toString()).records || [];
-    if (links.length === 0) {
-        console.log('No "Copado Promotion changes" file found — nothing for cleanz to fix.');
-        fs.writeFileSync(OUTPUT_FILE, '[]', 'utf8');
-        process.exit(0);
-    }
-    const contentDocId = links[0].ContentDocumentId;
-    console.log(`  -> ContentDocument found: ${contentDocId}`);
+const ps  = items.filter((i) => i.t === 'PermissionSet').length;
+const mps = items.filter((i) => i.t === 'MutingPermissionSet').length;
+const psg = items.filter((i) => i.t === 'PermissionSetGroup').length;
+const pr  = items.filter((i) => i.t === 'Profile').length;
+const rt  = items.filter((i) => i.t === 'ReportType').length;
+const ly  = items.filter((i) => i.t === 'Layout').length;
 
-    // 2. Get the latest ContentVersion ID
-    const cvSoql = `SELECT Id FROM ContentVersion `
-                 + `WHERE ContentDocumentId = '${contentDocId}' `
-                 + `AND IsLatest = true `
-                 + `LIMIT 1`;
-    const cvRes = await sfGet(`/services/data/${API_VERSION}/query?q=${encodeURIComponent(cvSoql)}`);
-    if (cvRes.status !== 200) {
-        console.error(`ContentVersion query failed (HTTP ${cvRes.status}): ${cvRes.body.toString()}`);
-        process.exit(1);
-    }
-    const versions = JSON.parse(cvRes.body.toString()).records || [];
-    if (versions.length === 0) {
-        console.error('ContentVersion not found for ContentDocument: ' + contentDocId);
-        process.exit(1);
-    }
-    const versionId = versions[0].Id;
-    console.log(`  -> ContentVersion: ${versionId}`);
-
-    // 3. Download VersionData (the raw JSON body)
-    const bRes = await sfGet(`/services/data/${API_VERSION}/sobjects/ContentVersion/${versionId}/VersionData`);
-    if (bRes.status !== 200) {
-        console.error(`VersionData fetch failed (HTTP ${bRes.status}): ${bRes.body.toString()}`);
-        process.exit(1);
-    }
-
-    fs.writeFileSync(OUTPUT_FILE, bRes.body);
-    console.log(`  -> Promotion JSON written: ${OUTPUT_FILE} (${bRes.body.length} bytes)`);
-
-    // Validate JSON and log component counts
-    try {
-        const items = JSON.parse(bRes.body.toString());
-        const ps  = items.filter((i) => i.t === 'PermissionSet').length;
-        const mps = items.filter((i) => i.t === 'MutingPermissionSet').length;
-        const psg = items.filter((i) => i.t === 'PermissionSetGroup').length;
-        const pr  = items.filter((i) => i.t === 'Profile').length;
-        const rt  = items.filter((i) => i.t === 'ReportType').length;
-        const ly  = items.filter((i) => i.t === 'Layout').length;
-        console.log(`  -> ${items.length} total items | PS:${ps} MPS:${mps} PSG:${psg} Profile:${pr} ReportType:${rt} Layout:${ly}`);
-    } catch (e) {
-        console.error('Promotion JSON is not valid JSON — aborting.');
-        process.exit(1);
-    }
-})();
+console.log(`  -> ${items.length} cleanable items | PS:${ps} MPS:${mps} PSG:${psg} Profile:${pr} ReportType:${rt} Layout:${ly}`);
+fs.writeFileSync(OUTPUT_FILE, JSON.stringify(items, null, 2), 'utf8');
 NODE_EOF
 
 # If the attachment wasn't found, the JSON is [] — nothing for cleanz to fix.
