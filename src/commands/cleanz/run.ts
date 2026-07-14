@@ -4842,8 +4842,9 @@ export default class DeployAndFix extends SfCommand<void> {
     log('======================================================\n');
     log('  1) Validate and clean missing references');
     log('  2) Remove specific namespace references all over repo\n');
+    // Auto-select option 1 when --json-path is supplied (non-interactive / CI mode).
     // eslint-disable-next-line no-await-in-loop
-    const choice = (await prompt('Enter your choice (1 or 2): ')).trim();
+    const choice = flags['json-path'] ? '1' : (await prompt('Enter your choice (1 or 2): ')).trim();
 
     // Resolve repo paths here (after first prompt) — NOT at module load time.
     // This avoids blocking the Node.js thread with execSync during SF CLI import.

@@ -173,13 +173,30 @@ function sfGet(urlPath) {
 })();
 NODE_EOF
 
+# If the attachment wasn't found, the JSON is [] — nothing for cleanz to fix.
+# Exit 0 here so SFDX Deploy proceeds normally without running cleanz at all.
+if [ "$(cat "$PROMOTION_JSON")" = "[]" ]; then
+    copado -p "pre_cleanz | No components in promotion — skipping cleanz, SFDX Deploy can proceed"
+    exit 0
+fi
+
 # ── Step 5: Run sf cleanz ─────────────────────────────────────────────────────
-# --json-path and --target-org both supplied → cleanz skips all interactive prompts.
+# --json-path supplied → cleanz auto-selects option 1 (validate & clean).
 # cleanz fixes XML files, commits the changes, and pushes back to the branch.
 # The subsequent SFDX Deploy step picks up the already-cleaned branch.
-copado -p "pre_cleanz | Step 5: Running sf cleanz"
-sf cleanz run \
+copado -p "pre_cleanz | Step 5: Running sf cleanz (10 min timeout)"
+# 600s hard cap — prevents cleanz looping forever if it hits an unhandled error type.
+timeout 600 sf cleanz run \
   --json-path  "$PROMOTION_JSON" \
-  --target-org "$ORG_ALIAS"
+  --target-org "$ORG_ALIAS" \
+  --verbose
+EXIT_CODE=$?
+if [ $EXIT_CODE -eq 124 ]; then
+    echo "##### sf cleanz timed out after 10 minutes — check verbose output above for the stuck error type"
+    exit 1
+elif [ $EXIT_CODE -ne 0 ]; then
+    echo "##### sf cleanz exited with code $EXIT_CODE"
+    exit $EXIT_CODE
+fi
 
 copado -p "pre_cleanz | Complete — branch is clean, SFDX Deploy can proceed"
