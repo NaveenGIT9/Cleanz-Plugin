@@ -5018,8 +5018,9 @@ export default class DeployAndFix extends SfCommand<void> {
     logWhitelistDetails(log, whitelist);
 
     log('');
+    // Auto-confirm when --json-path is supplied (non-interactive / CI mode).
     // eslint-disable-next-line no-await-in-loop
-    const confirm = await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
+    const confirm = flags['json-path'] ? '' : await prompt("Press ENTER to start or type 'exit' to cancel\n> ");
     if (confirm.trim().toLowerCase() === 'exit') {
       log('\nScript cancelled by user.');
       return;
