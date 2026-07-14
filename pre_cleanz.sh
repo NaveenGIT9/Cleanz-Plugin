@@ -18,14 +18,11 @@
 #   git_json               = {$Context.Repository.Credential}
 #   destinationInstanceUrl = {$Destination.Credential.Endpoint}
 #   destinationSessionid   = {$Destination.Credential.SessionId}
-#   sourceInstanceUrl      = {$Source.Credential.Endpoint}     ← pipeline org URL
-#   sourceSessionid        = {$Source.Credential.SessionId}    ← pipeline org session
 #
-# sourceInstanceUrl/sourceSessionid must point to the Copado pipeline org (RBKPIPEQA)
-# where copado__Promotion__c and ContentDocumentLink records live. Step 4 uses them to
-# fetch the exact Copado component list. If missing or wrong org, Step 4 falls back to
-# git diff (less accurate — picks up any permset changed in the branch, not just the
-# promoted components).
+# instanceUrl / sessionId are auto-injected by Copado into every Function container and
+# point to the PIPELINE ORG (RBKPIPEQA) — the org where copado__Promotion__c and
+# ContentDocumentLink records live. Step 4 uses them to query the exact Copado component
+# list. If the query fails, Step 4 falls back to git diff.
 #
 set -euo pipefail
 trap 'echo "##### Error on line $LINENO — exit code $?"' ERR
@@ -184,19 +181,20 @@ function httpsGet(urlStr, token) {
     });
 }
 
-// ── primary: query ContentDocumentLink from the pipeline/source org ───────────
+// ── primary: query ContentDocumentLink from the Copado pipeline org ──────────
 async function tryCopadoAttachment() {
-    const promotionId  = process.env.promotionId;
-    const sourceUrl    = (process.env.sourceInstanceUrl || '').replace(/\/+$/, '');
-    const sourceToken  = process.env.sourceSessionid;
+    const promotionId   = process.env.promotionId;
+    // instanceUrl / sessionId are auto-injected by Copado into every Function
+    // container — they point to the PIPELINE ORG (RBKPIPEQA), not source/dest.
+    const pipelineUrl   = (process.env.instanceUrl || '').replace(/\/+$/, '');
+    const pipelineToken = process.env.sessionId;
 
-    if (!promotionId || !sourceUrl || !sourceToken) {
-        if (!sourceUrl || !sourceToken)
-            console.log('  [Step 4] sourceInstanceUrl/sourceSessionid not set — using git diff fallback');
+    if (!promotionId || !pipelineUrl || !pipelineToken) {
+        console.log('  [Step 4] instanceUrl/sessionId (pipeline org) not found — using git diff fallback');
         return null;
     }
 
-    console.log(`  [Step 4] Querying Copado attachments for promotion ${promotionId} at ${sourceUrl}`);
+    console.log(`  [Step 4] Querying Copado attachments for promotion ${promotionId} at ${pipelineUrl}`);
 
     // 1. Find JSON ContentDocuments linked to this promotion
     const soql = `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId `
@@ -207,11 +205,11 @@ async function tryCopadoAttachment() {
     let queryRes;
     try {
         queryRes = await httpsGet(
-            sourceUrl + '/services/data/v62.0/query?q=' + encodeURIComponent(soql),
-            sourceToken
+            pipelineUrl + '/services/data/v62.0/query?q=' + encodeURIComponent(soql),
+            pipelineToken
         );
     } catch (e) {
-        console.log('  [Step 4] Source org query error: ' + e.message + ' — using git diff fallback');
+        console.log('  [Step 4] Pipeline org query error: ' + e.message + ' — using git diff fallback');
         return null;
     }
 
@@ -232,8 +230,8 @@ async function tryCopadoAttachment() {
         let vRes;
         try {
             vRes = await httpsGet(
-                sourceUrl + '/services/data/v62.0/sobjects/ContentVersion/' + versionId + '/VersionData',
-                sourceToken
+                pipelineUrl + '/services/data/v62.0/sobjects/ContentVersion/' + versionId + '/VersionData',
+                pipelineToken
             );
         } catch { continue; }
 
