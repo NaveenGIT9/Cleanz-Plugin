@@ -84,7 +84,7 @@ console.log('  -> Auth file written: ' + authFile);
 AUTH_EOF
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
-# ── Step 4: Fetch "Copado Promotion changes" attachment ───────────────────────
+# ── Step 4: Fetch "Copado Promotion changes" ContentDocument ─────────────────
 copado -p "pre_cleanz | Step 4: Fetching promotion components JSON from Salesforce"
 node << 'NODE_EOF'
 'use strict';
@@ -126,37 +126,55 @@ function sfGet(urlPath) {
 }
 
 (async () => {
-    // 1. Find the attachment ID
-    const soql = `SELECT Id, Name FROM Attachment `
-               + `WHERE ParentId = '${promotionId}' `
-               + `AND Name = 'Copado Promotion changes' `
+    // 1. Find the ContentDocumentId via ContentDocumentLink
+    const soql = `SELECT ContentDocumentId, ContentDocument.Title `
+               + `FROM ContentDocumentLink `
+               + `WHERE LinkedEntityId = '${promotionId}' `
+               + `AND ContentDocument.Title = 'Copado Promotion changes' `
                + `LIMIT 1`;
     const qRes = await sfGet(`/services/data/${API_VERSION}/query?q=${encodeURIComponent(soql)}`);
     if (qRes.status !== 200) {
-        console.error(`Attachment query failed (HTTP ${qRes.status}): ${qRes.body.toString()}`);
+        console.error(`ContentDocumentLink query failed (HTTP ${qRes.status}): ${qRes.body.toString()}`);
         process.exit(1);
     }
-    const records = JSON.parse(qRes.body.toString()).records || [];
-    if (records.length === 0) {
-        // No attachment means nothing was promoted — exit cleanly, let deploy proceed.
-        console.log('No "Copado Promotion changes" attachment found — nothing for cleanz to fix.');
+    const links = JSON.parse(qRes.body.toString()).records || [];
+    if (links.length === 0) {
+        console.log('No "Copado Promotion changes" file found — nothing for cleanz to fix.');
         fs.writeFileSync(OUTPUT_FILE, '[]', 'utf8');
         process.exit(0);
     }
-    const attachmentId = records[0].Id;
-    console.log(`  -> Attachment found: ${attachmentId} (${records[0].Name})`);
+    const contentDocId = links[0].ContentDocumentId;
+    console.log(`  -> ContentDocument found: ${contentDocId}`);
 
-    // 2. Download the attachment body (raw JSON text from Salesforce)
-    const bRes = await sfGet(`/services/data/${API_VERSION}/sobjects/Attachment/${attachmentId}/Body`);
+    // 2. Get the latest ContentVersion ID
+    const cvSoql = `SELECT Id FROM ContentVersion `
+                 + `WHERE ContentDocumentId = '${contentDocId}' `
+                 + `AND IsLatest = true `
+                 + `LIMIT 1`;
+    const cvRes = await sfGet(`/services/data/${API_VERSION}/query?q=${encodeURIComponent(cvSoql)}`);
+    if (cvRes.status !== 200) {
+        console.error(`ContentVersion query failed (HTTP ${cvRes.status}): ${cvRes.body.toString()}`);
+        process.exit(1);
+    }
+    const versions = JSON.parse(cvRes.body.toString()).records || [];
+    if (versions.length === 0) {
+        console.error('ContentVersion not found for ContentDocument: ' + contentDocId);
+        process.exit(1);
+    }
+    const versionId = versions[0].Id;
+    console.log(`  -> ContentVersion: ${versionId}`);
+
+    // 3. Download VersionData (the raw JSON body)
+    const bRes = await sfGet(`/services/data/${API_VERSION}/sobjects/ContentVersion/${versionId}/VersionData`);
     if (bRes.status !== 200) {
-        console.error(`Attachment body fetch failed (HTTP ${bRes.status}): ${bRes.body.toString()}`);
+        console.error(`VersionData fetch failed (HTTP ${bRes.status}): ${bRes.body.toString()}`);
         process.exit(1);
     }
 
     fs.writeFileSync(OUTPUT_FILE, bRes.body);
     console.log(`  -> Promotion JSON written: ${OUTPUT_FILE} (${bRes.body.length} bytes)`);
 
-    // Validate it's parseable JSON
+    // Validate JSON and log component counts
     try {
         const items = JSON.parse(bRes.body.toString());
         const ps  = items.filter((i) => i.t === 'PermissionSet').length;
