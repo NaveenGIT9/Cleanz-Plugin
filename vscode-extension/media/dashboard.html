@@ -774,20 +774,46 @@
         color: #8aa0b8;
       }
       .log-line.log-total-time {
-        margin-top: 6px;
+        margin-top: 8px;
         margin-bottom: 4px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       .log-line.log-total-time .log-ts {
         display: none;
       }
-      .log-total-time-text {
-        font-size: 52px;
-        font-weight: 800;
-        color: #fbbf24;
-        letter-spacing: 0.02em;
-        line-height: 1.1;
-        text-shadow: 0 0 24px rgba(251, 191, 36, 0.45);
+      .log-tt-check {
+        width: 20px;
+        height: 20px;
+        background: #16a34a;
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        color: #fff;
+        flex-shrink: 0;
+        line-height: 1;
+      }
+      .log-tt-text {
+        font-size: 16px;
+        font-weight: 700;
         font-family: var(--mono);
+      }
+      .log-tt-prefix {
+        color: #94a3b8;
+        font-weight: 400;
+      }
+      .log-tt-mins {
+        color: #059669;
+      }
+      .log-tt-secs {
+        color: #16a34a;
+      }
+      .log-tt-unit {
+        font-size: 12px;
+        color: #15803d;
       }
 
       /* TAGS / WHITELIST */
@@ -1896,11 +1922,25 @@
         const isTotalTime = text && /^\s*Total time:/i.test(text);
         if (isTotalTime) {
           line.className = 'log-line log-total-time';
+          const ttMatch = /(\d+)m\s*(\d+)s/.exec(display);
+          const ttBody = ttMatch
+            ? '<span class="log-tt-prefix">Total time:&nbsp;</span>' +
+              '<span class="log-tt-mins">' +
+              ttMatch[1] +
+              '</span>' +
+              '<span class="log-tt-unit">m&nbsp;</span>' +
+              '<span class="log-tt-secs">' +
+              ttMatch[2] +
+              '</span>' +
+              '<span class="log-tt-unit">s</span>'
+            : '<span class="log-tt-prefix">' + escHtml(display.trim()) + '</span>';
           line.innerHTML =
             '<span class="log-ts">' +
             ts +
-            '</span><span class="log-total-time-text">' +
-            escHtml(display.trim()) +
+            '</span>' +
+            '<span class="log-tt-check">&#10003;</span>' +
+            '<span class="log-tt-text">' +
+            ttBody +
             '</span>';
         } else {
           line.className = 'log-line';

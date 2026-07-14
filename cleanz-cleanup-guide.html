@@ -1091,9 +1091,10 @@
         <!-- How columns are structured -->
         <div class="box info-box" style="margin-bottom: 24px">
           <div class="box-label">How a &lt;columns&gt; block looks in XML</div>
-          <code>
-            &lt;columns&gt; &lt;field&gt;Budget__c&lt;/field&gt; ← field name (bare, no object prefix)
-            &lt;table&gt;Opportunity&lt;/table&gt; ← which object this field belongs to &lt;checkedByDefault/&gt;
+          <code
+            >&lt;columns&gt; &lt;field&gt;Budget__c&lt;/field&gt;
+            <span class="dim">← field name (bare, no object prefix)</span> &lt;table&gt;Opportunity&lt;/table&gt;
+            <span class="dim">← which object this field belongs to</span> &lt;checkedByDefault/&gt;
             &lt;/columns&gt;</code
           >
         </div>
@@ -1307,19 +1308,25 @@
         <div class="box info-box" style="margin-bottom: 24px">
           <div class="box-label">Key XML sections in a Layout file</div>
           <code
-            >&lt;Layout&gt; &lt;customButtons&gt;SendEmail&lt;/customButtons&gt; ← custom button name (bare, no object
-            prefix) &lt;layoutSections&gt; ← page section &lt;layoutColumns&gt; &lt;layoutItems&gt;
-            &lt;field&gt;Budget__c&lt;/field&gt; ← field in the section &lt;/layoutItems&gt; &lt;/layoutColumns&gt;
-            &lt;/layoutSections&gt; &lt;quickActionList&gt; ← quick action bar &lt;quickActionListItems&gt;
+            >&lt;Layout&gt; &lt;customButtons&gt;SendEmail&lt;/customButtons&gt;
+            <span class="dim">← custom button name (bare, no object prefix)</span>
+
+            &lt;layoutSections&gt; <span class="dim">← page section</span> &lt;layoutColumns&gt; &lt;layoutItems&gt;
+            &lt;field&gt;Budget__c&lt;/field&gt; <span class="dim">← field in the section</span> &lt;/layoutItems&gt;
+            &lt;/layoutColumns&gt; &lt;/layoutSections&gt; &lt;quickActionList&gt;
+            <span class="dim">← quick action bar</span> &lt;quickActionListItems&gt;
             &lt;quickActionName&gt;Account.NewContact&lt;/quickActionName&gt; &lt;/quickActionListItems&gt;
-            &lt;/quickActionList&gt; &lt;platformActionList&gt; ← platform action panel &lt;platformActionListItems&gt;
+            &lt;/quickActionList&gt; &lt;platformActionList&gt;
+            <span class="dim">← platform action panel</span> &lt;platformActionListItems&gt;
             &lt;actionName&gt;Account.NewContact&lt;/actionName&gt; &lt;actionType&gt;QuickAction&lt;/actionType&gt;
-            &lt;/platformActionListItems&gt; &lt;/platformActionList&gt; &lt;relatedLists&gt; ← related list panel
-            &lt;fields&gt;FULL_NAME&lt;/fields&gt; ← column shown in the list &lt;fields&gt;CONTACT.EMAIL&lt;/fields&gt;
-            &lt;relatedList&gt;RelatedContactList&lt;/relatedList&gt; ← which related list (standard)
-            &lt;/relatedLists&gt; &lt;relatedLists&gt; ← custom-object related list &lt;fields&gt;NAME&lt;/fields&gt;
-            &lt;relatedList&gt;OldObj__c.LookupField__c&lt;/relatedList&gt; ← object + lookup field
-            &lt;/relatedLists&gt; &lt;/Layout&gt;</code
+            &lt;/platformActionListItems&gt; &lt;/platformActionList&gt; &lt;relatedLists&gt;
+            <span class="dim">← related list panel (standard)</span> &lt;fields&gt;FULL_NAME&lt;/fields&gt;
+            <span class="dim">← column shown in the list</span> &lt;fields&gt;CONTACT.EMAIL&lt;/fields&gt;
+            &lt;relatedList&gt;RelatedContactList&lt;/relatedList&gt;
+            <span class="dim">← which related list</span> &lt;/relatedLists&gt; &lt;relatedLists&gt;
+            <span class="dim">← custom-object related list</span> &lt;fields&gt;NAME&lt;/fields&gt;
+            &lt;relatedList&gt;OldObj__c.LookupField__c&lt;/relatedList&gt;
+            <span class="dim">← object + lookup field</span> &lt;/relatedLists&gt; &lt;/Layout&gt;</code
           >
         </div>
 
