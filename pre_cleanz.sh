@@ -34,6 +34,14 @@ API_VERSION="v62.0"
 copado -p "pre_cleanz | Step 1: Cloning promotion branch: $branch"
 copado-git-get "$branch"
 
+# DEBUG: print Copado-injected env vars so we can identify the pipeline org session
+echo "=== DEBUG env vars ==="
+env | grep -iE '^(SF_|COPADO_|INSTANCE_URL|SESSION_ID|ENDPOINT|METADATA_URL)' \
+  | sed 's/=.*/=***/' | sort || true
+echo "=== SFDX auth files ==="
+ls ~/.sfdx/ 2>/dev/null || echo "(none)"
+echo "==="
+
 # ── Step 2: Install sf cleanz plugin (fat tgz — no npm download needed) ──────
 # Fat tgz ships with node_modules (prod-only). We extract it and use
 # "sf plugins link" to register the local directory — zero npm downloads,
