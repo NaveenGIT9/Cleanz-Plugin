@@ -52,10 +52,13 @@ echo "  -> cleanz plugin linked: $CLEANZ_PLUGIN_DIR"
 # version-specific paths.
 copado -p "pre_cleanz | Step 3: Authenticating SF CLI to destination org"
 
-# Verify token is live and log the username (userinfo is a cheap GET, no auth needed).
+# Verify token is live, log username, and write orgId to a temp file.
+# sf org login access-token requires the token in "<orgId>!<rawToken>" format —
+# Copado's {$Destination.Credential.SessionId} is the raw token without that prefix.
 node << 'VERIFY_EOF'
 'use strict';
 const https = require('https');
+const fs    = require('fs');
 const { URL } = require('url');
 const instanceUrl = (process.env.destinationInstanceUrl || '').replace(/\/+$/, '');
 const sessionId   = process.env.destinationSessionid;
@@ -68,17 +71,26 @@ const req = https.request({ hostname: parsed.hostname, path: parsed.pathname, me
     res.on('end', () => {
         if (res.statusCode !== 200) { console.error('userinfo failed (' + res.statusCode + ')'); process.exit(1); }
         const ui = JSON.parse(Buffer.concat(buf).toString());
-        console.log('  -> Session valid for: ' + (ui.preferred_username || ui.email) + '  orgId: ' + (ui.organization_id || '?'));
+        const username = ui.preferred_username || ui.email;
+        const orgId    = ui.organization_id || '';
+        console.log('  -> Session valid for: ' + username + '  orgId: ' + orgId);
+        fs.writeFileSync('/tmp/cleanz_orgid.txt', orgId, 'utf8');
     });
 });
 req.on('error', (e) => { console.error('userinfo error: ' + e.message); process.exit(1); });
 req.end();
 VERIFY_EOF
 
-# Register the org with SF CLI using the official access-token login.
-# sf org login access-token reads the token from stdin when stdin is not a TTY.
-# --no-prompt skips the interactive "are you sure?" warning.
-printf '%s\n' "$destinationSessionid" | sf org login access-token \
+# Build the correctly formatted token.  If Copado already includes the prefix
+# (some envs do), use as-is; otherwise prepend the orgId.
+CLEANZ_ORG_ID=$(cat /tmp/cleanz_orgid.txt)
+if echo "$destinationSessionid" | grep -q '!'; then
+    CLEANZ_TOKEN="$destinationSessionid"
+else
+    CLEANZ_TOKEN="${CLEANZ_ORG_ID}!${destinationSessionid}"
+fi
+
+printf '%s\n' "$CLEANZ_TOKEN" | sf org login access-token \
   --instance-url "$destinationInstanceUrl" \
   --alias         "$ORG_ALIAS" \
   --no-prompt
