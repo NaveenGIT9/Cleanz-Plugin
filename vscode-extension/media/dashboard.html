@@ -1293,8 +1293,10 @@
             </div>
             <div id="rowOrg">
               <div class="field-label">Target Org</div>
-              <input class="field-input" id="orgAlias" placeholder="e.g. RBKQA" />
-              <div class="org-note">Org alias or username</div>
+              <select class="field-input" id="orgAlias" style="cursor: pointer">
+                <option value="">⏳ Loading orgs...</option>
+              </select>
+              <div class="org-note" id="orgNote">Fetching authenticated orgs...</div>
             </div>
             <div id="rowNs" style="display: none">
               <div class="field-label">Namespace Name</div>
@@ -1962,6 +1964,31 @@
           case 'openRunDialog':
             openModal();
             break;
+
+          case 'orgList': {
+            const sel = document.getElementById('orgAlias');
+            const note = document.getElementById('orgNote');
+            const prev = sel.value;
+            sel.innerHTML = '';
+            if (!msg.orgs || msg.orgs.length === 0) {
+              sel.innerHTML = '<option value="">— No orgs found —</option>';
+              if (note) note.textContent = 'No authenticated orgs found. Run: sf org login web';
+            } else {
+              msg.orgs.forEach((o) => {
+                const opt = document.createElement('option');
+                opt.value = o.alias || o.username || '';
+                const dot = o.connected ? '✓' : '✗';
+                opt.textContent = `${dot} ${o.alias || o.username}${
+                  o.alias && o.username ? ' (' + o.username + ')' : ''
+                }`;
+                if (!o.connected) opt.style.color = '#f87171';
+                sel.appendChild(opt);
+              });
+              if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+              if (note) note.textContent = `${msg.orgs.length} org(s) found`;
+            }
+            break;
+          }
 
           case 'jsonPath':
             document.getElementById('jsonPath').value = msg.path;

@@ -164,6 +164,7 @@ class DashboardPanel {
     switch (message.command) {
       case 'ready': {
         this._webviewReady = true;
+        void this._sendOrgList();
         // Fire any onceReady callbacks (e.g. the withProgress resolver)
         const cbs = this._readyCallbacks.splice(0);
         cbs.forEach((cb) => cb());
@@ -343,6 +344,37 @@ class DashboardPanel {
         break;
       }
     }
+  }
+  _sendOrgList() {
+    return new Promise((resolve) => {
+      const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
+      (0, child_process_1.exec)(`${sfBin} org list --json`, { timeout: 15000 }, (_err, stdout) => {
+        try {
+          const raw = stdout ?? '';
+          const start = raw.indexOf('{');
+          const json = JSON.parse(start >= 0 ? raw.substring(start) : raw);
+          const seen = new Set();
+          const orgs = [];
+          for (const group of Object.values(json?.result ?? {})) {
+            if (!Array.isArray(group)) continue;
+            for (const o of group) {
+              const key = o.alias ?? o.username ?? '';
+              if (!key || seen.has(key)) continue;
+              seen.add(key);
+              orgs.push({
+                alias: o.alias,
+                username: o.username,
+                connected: (o.connectedStatus ?? '').toLowerCase() === 'connected',
+              });
+            }
+          }
+          this.postMessage({ command: 'orgList', orgs });
+        } catch {
+          this.postMessage({ command: 'orgList', orgs: [] });
+        }
+        resolve();
+      });
+    });
   }
   async _startCleanzRun(config) {
     this._aborted = false;

@@ -139,6 +139,7 @@ export class DashboardPanel {
     switch (message.command) {
       case 'ready': {
         this._webviewReady = true;
+        void this._sendOrgList();
         // Fire any onceReady callbacks (e.g. the withProgress resolver)
         const cbs = this._readyCallbacks.splice(0);
         cbs.forEach((cb) => cb());
@@ -336,6 +337,40 @@ export class DashboardPanel {
         break;
       }
     }
+  }
+
+  private _sendOrgList(): Promise<void> {
+    return new Promise((resolve) => {
+      const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
+      exec(`${sfBin} org list --json`, { timeout: 15_000 }, (_err: unknown, stdout: string) => {
+        try {
+          const raw = stdout ?? '';
+          const start = raw.indexOf('{');
+          const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+            result?: Record<string, Array<{ alias?: string; username?: string; connectedStatus?: string }>>;
+          };
+          const seen = new Set<string>();
+          const orgs: Array<{ alias?: string; username?: string; connected: boolean }> = [];
+          for (const group of Object.values(json?.result ?? {})) {
+            if (!Array.isArray(group)) continue;
+            for (const o of group) {
+              const key = o.alias ?? o.username ?? '';
+              if (!key || seen.has(key)) continue;
+              seen.add(key);
+              orgs.push({
+                alias: o.alias,
+                username: o.username,
+                connected: (o.connectedStatus ?? '').toLowerCase() === 'connected',
+              });
+            }
+          }
+          this.postMessage({ command: 'orgList', orgs });
+        } catch {
+          this.postMessage({ command: 'orgList', orgs: [] });
+        }
+        resolve();
+      });
+    });
   }
 
   private async _startCleanzRun(config: RunConfig) {
