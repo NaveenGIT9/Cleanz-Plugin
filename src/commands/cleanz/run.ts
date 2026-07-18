@@ -1670,6 +1670,20 @@ async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string
 // be removed from the permset/profile.
 // ===============================================================
 
+// In Salesforce, Activity is the parent of Task and Event. A field created on Activity
+// automatically exists on both Task and Event (one-way inheritance, downward only).
+// A field created on Task or Event stays on that object only — it does NOT propagate
+// to Activity or to the other sibling.
+// So: if Task.Foo__c or Event.Foo__c errors, check if Activity.Foo__c is being deployed.
+function getActivityFieldAliases(fieldName: string): string[] {
+  const dot = fieldName.indexOf('.');
+  if (dot === -1) return [];
+  const obj = fieldName.substring(0, dot).toLowerCase();
+  const field = fieldName.substring(dot + 1);
+  if (obj === 'task' || obj === 'event') return [`Activity.${field}`];
+  return [];
+}
+
 function shouldSkip(
   log: (msg: string) => void,
   label: string,
@@ -1678,12 +1692,17 @@ function shouldSkip(
   skippedFields: string[],
   allSkippedFields: string[]
 ): boolean {
-  if (whitelistEntries.includes(name)) {
-    log(`   SKIPPING whitelisted ${label} (in JSON): ${name}`);
+  const addEntry = (reason: string): true => {
+    log(`   SKIPPING whitelisted ${label} (${reason}): ${name}`);
     const entry = `[${label.charAt(0).toUpperCase() + label.slice(1)}] ${name}`;
     skippedFields.push(entry);
     allSkippedFields.push(entry);
     return true;
+  };
+  if (whitelistEntries.includes(name)) return addEntry('in JSON');
+  // Activity/Task/Event share custom fields — skip if any alias is whitelisted
+  for (const alias of getActivityFieldAliases(name)) {
+    if (whitelistEntries.includes(alias)) return addEntry(`Activity/Task/Event alias of ${alias} in JSON`);
   }
   return false;
 }
@@ -2551,6 +2570,27 @@ function processFailures(
     if (/You must specify a page or object/i.test(err)) {
       log('   [ProfileActionOverride] page/object error — handled by pre-check');
       continue;
+    }
+
+    // ── Required field — profile/permset cannot set non-editable on a required field ──
+    // "You cannot deploy to a required field: Object.Field"
+    // Fix: remove the <fieldPermissions> block for that field; Salesforce manages required-field
+    // permissions automatically and does not need an explicit entry.
+    {
+      const reqFieldMatch = /You cannot deploy to a required field:\s*(.+)/i.exec(err);
+      if (reqFieldMatch) {
+        const requiredField = reqFieldMatch[1].trim();
+        log(`   [RequiredField] Removing fieldPermissions for required field: ${requiredField}`);
+        const { updated, removed } = removeFieldPermissionsFromXml(updatedXml, requiredField);
+        if (removed) {
+          updatedXml = updated;
+          removedRefs.push({ type: 'field', name: requiredField, label: requiredField, deployError: err });
+          log(`   [RequiredField] Removed fieldPermissions for: ${requiredField}`);
+        } else {
+          log(`   [RequiredField] fieldPermissions for ${requiredField} not found in XML — may already be removed.`);
+        }
+        continue;
+      }
     }
 
     // ── ReportType: relationship join removal (must run before column handler) ──
