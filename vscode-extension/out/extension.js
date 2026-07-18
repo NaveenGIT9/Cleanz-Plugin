@@ -54,6 +54,8 @@ Object.defineProperty(exports, '__esModule', { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require('vscode'));
+const path = __importStar(require('path'));
+const fs = __importStar(require('fs'));
 const child_process_1 = require('child_process');
 const DashboardPanel_1 = require('./panels/DashboardPanel');
 const SidebarProvider_1 = require('./providers/SidebarProvider');
@@ -74,13 +76,11 @@ function fetchOrgList() {
             if (!key || seen.has(key)) continue;
             seen.add(key);
             const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
+            const displayName = o.alias ?? o.username ?? '';
             items.push({
-              label: o.alias ?? o.username ?? '',
+              label: `${connected ? '🟢' : '🔴'} ${displayName}`,
               detail: o.alias && o.username ? o.username : '',
-              iconPath: connected
-                ? new vscode.ThemeIcon('pass', new vscode.ThemeColor('testing.iconPassed'))
-                : new vscode.ThemeIcon('error', new vscode.ThemeColor('testing.iconFailed')),
-              alias: o.alias ?? o.username ?? '',
+              alias: displayName,
             });
           }
         }
@@ -109,7 +109,31 @@ async function pickOrg() {
   });
   return picked?.alias;
 }
+async function prewarmPlugin() {
+  const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
+  const pluginPath = await new Promise((resolve) => {
+    (0, child_process_1.exec)(`${sfBin} plugins --json`, { timeout: 10000 }, (_err, stdout) => {
+      try {
+        const plugins = JSON.parse(stdout);
+        const cleanz = plugins.find((p) => p.name === '@naveengit9/plugin-cleanz');
+        resolve(cleanz?.root ?? null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+  if (!pluginPath) return;
+  const runJsPath = path.join(pluginPath, 'lib', 'commands', 'cleanz', 'run.js');
+  if (fs.existsSync(runJsPath)) return;
+  // lib/ is missing — compile silently in the background so the first Run doesn't fail with code=127
+  const wireitDir = path.join(pluginPath, '.wireit');
+  if (fs.existsSync(wireitDir)) fs.rmSync(wireitDir, { recursive: true, force: true });
+  await new Promise((resolve) => {
+    (0, child_process_1.exec)('npm run build', { cwd: pluginPath, timeout: 60000 }, () => resolve());
+  });
+}
 function activate(context) {
+  void prewarmPlugin();
   // Register Sidebar WebviewView
   const sidebarProvider = new SidebarProvider_1.SidebarProvider(context);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('cleanz.sidebar', sidebarProvider));

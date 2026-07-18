@@ -18,14 +18,9 @@
 #   git_json               = {$Context.Repository.Credential}
 #   destinationInstanceUrl = {$Destination.Credential.Endpoint}
 #   destinationSessionid   = {$Destination.Credential.SessionId}
-#   sourceInstanceUrl      = {$Source.Credential.Endpoint}     ← pipeline org URL
-#   sourceSessionid        = {$Source.Credential.SessionId}    ← pipeline org session
 #
-# sourceInstanceUrl/sourceSessionid must point to the Copado pipeline org (RBKPIPEQA)
-# where copado__Promotion__c and ContentDocumentLink records live. Step 4 uses them to
-# fetch the exact Copado component list. If missing or wrong org, Step 4 falls back to
-# git diff (less accurate — picks up any permset changed in the branch, not just the
-# promoted components).
+# Step 4 queries the pipeline org (where the Promotion record lives) via the copado
+# CLI binary, which is already authenticated — no extra credential parameters needed.
 #
 set -euo pipefail
 trap 'echo "##### Error on line $LINENO — exit code $?"' ERR
@@ -141,9 +136,9 @@ sf org display --target-org cleanz-dest 2>&1 | grep -E "(Username|Status|Instanc
 echo "  -> SF CLI auth configured for alias: $ORG_ALIAS"
 
 # ── Step 4: Build component list from Copado ContentDocumentLink ──────────────
-# Primary: query ContentDocumentLink on the Promotion record from the pipeline org
-# (sourceInstanceUrl + sourceSessionid) — this gives the exact set of components
-# Copado is promoting, matching the same JSON cleanz uses interactively.
+# Primary: query ContentDocumentLink on the Promotion record via the copado CLI,
+# which is already authenticated to the pipeline org (the org where the Promotion
+# record and its attachments live). No credentials needed — copado binary handles auth.
 # Fallback: git diff against the default branch. Less accurate because it includes
 # ANY permset/profile changed in the branch, not just the promoted components.
 copado -p "pre_cleanz | Step 4: Building component list (Copado attachment → git diff fallback)"
@@ -166,6 +161,7 @@ const EXT_MAP = {
   '.reportType-meta.xml':          'ReportType',
 };
 
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 function httpsGet(urlStr, token) {
     return new Promise((resolve, reject) => {
@@ -184,19 +180,24 @@ function httpsGet(urlStr, token) {
     });
 }
 
-// ── primary: query ContentDocumentLink from the pipeline/source org ───────────
+// ── primary: query ContentDocumentLink using pipeline org session (auto-set by Copado) ──
 async function tryCopadoAttachment() {
-    const promotionId  = process.env.promotionId;
-    const sourceUrl    = (process.env.sourceInstanceUrl || '').replace(/\/+$/, '');
-    const sourceToken  = process.env.sourceSessionid;
+    const promotionId = process.env.promotionId;
+    // Copado injects pipeline org credentials as CF_SF_ENDPOINT + CF_SF_SESSIONID
+    const pipelineUrl   = (process.env.CF_SF_ENDPOINT || '').replace(/\/+$/, '');
+    const pipelineToken = process.env.CF_SF_SESSIONID || '';
 
-    if (!promotionId || !sourceUrl || !sourceToken) {
-        if (!sourceUrl || !sourceToken)
-            console.log('  [Step 4] sourceInstanceUrl/sourceSessionid not set — using git diff fallback');
+    if (!promotionId || !pipelineUrl || !pipelineToken) {
+        const missing = [
+            !promotionId   && 'promotionId',
+            !pipelineUrl   && 'CF_SF_ENDPOINT',
+            !pipelineToken && 'CF_SF_SESSIONID',
+        ].filter(Boolean);
+        console.log(`[Step 4] Missing: ${missing.join(', ')} — using git diff fallback`);
         return null;
     }
 
-    console.log(`  [Step 4] Querying Copado attachments for promotion ${promotionId} at ${sourceUrl}`);
+    console.log(`  [Step 4] Querying pipeline org ${pipelineUrl} for promotion ${promotionId}`);
 
     // 1. Find JSON ContentDocuments linked to this promotion
     const soql = `SELECT ContentDocumentId, ContentDocument.Title, ContentDocument.LatestPublishedVersionId `
@@ -207,16 +208,16 @@ async function tryCopadoAttachment() {
     let queryRes;
     try {
         queryRes = await httpsGet(
-            sourceUrl + '/services/data/v62.0/query?q=' + encodeURIComponent(soql),
-            sourceToken
+            pipelineUrl + '/services/data/v62.0/query?q=' + encodeURIComponent(soql),
+            pipelineToken
         );
     } catch (e) {
-        console.log('  [Step 4] Source org query error: ' + e.message + ' — using git diff fallback');
+        console.log('  [Step 4] Pipeline org query error: ' + e.message + ' — using git diff fallback');
         return null;
     }
 
     if (queryRes.status !== 200) {
-        console.log(`  [Step 4] ContentDocumentLink query returned HTTP ${queryRes.status} — using git diff fallback`);
+        console.log(`  [Step 4] Pipeline org query returned HTTP ${queryRes.status} — using git diff fallback`);
         return null;
     }
 
@@ -232,8 +233,8 @@ async function tryCopadoAttachment() {
         let vRes;
         try {
             vRes = await httpsGet(
-                sourceUrl + '/services/data/v62.0/sobjects/ContentVersion/' + versionId + '/VersionData',
-                sourceToken
+                pipelineUrl + '/services/data/v62.0/sobjects/ContentVersion/' + versionId + '/VersionData',
+                pipelineToken
             );
         } catch { continue; }
 
@@ -242,7 +243,6 @@ async function tryCopadoAttachment() {
         let parsed;
         try { parsed = JSON.parse(vRes.body); } catch { continue; }
 
-        // Validate: must be an array of objects with at least t (type) and n (name)
         if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].t && parsed[0].n) {
             console.log(`  [Step 4] Using Copado attachment: "${title}" — ${parsed.length} item(s)`);
             return parsed;
@@ -321,15 +321,18 @@ fi
 # --json-path supplied → cleanz auto-selects option 1 (validate & clean).
 # cleanz fixes XML files, commits the changes, and pushes back to the branch.
 # The subsequent SFDX Deploy step picks up the already-cleaned branch.
-copado -p "pre_cleanz | Step 5: Running sf cleanz (10 min timeout)"
-# 600s hard cap — prevents cleanz looping forever if it hits an unhandled error type.
-timeout 600 sf cleanz run \
+copado -p "pre_cleanz | Step 5: Running sf cleanz (60 min timeout)"
+# 3600s hard cap — prevents cleanz looping forever if it hits an unhandled error type.
+# Milestone lines are forwarded to Copado progress log; all output still flows to job console.
+timeout 3600 sf cleanz run \
   --json-path  "$PROMOTION_JSON" \
   --target-org "$ORG_ALIAS" \
-  --verbose
-EXIT_CODE=$?
+  --verbose 2>&1 \
+  | awk '/\[RT Check\]|\[Obj Check\]|\[NS Check\]|Deploy attempt|Deploying changes|Deploy response received|\[PSG\]|\[Queue\]|Queue cleared|Removed refs detail|PERMISSION SETS|MUTING PERMISSION|PERMISSION SET GROUPS|PROFILES|REPORT TYPES|LAYOUTS|Transient error|Giving up/{print; fflush()}' \
+  | while IFS= read -r line; do copado -p "cleanz | $line"; done
+EXIT_CODE=${PIPESTATUS[0]}
 if [ $EXIT_CODE -eq 124 ]; then
-    echo "##### sf cleanz timed out after 10 minutes — check verbose output above for the stuck error type"
+    echo "##### sf cleanz timed out after 60 minutes — check verbose output above for the stuck error type"
     exit 1
 elif [ $EXIT_CODE -ne 0 ]; then
     echo "##### sf cleanz exited with code $EXIT_CODE"
