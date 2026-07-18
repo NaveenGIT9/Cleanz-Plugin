@@ -8,8 +8,17 @@ import { SidebarProvider } from './providers/SidebarProvider';
 
 type OrgQuickPickItem = vscode.QuickPickItem & { alias: string };
 
+const ORG_CACHE_TTL_MS = 2 * 60 * 1000;
+let _orgCache: { items: OrgQuickPickItem[]; ts: number } | null = null;
+let _orgFlight: Promise<OrgQuickPickItem[]> | null = null;
+
 function fetchOrgList(): Promise<OrgQuickPickItem[]> {
-  return new Promise((resolve) => {
+  if (_orgCache && Date.now() - _orgCache.ts < ORG_CACHE_TTL_MS) {
+    return Promise.resolve(_orgCache.items);
+  }
+  if (_orgFlight) return _orgFlight;
+
+  _orgFlight = new Promise<OrgQuickPickItem[]>((resolve) => {
     const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
     exec(`${sfBin} org list --json`, { timeout: 15_000 }, (_err: unknown, stdout: string) => {
       try {
@@ -35,12 +44,16 @@ function fetchOrgList(): Promise<OrgQuickPickItem[]> {
             });
           }
         }
+        _orgCache = { items, ts: Date.now() };
         resolve(items);
       } catch {
         resolve([]);
+      } finally {
+        _orgFlight = null;
       }
     });
   });
+  return _orgFlight;
 }
 
 async function pickOrg(): Promise<string | undefined> {
@@ -106,6 +119,9 @@ export function activate(context: vscode.ExtensionContext) {
   // 3 clean options — no persisted settings, always prompts for fresh input.
   context.subscriptions.push(
     vscode.commands.registerCommand('cleanz.run', async () => {
+      // Fire org fetch immediately — runs in parallel while user picks action + JSON file.
+      void fetchOrgList();
+
       type ActionItem = vscode.QuickPickItem & { action: 'validate' | 'dryrun' | 'purge' };
       const pick = await vscode.window.showQuickPick<ActionItem>(
         [

@@ -59,8 +59,15 @@ const fs = __importStar(require('fs'));
 const child_process_1 = require('child_process');
 const DashboardPanel_1 = require('./panels/DashboardPanel');
 const SidebarProvider_1 = require('./providers/SidebarProvider');
+const ORG_CACHE_TTL_MS = 2 * 60 * 1000;
+let _orgCache = null;
+let _orgFlight = null;
 function fetchOrgList() {
-  return new Promise((resolve) => {
+  if (_orgCache && Date.now() - _orgCache.ts < ORG_CACHE_TTL_MS) {
+    return Promise.resolve(_orgCache.items);
+  }
+  if (_orgFlight) return _orgFlight;
+  _orgFlight = new Promise((resolve) => {
     const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
     (0, child_process_1.exec)(`${sfBin} org list --json`, { timeout: 15000 }, (_err, stdout) => {
       try {
@@ -84,12 +91,16 @@ function fetchOrgList() {
             });
           }
         }
+        _orgCache = { items, ts: Date.now() };
         resolve(items);
       } catch {
         resolve([]);
+      } finally {
+        _orgFlight = null;
       }
     });
   });
+  return _orgFlight;
 }
 async function pickOrg() {
   const orgs = await fetchOrgList();
@@ -147,6 +158,8 @@ function activate(context) {
   // 3 clean options — no persisted settings, always prompts for fresh input.
   context.subscriptions.push(
     vscode.commands.registerCommand('cleanz.run', async () => {
+      // Fire org fetch immediately — runs in parallel while user picks action + JSON file.
+      void fetchOrgList();
       const pick = await vscode.window.showQuickPick(
         [
           { label: '$(play) Validate + Fix', description: 'Fix refs based on errors and commit', action: 'validate' },
