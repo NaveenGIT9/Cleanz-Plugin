@@ -54,8 +54,59 @@ Object.defineProperty(exports, '__esModule', { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require('vscode'));
+const child_process_1 = require('child_process');
 const DashboardPanel_1 = require('./panels/DashboardPanel');
 const SidebarProvider_1 = require('./providers/SidebarProvider');
+function fetchOrgList() {
+  return new Promise((resolve) => {
+    const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
+    (0, child_process_1.exec)(`${sfBin} org list --json`, { timeout: 15000 }, (_err, stdout) => {
+      try {
+        const raw = stdout ?? '';
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw);
+        const seen = new Set();
+        const items = [];
+        for (const group of Object.values(json?.result ?? {})) {
+          if (!Array.isArray(group)) continue;
+          for (const o of group) {
+            const key = o.alias ?? o.username ?? '';
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
+            items.push({
+              label: `${connected ? '$(pass)' : '$(error)'} ${o.alias ?? o.username ?? ''}`,
+              detail: o.alias && o.username ? o.username : '',
+              alias: o.alias ?? o.username ?? '',
+              connected,
+            });
+          }
+        }
+        resolve(items);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+async function pickOrg() {
+  const orgs = await fetchOrgList();
+  if (orgs.length === 0) {
+    return vscode.window.showInputBox({
+      title: 'SF CleanZ — Target Org',
+      prompt: 'Org alias or username (no orgs found via sf org list)',
+      placeHolder: 'RBKQA',
+      ignoreFocusOut: true,
+      validateInput: (v) => (v?.trim() ? null : 'Org alias is required'),
+    });
+  }
+  const picked = await vscode.window.showQuickPick(orgs, {
+    title: 'SF CleanZ — Select Target Org',
+    placeHolder: 'Select a connected org',
+    ignoreFocusOut: true,
+  });
+  return picked?.alias;
+}
 function activate(context) {
   // Register Sidebar WebviewView
   const sidebarProvider = new SidebarProvider_1.SidebarProvider(context);
@@ -93,13 +144,7 @@ function activate(context) {
           title: 'Select Promotion JSON or package.xml',
         });
         if (!uris?.[0]) return;
-        const org = await vscode.window.showInputBox({
-          title: 'SF CleanZ — Target Org',
-          prompt: 'Org alias or username',
-          placeHolder: 'RBKQA',
-          ignoreFocusOut: true,
-          validateInput: (v) => (v?.trim() ? null : 'Org alias is required'),
-        });
+        const org = await pickOrg();
         if (!org?.trim()) return;
         config = { jsonPath: uris[0].fsPath, org: org.trim(), mode: pick.action, repoSweep: true, verbose: false };
       } else if (pick.action === 'purge') {

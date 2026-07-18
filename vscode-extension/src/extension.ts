@@ -1,7 +1,62 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
 import { DashboardPanel } from './panels/DashboardPanel';
 import type { RunConfig } from './panels/DashboardPanel';
 import { SidebarProvider } from './providers/SidebarProvider';
+
+function fetchOrgList(): Promise<Array<{ label: string; detail: string; alias: string; connected: boolean }>> {
+  return new Promise((resolve) => {
+    const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
+    exec(`${sfBin} org list --json`, { timeout: 15_000 }, (_err: unknown, stdout: string) => {
+      try {
+        const raw = stdout ?? '';
+        const start = raw.indexOf('{');
+        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
+          result?: Record<string, Array<{ alias?: string; username?: string; connectedStatus?: string }>>;
+        };
+        const seen = new Set<string>();
+        const items: Array<{ label: string; detail: string; alias: string; connected: boolean }> = [];
+        for (const group of Object.values(json?.result ?? {})) {
+          if (!Array.isArray(group)) continue;
+          for (const o of group) {
+            const key = o.alias ?? o.username ?? '';
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
+            items.push({
+              label: `${connected ? '$(pass)' : '$(error)'} ${o.alias ?? o.username ?? ''}`,
+              detail: o.alias && o.username ? o.username : '',
+              alias: o.alias ?? o.username ?? '',
+              connected,
+            });
+          }
+        }
+        resolve(items);
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+
+async function pickOrg(): Promise<string | undefined> {
+  const orgs = await fetchOrgList();
+  if (orgs.length === 0) {
+    return vscode.window.showInputBox({
+      title: 'SF CleanZ — Target Org',
+      prompt: 'Org alias or username (no orgs found via sf org list)',
+      placeHolder: 'RBKQA',
+      ignoreFocusOut: true,
+      validateInput: (v) => (v?.trim() ? null : 'Org alias is required'),
+    });
+  }
+  const picked = await vscode.window.showQuickPick(orgs, {
+    title: 'SF CleanZ — Select Target Org',
+    placeHolder: 'Select a connected org',
+    ignoreFocusOut: true,
+  });
+  return picked?.alias;
+}
 
 export function activate(context: vscode.ExtensionContext) {
   // Register Sidebar WebviewView
@@ -46,13 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
         });
         if (!uris?.[0]) return;
 
-        const org = await vscode.window.showInputBox({
-          title: 'SF CleanZ — Target Org',
-          prompt: 'Org alias or username',
-          placeHolder: 'RBKQA',
-          ignoreFocusOut: true,
-          validateInput: (v) => (v?.trim() ? null : 'Org alias is required'),
-        });
+        const org = await pickOrg();
         if (!org?.trim()) return;
 
         config = { jsonPath: uris[0].fsPath, org: org.trim(), mode: pick.action, repoSweep: true, verbose: false };
