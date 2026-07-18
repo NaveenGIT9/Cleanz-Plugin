@@ -4584,7 +4584,7 @@ async function runBatchDeploy(
 
 // Returns the set of valid org aliases + usernames from sf org list.
 // Returns empty set if the CLI call fails — callers treat empty as "skip validation".
-type OrgEntry = { alias?: string; username?: string };
+type OrgEntry = { alias?: string; username?: string; connectedStatus?: string };
 
 function getAuthenticatedOrgs(): Promise<{ valid: Set<string>; entries: OrgEntry[] }> {
   return new Promise((resolve) => {
@@ -4793,23 +4793,32 @@ async function resolveInputs(
   let targetOrg = targetOrgFlag.trim();
   if (!targetOrg) {
     // eslint-disable-next-line no-await-in-loop
-    const { valid: validOrgs, entries: orgEntries } = await getAuthenticatedOrgs();
-    const hasOrgList = validOrgs.size > 0;
+    const { entries: orgEntries } = await getAuthenticatedOrgs();
+    const hasOrgList = orgEntries.length > 0;
     if (!hasOrgList) {
       log('   (Could not retrieve org list — skipping alias validation)\n');
+      // eslint-disable-next-line no-await-in-loop
+      targetOrg = (await prompt('Enter target org username or alias\n> ')).trim();
     } else {
-      log('   Authenticated orgs:');
-      orgEntries.forEach((o) => {
-        const alias = o.alias ? `${o.alias}` : '';
-        const user = o.username ? `(${o.username})` : '';
-        log(`      - ${alias} ${user}`.trimEnd());
+      log('   Authenticated orgs:\n');
+      orgEntries.forEach((o, i) => {
+        const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
+        const dot = connected ? '✓' : '✗';
+        const label = o.alias ?? o.username ?? '';
+        const user = o.alias && o.username ? ` (${o.username})` : '';
+        log(`      ${i + 1}) ${dot} ${label}${user}`);
       });
       log('');
-    }
-    while (!targetOrg || (hasOrgList && !validOrgs.has(targetOrg))) {
-      if (targetOrg) log(`   "${targetOrg}" is not a recognised org alias or username. Please try again.\n`);
-      targetOrg = // eslint-disable-next-line no-await-in-loop
-        (await prompt('Enter target org username or alias\n   (e.g. RBKQA or user@rubrik.com.qa)\n> ')).trim();
+      while (!targetOrg) {
+        const input = // eslint-disable-next-line no-await-in-loop
+          (await prompt(`Select org by number (1–${orgEntries.length})\n> `)).trim();
+        const num = parseInt(input, 10);
+        if (num >= 1 && num <= orgEntries.length) {
+          targetOrg = orgEntries[num - 1].alias ?? orgEntries[num - 1].username ?? '';
+        } else {
+          log(`   Invalid selection. Enter a number between 1 and ${orgEntries.length}.\n`);
+        }
+      }
     }
   }
   log(`\n   Target Org set to: ${targetOrg}\n`);
