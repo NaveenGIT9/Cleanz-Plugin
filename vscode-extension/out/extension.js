@@ -75,10 +75,12 @@ function fetchOrgList() {
             seen.add(key);
             const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
             items.push({
-              label: `${connected ? '$(pass)' : '$(error)'} ${o.alias ?? o.username ?? ''}`,
+              label: o.alias ?? o.username ?? '',
               detail: o.alias && o.username ? o.username : '',
+              iconPath: connected
+                ? new vscode.ThemeIcon('pass', new vscode.ThemeColor('testing.iconPassed'))
+                : new vscode.ThemeIcon('error', new vscode.ThemeColor('testing.iconFailed')),
               alias: o.alias ?? o.username ?? '',
-              connected,
             });
           }
         }

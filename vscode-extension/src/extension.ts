@@ -4,7 +4,9 @@ import { DashboardPanel } from './panels/DashboardPanel';
 import type { RunConfig } from './panels/DashboardPanel';
 import { SidebarProvider } from './providers/SidebarProvider';
 
-function fetchOrgList(): Promise<Array<{ label: string; detail: string; alias: string; connected: boolean }>> {
+type OrgQuickPickItem = vscode.QuickPickItem & { alias: string };
+
+function fetchOrgList(): Promise<OrgQuickPickItem[]> {
   return new Promise((resolve) => {
     const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
     exec(`${sfBin} org list --json`, { timeout: 15_000 }, (_err: unknown, stdout: string) => {
@@ -15,7 +17,7 @@ function fetchOrgList(): Promise<Array<{ label: string; detail: string; alias: s
           result?: Record<string, Array<{ alias?: string; username?: string; connectedStatus?: string }>>;
         };
         const seen = new Set<string>();
-        const items: Array<{ label: string; detail: string; alias: string; connected: boolean }> = [];
+        const items: OrgQuickPickItem[] = [];
         for (const group of Object.values(json?.result ?? {})) {
           if (!Array.isArray(group)) continue;
           for (const o of group) {
@@ -24,10 +26,12 @@ function fetchOrgList(): Promise<Array<{ label: string; detail: string; alias: s
             seen.add(key);
             const connected = (o.connectedStatus ?? '').toLowerCase() === 'connected';
             items.push({
-              label: `${connected ? '$(pass)' : '$(error)'} ${o.alias ?? o.username ?? ''}`,
+              label: o.alias ?? o.username ?? '',
               detail: o.alias && o.username ? o.username : '',
+              iconPath: connected
+                ? new vscode.ThemeIcon('pass', new vscode.ThemeColor('testing.iconPassed'))
+                : new vscode.ThemeIcon('error', new vscode.ThemeColor('testing.iconFailed')),
               alias: o.alias ?? o.username ?? '',
-              connected,
             });
           }
         }
