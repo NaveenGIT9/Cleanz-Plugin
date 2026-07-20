@@ -2149,6 +2149,18 @@ function processLayoutFailure(
       log(`   [Layout] Skipping — ${fullFieldName} is ADD in batch`);
       return { handled: true, xmlContent };
     }
+    // Activity fields are referenced as Task.Field__c / Event.Field__c in layouts but
+    // stored as Activity.Field__c in the promotion JSON — check aliases before removing.
+    const activityAliases = getActivityFieldAliases(fullFieldName);
+    const activityAliasInBatch = activityAliases.find((alias) =>
+      promotionData.some((i) => i.t === 'CustomField' && i.n === alias && (!i.a || i.a.toLowerCase().startsWith('add')))
+    );
+    if (activityAliasInBatch) {
+      log(
+        `   [Layout] Skipping — ${fullFieldName} is Activity/Task/Event alias of ${activityAliasInBatch} which is ADD in batch`
+      );
+      return { handled: true, xmlContent };
+    }
     log(`   [Layout] Missing field: ${fullFieldName}`);
     const { updated, removed } = removeLayoutItemByField(xmlContent, bareField);
     if (removed) {
