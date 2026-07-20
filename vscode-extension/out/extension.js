@@ -68,9 +68,16 @@ function fetchOrgList() {
   }
   if (_orgFlight) return _orgFlight;
   _orgFlight = new Promise((resolve) => {
-    const sfBin = process.platform === 'win32' ? 'sf.cmd' : 'sf';
-    (0, child_process_1.exec)(`${sfBin} org list --json`, { timeout: 15000 }, (_err, stdout) => {
+    // Use cmd.exe /c on Windows so PATH is resolved the same way as a terminal session,
+    // avoiding cases where the extension host PATH differs from the user's shell PATH.
+    const cmd = process.platform === 'win32' ? 'cmd.exe /c sf org list --json' : 'sf org list --json';
+    (0, child_process_1.exec)(cmd, { timeout: 20000 }, (err, stdout) => {
       try {
+        if (err && !stdout?.trim()) {
+          console.error('[CleanZ] sf org list error:', err);
+          resolve([]);
+          return;
+        }
         const raw = stdout ?? '';
         const start = raw.indexOf('{');
         const json = JSON.parse(start >= 0 ? raw.substring(start) : raw);
@@ -93,7 +100,8 @@ function fetchOrgList() {
         }
         _orgCache = { items, ts: Date.now() };
         resolve(items);
-      } catch {
+      } catch (e) {
+        console.error('[CleanZ] sf org list parse error:', e);
         resolve([]);
       } finally {
         _orgFlight = null;
