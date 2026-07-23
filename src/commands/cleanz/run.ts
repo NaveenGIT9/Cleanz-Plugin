@@ -3736,17 +3736,38 @@ async function handlePsgInvalidPsItem(
     if (name) allPsRefs.push(name);
   }
 
-  if (allPsRefs.length === 0) {
-    log(`   [PSG] ${item.itemName} — no <permissionSets> refs found in XML. Cannot auto-fix.`);
+  // Also collect <mutingPermissionSets> refs — Salesforce validates these the same way
+  // and will throw the same "permission set names are invalid" error if they don't exist.
+  const mutingTagRegex = /[ \t]*<mutingPermissionSets>([^<]*)<\/mutingPermissionSets>/g;
+  const allMutingPsRefs: string[] = [];
+  // eslint-disable-next-line no-cond-assign
+  while ((m = mutingTagRegex.exec(psgXml)) !== null) {
+    const name = m[1].trim();
+    if (name) allMutingPsRefs.push(name);
+  }
+
+  const allRefs = [...allPsRefs, ...allMutingPsRefs];
+
+  if (allRefs.length === 0) {
+    log(
+      `   [PSG] ${item.itemName} — no <permissionSets> or <mutingPermissionSets> refs found in XML. Cannot auto-fix.`
+    );
     item.done = true;
     return;
   }
 
-  log(`   [PSG] ${item.itemName} — refs in XML (${allPsRefs.length}): ${allPsRefs.join(', ')}`);
+  log(
+    `   [PSG] ${item.itemName} — refs in XML: ${allPsRefs.length} permissionSets [${allPsRefs.join(', ')}]` +
+      (allMutingPsRefs.length > 0
+        ? `, ${allMutingPsRefs.length} mutingPermissionSets [${allMutingPsRefs.join(', ')}]`
+        : '')
+  );
 
-  const existingInOrg = await queryExistingPermSets(targetOrg, allPsRefs);
+  // MutingPermissionSets are stored in the PermissionSet SOQL object (Type='Muting'),
+  // so queryExistingPermSets covers both regular and muting refs in one query.
+  const existingInOrg = await queryExistingPermSets(targetOrg, allRefs);
   const existingSet = new Set(existingInOrg.map((n) => n.toLowerCase()));
-  const missingInOrg = allPsRefs.filter((n) => !existingSet.has(n.toLowerCase()));
+  const missingInOrg = allRefs.filter((n) => !existingSet.has(n.toLowerCase()));
 
   if (missingInOrg.length === 0) {
     log(
@@ -3791,7 +3812,10 @@ async function handlePsgInvalidPsItem(
 
   const beingAdded = confirmedMissing.filter((n) =>
     promotionData.some(
-      (i) => i.t === 'PermissionSet' && i.n === n && (!i.a || !i.a.toLowerCase().startsWith('retrieve'))
+      (i) =>
+        (i.t === 'PermissionSet' || i.t === 'MutingPermissionSet') &&
+        i.n === n &&
+        (!i.a || !i.a.toLowerCase().startsWith('retrieve'))
     )
   );
   const beingAddedLower = new Set(beingAdded.map((n) => n.toLowerCase()));
@@ -3816,10 +3840,12 @@ async function handlePsgInvalidPsItem(
   );
 
   const toRemoveSet = new Set(toRemove.map((n) => n.toLowerCase()));
-  const removeRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>[ \t]*\r?\n?/g;
-  const updatedPsgXml = psgXml.replace(removeRegex, (full, name: string) =>
-    toRemoveSet.has(name.trim().toLowerCase()) ? '' : full
-  );
+  // Remove matching refs from both <permissionSets> and <mutingPermissionSets> tags
+  const stripTag = (xml: string, tag: string): string =>
+    xml.replace(new RegExp(`[ \\t]*<${tag}>([^<]*)<\\/${tag}>[ \\t]*\\r?\\n?`, 'g'), (full, name: string) =>
+      toRemoveSet.has(name.trim().toLowerCase()) ? '' : full
+    );
+  const updatedPsgXml = stripTag(stripTag(psgXml, 'permissionSets'), 'mutingPermissionSets');
 
   saveXmlPreserved(updatedPsgXml, item.filePath);
   item.allRemovedFields.push(
