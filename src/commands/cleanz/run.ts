@@ -3786,7 +3786,7 @@ async function handlePsgInvalidPsItem(
   item.allRemovedFields.push(
     ...toRemove.map((n) => ({
       label: `<permissionSets>${n}</permissionSets>`,
-      error: 'Invalid PSG ref: not in org and not in promotion',
+      error: 'Invalid PSG ref: Salesforce validation error - PS does not exist in target org and not in promotion',
     }))
   );
 
