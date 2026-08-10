@@ -1559,40 +1559,6 @@ function queryPsgStatus(targetOrg: string, psgName: string): Promise<string | nu
 }
 
 // Queries the target org and returns which of the given PermissionSet DeveloperNames exist.
-function queryExistingPermSets(targetOrg: string, psNames: string[]): Promise<string[]> {
-  return new Promise((resolve) => {
-    if (psNames.length === 0) {
-      resolve([]);
-      return;
-    }
-    const inClause = psNames.map((n) => `'${n}'`).join(', ');
-    // Query by Name — for non-namespaced custom PSes this is identical to DeveloperName.
-    // Managed-package PSes are handled separately via checkNamespaceInstalled in handlePsgInvalidPsItem.
-    const query = `"SELECT Name FROM PermissionSet WHERE Name IN (${inClause})"`;
-    const args = ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'];
-    const proc = spawn('sf', args, { shell: true });
-    const chunks: string[] = [];
-    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
-    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => {
-      proc.kill();
-      resolve([]);
-    }, 60_000);
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const raw = chunks.join('');
-        const start = raw.indexOf('{');
-        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: { records?: Array<{ Name?: string }> };
-        };
-        resolve(json?.result?.records?.map((r) => r.Name ?? '').filter(Boolean) ?? []);
-      } catch {
-        resolve([]);
-      }
-    });
-  });
-}
 
 async function waitForPsgUpdates(
   log: (msg: string) => void,
@@ -3720,73 +3686,39 @@ async function handlePsgLockItem(
 async function handlePsgInvalidPsItem(
   log: (msg: string) => void,
   item: BatchItem,
+  psgErrors: string[],
   targetOrg: string,
   repoPath: string,
   promotionData: PromotionItem[]
 ): Promise<void> {
   log(`\n   [PSG] ${item.itemName} — invalid <permissionSets> reference(s) detected. Analyzing...`);
 
-  const psgXml = readFileWithRetry(item.filePath);
-  const tagRegex = /[ \t]*<permissionSets>([^<]*)<\/permissionSets>/g;
-  const allPsRefs: string[] = [];
-  let m: RegExpExecArray | null;
-  // eslint-disable-next-line no-cond-assign
-  while ((m = tagRegex.exec(psgXml)) !== null) {
-    const name = m[1].trim();
-    if (name) allPsRefs.push(name);
+  // Parse invalid PS names directly from the error messages Salesforce already tells us which
+  // names are invalid: "...names are invalid: PS1, PS2". No org query needed.
+  const invalidFromErrors = new Set<string>();
+  for (const errMsg of psgErrors) {
+    const match = /permission set names are invalid:\s*(.+)/i.exec(errMsg);
+    if (match) {
+      match[1]
+        .split(',')
+        .map((n) => n.trim())
+        .filter(Boolean)
+        .forEach((n) => invalidFromErrors.add(n));
+    }
   }
 
-  // Also collect <mutingPermissionSets> refs — Salesforce validates these the same way
-  // and will throw the same "permission set names are invalid" error if they don't exist.
-  const mutingTagRegex = /[ \t]*<mutingPermissionSets>([^<]*)<\/mutingPermissionSets>/g;
-  const allMutingPsRefs: string[] = [];
-  // eslint-disable-next-line no-cond-assign
-  while ((m = mutingTagRegex.exec(psgXml)) !== null) {
-    const name = m[1].trim();
-    if (name) allMutingPsRefs.push(name);
-  }
-
-  const allRefs = [...allPsRefs, ...allMutingPsRefs];
-
-  if (allRefs.length === 0) {
-    log(
-      `   [PSG] ${item.itemName} — no <permissionSets> or <mutingPermissionSets> refs found in XML. Cannot auto-fix.`
-    );
+  if (invalidFromErrors.size === 0) {
+    log(`   [PSG] ${item.itemName} — could not parse invalid PS names from error. Cannot auto-fix.`);
     item.done = true;
     return;
   }
 
-  log(
-    `   [PSG] ${item.itemName} — refs in XML: ${allPsRefs.length} permissionSets [${allPsRefs.join(', ')}]` +
-      (allMutingPsRefs.length > 0
-        ? `, ${allMutingPsRefs.length} mutingPermissionSets [${allMutingPsRefs.join(', ')}]`
-        : '')
-  );
+  log(`   [PSG] ${item.itemName} — invalid per Salesforce error: [${[...invalidFromErrors].join(', ')}]`);
 
-  // MutingPermissionSets are stored in the PermissionSet SOQL object (Type='Muting'),
-  // so queryExistingPermSets covers both regular and muting refs in one query.
-  const existingInOrg = await queryExistingPermSets(targetOrg, allRefs);
-  const existingSet = new Set(existingInOrg.map((n) => n.toLowerCase()));
-  const missingInOrg = allRefs.filter((n) => !existingSet.has(n.toLowerCase()));
-
-  if (missingInOrg.length === 0) {
-    log(
-      `   [PSG] ${item.itemName} — all referenced PermSets exist in target org. Cannot auto-fix — manual intervention needed.`
-    );
-    item.done = true;
-    return;
-  }
-
-  log(`   [PSG] ${item.itemName} — not found by Name query: ${missingInOrg.join(', ')}`);
-
-  // For managed-package PS refs (e.g. "whistic_profile__whistic_user"), SOQL Name field
-  // stores only the DeveloperName portion ("whistic_user") — the namespace prefix is absent.
-  // So a SOQL Name query returns nothing for them. If the namespace is installed, the PS
-  // exists — do not remove it.
+  // For managed-package PS refs (e.g. "whistic_profile__whistic_user") — if the namespace is
+  // installed in the target org the PS exists under its managed name; do not remove it.
   const confirmedMissing: string[] = [];
-  for (const psName of missingInOrg) {
-    // Namespace prefixes CAN contain underscores (e.g. "whistic_profile__whistic_user").
-    // Use [A-Za-z0-9_]* so "whistic_profile" is captured as the namespace, not just "whistic".
+  for (const psName of invalidFromErrors) {
     const nsMatch = /^([A-Za-z][A-Za-z0-9_]*)__/.exec(psName);
     if (nsMatch) {
       const namespace = nsMatch[1];
@@ -3801,13 +3733,15 @@ async function handlePsgInvalidPsItem(
   }
 
   if (confirmedMissing.length === 0) {
-    log(`   [PSG] ${item.itemName} — all unresolved refs belong to installed namespaces. No removal needed.`);
+    log(`   [PSG] ${item.itemName} — all invalid refs belong to installed namespaces. No removal needed.`);
     item.status = 'Pending';
     return;
   }
 
   log(
-    `   [PSG] ${item.itemName} — confirmed missing (not in org, not a managed package): ${confirmedMissing.join(', ')}`
+    `   [PSG] ${item.itemName} — confirmed missing (Salesforce error, not a managed package): ${confirmedMissing.join(
+      ', '
+    )}`
   );
 
   const beingAdded = confirmedMissing.filter((n) =>
@@ -3839,6 +3773,7 @@ async function handlePsgInvalidPsItem(
     )}`
   );
 
+  const psgXml = readFileWithRetry(item.filePath);
   const toRemoveSet = new Set(toRemove.map((n) => n.toLowerCase()));
   // Remove matching refs from both <permissionSets> and <mutingPermissionSets> tags
   const stripTag = (xml: string, tag: string): string =>
@@ -3995,10 +3930,11 @@ async function applyManagedRefsPass(
       continue;
     }
 
-    const psgInvalidPsFailure = itemFailures.find((f) => PSG_INVALID_PS.test(f.problem ?? f.error ?? ''));
-    if (psgInvalidPsFailure && item.metadataType === 'PermissionSetGroup') {
+    const psgInvalidPsFailures = itemFailures.filter((f) => PSG_INVALID_PS.test(f.problem ?? f.error ?? ''));
+    if (psgInvalidPsFailures.length > 0 && item.metadataType === 'PermissionSetGroup') {
+      const psgErrors = psgInvalidPsFailures.map((f) => f.problem ?? f.error ?? '');
       // eslint-disable-next-line no-await-in-loop
-      await handlePsgInvalidPsItem(log, item, targetOrg, repoPath, promotionData);
+      await handlePsgInvalidPsItem(log, item, psgErrors, targetOrg, repoPath, promotionData);
       continue;
     }
 
