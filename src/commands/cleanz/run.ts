@@ -1185,6 +1185,24 @@ function removeLayoutItemByField(xmlContent: string, bareField: string): { updat
   return removeXmlBlock(xmlContent, 'layoutItems', 'field', bareField);
 }
 
+// Removes a single <fields>fieldName</fields> tag from inside the <miniLayout> block only.
+// Does NOT touch <fields> tags in relatedLists or layoutSections — only the miniLayout section.
+function removeMiniLayoutField(xmlContent: string, fieldName: string): { updated: string; removed: boolean } {
+  const escaped = fieldName.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  const miniLayoutRe = /(<miniLayout>[\s\S]*?<\/miniLayout>)/g;
+  let removed = false;
+  const updated = xmlContent.replace(miniLayoutRe, (block: string) => {
+    const fieldRe = new RegExp(`[ \\t]*<fields>[ \\t]*${escaped}[ \\t]*<\\/fields>[ \\t]*\\r?\\n?`, 'g');
+    const newBlock = block.replace(fieldRe, '');
+    if (newBlock !== block) {
+      removed = true;
+      return newBlock;
+    }
+    return block;
+  });
+  return { updated, removed };
+}
+
 function removeLayoutRelatedListByName(
   xmlContent: string,
   relatedListName: string
@@ -2230,6 +2248,30 @@ function processLayoutFailure(
       };
     }
     log(`   [Layout] relatedLists block not found for: ${relatedListName}`);
+    return { handled: true, xmlContent };
+  }
+
+  // Field in miniLayout not present in the full layout:
+  //   "miniLayoutField: Effective_Date__c is not present in the full layout"
+  const miniLayoutMatch = /miniLayoutField:\s*(.+?)\s+is not present in the full layout/i.exec(errorMessage);
+  if (miniLayoutMatch) {
+    const fieldName = miniLayoutMatch[1].trim();
+    log(`   [Layout] miniLayout field not in full layout: ${fieldName}`);
+    const { updated, removed } = removeMiniLayoutField(xmlContent, fieldName);
+    if (removed) {
+      log(`   [Layout] Removed <fields>${fieldName}</fields> from <miniLayout>`);
+      return {
+        handled: true,
+        xmlContent: updated,
+        removedRef: {
+          type: 'field',
+          name: fieldName,
+          label: `[Layout.miniLayout] ${fieldName}`,
+          deployError: errorMessage,
+        },
+      };
+    }
+    log(`   [Layout] <fields>${fieldName}</fields> not found in <miniLayout>`);
     return { handled: true, xmlContent };
   }
 
