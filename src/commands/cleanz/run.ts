@@ -864,6 +864,43 @@ export function fixPsgPermissionSetsBlock(xmlContent: string): { updated: string
   return { updated, fixed: true };
 }
 
+// Detects interleaved XML element groups that cause "Element X is duplicated
+// at this location" Salesforce errors. Salesforce requires same-type elements
+// to be contiguous — inserting a different type (e.g. flowAccesses) between
+// two fieldPermissions groups causes the second group to be treated as a
+// duplicate. Returns each A-B-A interleave found with line numbers.
+function detectInterleavedXmlBlocks(
+  xml: string,
+  duplicatedType: string
+): Array<{ interleavedType: string; interleavedLine: number; duplicatedLine: number }> {
+  const lines = xml.split('\n');
+  // Match top-level child element opening tags (4 spaces or 1 tab indent level)
+  const blockTagRe = /^(?: {4}|\t)<([a-zA-Z][a-zA-Z0-9]*)>\s*$/;
+  const entries: Array<{ type: string; line: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = blockTagRe.exec(lines[i]);
+    if (m) entries.push({ type: m[1], line: i + 1 });
+  }
+  // Collapse consecutive same-type entries into runs
+  const runs: Array<{ type: string; firstLine: number }> = [];
+  for (const { type, line } of entries) {
+    if (runs.length > 0 && runs[runs.length - 1].type === type) continue;
+    runs.push({ type, firstLine: line });
+  }
+  // Find A-B-A patterns where A === duplicatedType
+  const results: Array<{ interleavedType: string; interleavedLine: number; duplicatedLine: number }> = [];
+  for (let i = 0; i + 2 < runs.length; i++) {
+    if (runs[i].type === duplicatedType && runs[i + 2].type === duplicatedType) {
+      results.push({
+        interleavedType: runs[i + 1].type,
+        interleavedLine: runs[i + 1].firstLine,
+        duplicatedLine: runs[i + 2].firstLine,
+      });
+    }
+  }
+  return results;
+}
+
 // ===============================================================
 // NAMESPACE BULK REMOVAL
 // When a managed package is not installed in the org, every single
@@ -2590,6 +2627,33 @@ function processFailures(
       continue;
     }
 
+    // ── Interleaved XML element groups ("Element X is duplicated at this location") ──
+    // Salesforce requires same-type elements to be contiguous. When another element
+    // type is inserted between two groups of the same type (e.g. <flowAccesses> between
+    // two <fieldPermissions> groups), Salesforce treats the second group as a duplicate.
+    // CleanZ cannot auto-reorder elements, so we leave the error unhandled and attach
+    // a [HINT] with the exact line numbers to guide the developer.
+    {
+      const dupMatch = /Element (\w+) is duplicated at this location in type (PermissionSet|Profile)/i.exec(err);
+      if (dupMatch) {
+        const dupType = dupMatch[1];
+        unhandledErrors.push(err);
+        const interleaves = detectInterleavedXmlBlocks(updatedXml, dupType);
+        if (interleaves.length > 0) {
+          for (const il of interleaves) {
+            unhandledErrors.push(
+              `[HINT] <${il.interleavedType}> block at line ${il.interleavedLine} was inserted between two <${dupType}> groups (second group starts at line ${il.duplicatedLine}). Move all <${il.interleavedType}> elements before or after the <${dupType}> group so same-type elements are contiguous.`
+            );
+          }
+        } else {
+          unhandledErrors.push(
+            `[HINT] <${dupType}> elements are split into non-contiguous groups. Reorder the XML so all <${dupType}> elements appear together.`
+          );
+        }
+        continue;
+      }
+    }
+
     // ── profileActionOverrides RecordType error — handled by applyRecordTypePreCheck ──
     if (/The value you specified for RecordType is invalid/i.test(err)) {
       log('   [ProfileActionOverride] RecordType error — handled by pre-check');
@@ -3676,7 +3740,9 @@ function markPassedItems(
         );
       } else {
         const hasFixed = item.allRemovedFields.length > 0;
-        const realUnhandled = item.allUnhandledErrors.filter((e) => !e.startsWith('[OBJ_PERM_WARN] '));
+        const realUnhandled = item.allUnhandledErrors.filter(
+          (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+        );
         const hasUnhandled = realUnhandled.length > 0;
         const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
         log(
@@ -4358,7 +4424,9 @@ async function processItemsInIteration(
 function markSuccessItems(items: BatchItem[], dryRun: boolean): void {
   for (const item of items) {
     const hasFixed = item.allRemovedFields.length > 0;
-    const realUnhandled = item.allUnhandledErrors.filter((e) => !e.startsWith('[OBJ_PERM_WARN] '));
+    const realUnhandled = item.allUnhandledErrors.filter(
+      (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+    );
     const hasUnhandled = realUnhandled.length > 0;
     const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
     if (hasFixed && hasUnhandled) {
@@ -5448,17 +5516,21 @@ export default class DeployAndFix extends SfCommand<void> {
     }
 
     const itemsWithUnhandled = summary.filter((r) =>
-      r.UnhandledErrors.split('; ').some((e) => e && !e.startsWith('[OBJ_PERM_WARN] '))
+      r.UnhandledErrors.split('; ').some((e) => e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] '))
     );
     if (itemsWithUnhandled.length > 0) {
       clog('\n------------------------------------------------------');
       clog('UNHANDLED ERRORS — These need manual fixes in the XML:');
       clog('------------------------------------------------------');
       itemsWithUnhandled.forEach((r) => {
-        const realErrors = r.UnhandledErrors.split('; ').filter((e) => e && !e.startsWith('[OBJ_PERM_WARN] '));
+        const realErrors = r.UnhandledErrors.split('; ').filter(
+          (e) => e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+        );
         if (realErrors.length === 0) return;
         clog(`\n   [${r.Type}] ${r.Name}:`);
         realErrors.forEach((e) => clog(`      ! ${e}`));
+        const hints = r.UnhandledErrors.split('; ').filter((e) => e.startsWith('[HINT] '));
+        hints.forEach((e) => clog(`      ? ${e.replace('[HINT] ', '')}`));
       });
       clog('');
     }
