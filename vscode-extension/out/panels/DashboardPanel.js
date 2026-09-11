@@ -1139,10 +1139,15 @@ class DashboardPanel {
       })
       .join('\n');
     // Build unhandled errors conclusion section
-    const unhandledRows = rows.filter(
-      (cols) => splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '').length > 0
+    const isAdvisory = (e) => e.startsWith('[OBJ_PERM_WARN] ') || e.startsWith('[PSG_UPDATING_WARN] ');
+    const isHint = (e) => e.startsWith('[HINT] ');
+    const unhandledRows = rows.filter((cols) =>
+      splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '').some((l) => !isAdvisory(l))
     );
-    const unhandledConclusionHtml =
+    const advisoryRows = rows.filter((cols) =>
+      splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '').some(isAdvisory)
+    );
+    const unhandledConclusionHtml = [
       unhandledRows.length > 0
         ? `<div class="unhandled-section">
   <div class="unhandled-header">&#9888;&nbsp; Unhandled / Skipped Errors &mdash; Manual Fix Required</div>
@@ -1151,14 +1156,41 @@ class DashboardPanel {
       const name = cols[iName] ?? '';
       const status = iStatusCol >= 0 ? cols[iStatusCol] ?? '' : '';
       const errs = splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '');
+      const realErrs = errs.filter((e) => !isHint(e) && !isAdvisory(e));
+      const hints = errs.filter(isHint);
       return `<div class="unhandled-item">
     <div class="unhandled-name">${esc(name)}<span class="unhandled-status">${esc(status)}</span></div>
-    ${errs.map((e) => `<div class="unhandled-err-line">&#8227; ${esc(e)}</div>`).join('')}
+    ${realErrs.map((e) => `<div class="unhandled-err-line">&#8227; ${esc(e)}</div>`).join('')}
+    ${hints.map((e) => `<div class="unhandled-hint-line">&#10148; ${esc(e.replace('[HINT] ', ''))}</div>`).join('')}
   </div>`;
     })
     .join('\n')}
 </div>`
-        : '';
+        : '',
+      advisoryRows.length > 0
+        ? `<div class="advisory-section">
+  <div class="advisory-header">&#126;&nbsp; Advisories &mdash; Informational Only</div>
+  ${advisoryRows
+    .map((cols) => {
+      const name = cols[iName] ?? '';
+      const status = iStatusCol >= 0 ? cols[iStatusCol] ?? '' : '';
+      const warns = splitLines(iUnhandledCol >= 0 ? cols[iUnhandledCol] ?? '' : '').filter(isAdvisory);
+      return `<div class="advisory-item">
+    <div class="advisory-name">${esc(name)}<span class="advisory-status">${esc(status)}</span></div>
+    ${warns
+      .map(
+        (w) =>
+          `<div class="advisory-warn-line">&#8627; ${esc(
+            w.replace(/^\[(OBJ_PERM_WARN|PSG_UPDATING_WARN)\] /, '')
+          )}</div>`
+      )
+      .join('')}
+  </div>`;
+    })
+    .join('\n')}
+</div>`
+        : '',
+    ].join('');
     const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1204,6 +1236,14 @@ class DashboardPanel {
   .unhandled-name{font-family:'Consolas',monospace;font-size:12px;font-weight:700;color:#1a2a40;margin-bottom:4px}
   .unhandled-status{font-size:10px;font-weight:400;color:#a02020;margin-left:10px;font-family:'Segoe UI',system-ui,Arial,sans-serif}
   .unhandled-err-line{font-size:12px;color:#b02020;padding:2px 0 2px 12px;border-left:2px solid rgba(180,30,30,.3);margin:3px 0;word-break:break-word}
+  .unhandled-hint-line{font-size:12px;color:#b45309;padding:2px 0 2px 12px;border-left:2px solid rgba(180,100,0,.3);margin:3px 0;word-break:break-word}
+  .advisory-section{margin-top:24px;border:2px solid rgba(14,116,144,.3);border-radius:10px;overflow:hidden;background:#f0faff}
+  .advisory-header{background:rgba(14,116,144,.1);padding:10px 18px;font-size:11px;font-weight:800;color:#0e7490;text-transform:uppercase;letter-spacing:.14em;border-bottom:1px solid rgba(14,116,144,.18)}
+  .advisory-item{padding:10px 18px;border-bottom:1px solid rgba(14,116,144,.1)}
+  .advisory-item:last-child{border-bottom:none}
+  .advisory-name{font-family:'Consolas',monospace;font-size:12px;font-weight:700;color:#1a2a40;margin-bottom:4px}
+  .advisory-status{font-size:10px;font-weight:400;color:#0e7490;margin-left:10px;font-family:'Segoe UI',system-ui,Arial,sans-serif}
+  .advisory-warn-line{font-size:12px;color:#0e7490;padding:2px 0 2px 12px;border-left:2px solid rgba(14,116,144,.3);margin:3px 0;word-break:break-word}
 </style>
 </head>
 <body>
@@ -1215,9 +1255,10 @@ class DashboardPanel {
   </div>
 </div>
 ${(() => {
-  const unhandledCount = rows.filter(
-    (c) => splitLines(iUnhandledCol >= 0 ? c[iUnhandledCol] ?? '' : '').length > 0
-  ).length;
+  const unhandledCount = rows.filter((c) => {
+    const ls = splitLines(iUnhandledCol >= 0 ? c[iUnhandledCol] ?? '' : '');
+    return ls.some((l) => !l.startsWith('[OBJ_PERM_WARN] ') && !l.startsWith('[PSG_UPDATING_WARN] '));
+  }).length;
   const refCount = rows.reduce((n, c) => n + splitLines(c[iRemoved] ?? '').length, 0);
   const statusChip =
     unhandledCount > 0
