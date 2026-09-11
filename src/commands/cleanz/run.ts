@@ -1577,81 +1577,7 @@ function queryDeployQueueCount(targetOrg: string): Promise<number> {
   });
 }
 
-// ===============================================================
-// PSG STATUS POLLING
-// Salesforce recalculates a PermissionSetGroup in the background
-// after each deploy. We poll until Status = Updated (success),
-// CalculationFailed (transient — re-deploy fixes it), or any other
-// terminal state (manual intervention needed).
-// ===============================================================
-
-function queryPsgStatus(targetOrg: string, psgName: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const query = `"SELECT Status FROM PermissionSetGroup WHERE DeveloperName = '${psgName}'"`;
-    const args = ['data', 'query', '--query', query, '--target-org', targetOrg, '--json'];
-    const proc = spawn('sf', args, { shell: true });
-    const chunks: string[] = [];
-    proc.stdout.on('data', (d: Buffer) => chunks.push(d.toString()));
-    proc.stderr.on('data', (d: Buffer) => chunks.push(d.toString()));
-    const timer = setTimeout(() => {
-      proc.kill();
-      resolve(null);
-    }, 30_000);
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        const raw = chunks.join('');
-        const start = raw.indexOf('{');
-        const json = JSON.parse(start >= 0 ? raw.substring(start) : raw) as {
-          result?: { records?: Array<{ Status?: string }> };
-        };
-        resolve(json?.result?.records?.[0]?.Status ?? null);
-      } catch {
-        resolve(null);
-      }
-    });
-  });
-}
-
 // Queries the target org and returns which of the given PermissionSet DeveloperNames exist.
-
-async function waitForPsgUpdates(
-  log: (msg: string) => void,
-  psgName: string,
-  targetOrg: string
-): Promise<'updated' | 'calc-failed' | 'failed'> {
-  const POLL_MS = 30_000;
-  const MAX_WAIT_MS = 10 * 60_000; // 10 minutes max
-  const deadline = Date.now() + MAX_WAIT_MS;
-
-  log(`   [PSG] ${psgName} — waiting for recalculation to complete...`);
-
-  while (Date.now() < deadline) {
-    // eslint-disable-next-line no-await-in-loop
-    const status = await queryPsgStatus(targetOrg, psgName);
-
-    if (status === 'Updated') {
-      log(`   [PSG] ${psgName} — status: Updated ✓`);
-      return 'updated';
-    }
-    if (status === 'CalculationFailed') {
-      log(`   [PSG] ${psgName} — status: CalculationFailed (transient — re-deploy will trigger fresh recalculation)`);
-      return 'calc-failed';
-    }
-    if (status !== 'Updating' && status !== null) {
-      log(`   [PSG] ${psgName} — status: ${status}. Manual intervention needed.`);
-      return 'failed';
-    }
-
-    const elapsed = Math.round((Date.now() - (deadline - MAX_WAIT_MS)) / 1000);
-    log(`   [PSG] ${psgName} — status: ${status ?? 'unknown'} (${elapsed}s elapsed). Checking again in 30s...`);
-    // eslint-disable-next-line no-await-in-loop
-    await sleep(POLL_MS);
-  }
-
-  log(`   [PSG] ${psgName} — timed out after 10 min waiting for recalculation.`);
-  return 'failed';
-}
 
 async function waitForQueueToClear(log: (msg: string) => void, targetOrg: string, maxWaitMins = 30): Promise<void> {
   const POLL_MS = 30_000;
@@ -3741,7 +3667,7 @@ function markPassedItems(
       } else {
         const hasFixed = item.allRemovedFields.length > 0;
         const realUnhandled = item.allUnhandledErrors.filter(
-          (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+          (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ') && !e.startsWith('[PSG_UPDATING_WARN] ')
         );
         const hasUnhandled = realUnhandled.length > 0;
         const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
@@ -3773,36 +3699,19 @@ type NsResult = { nsXml: string; nsRefs: RemovedRef[]; rootNode: string };
 
 // Applies namespace pre-check to all active items, stages and commits them together.
 // Returns a map of per-item NS results and the managed-refs commit hash (if any).
-async function handlePsgLockItem(
-  log: (msg: string) => void,
-  item: BatchItem,
-  failure: ComponentFailure,
-  targetOrg: string
-): Promise<void> {
+function handlePsgLockItem(log: (msg: string) => void, item: BatchItem, failure: ComponentFailure): void {
   const psgNameMatch = (failure.problem ?? failure.error ?? '').match(
     /The\s+(\w+)\s+permission set group is updating/i
   );
   const blockingPsg = psgNameMatch ? psgNameMatch[1] : 'a Permission Set Group';
   log(
-    `   [PSG] ${item.itemName} — ⏳ "${blockingPsg}" is updating. Waiting for recalculation to complete before retrying...`
+    `   [PSG] ${item.itemName} — "${blockingPsg}" is currently updating. Skipping validation — deploy via Copado once PSG recalculation is complete.`
   );
-  const psgResult = await waitForPsgUpdates(log, item.itemName, targetOrg);
-  if (psgResult === 'updated') {
-    item.status = 'Pending';
-  } else if (psgResult === 'calc-failed') {
-    item.calcFailedRetries++;
-    if (item.calcFailedRetries <= 3) {
-      log(`   [PSG] ${item.itemName} — CalculationFailed retry ${item.calcFailedRetries}/3. Re-deploying...`);
-      item.status = 'Pending';
-    } else {
-      log(`   [PSG] ${item.itemName} — CalculationFailed after 3 retries. Giving up.`);
-      item.status = 'Skipped - PSG Calculation Failed';
-      item.done = true;
-    }
-  } else {
-    item.status = 'Skipped - PSG Update Failed';
-    item.done = true;
-  }
+  item.allUnhandledErrors.push(
+    `[PSG_UPDATING_WARN] "${blockingPsg}" is currently updating. Deploy via Copado once the Permission Set Group has finished recalculating.`
+  );
+  item.status = 'Warnings - PSG Updating';
+  item.done = true;
 }
 
 async function handlePsgInvalidPsItem(
@@ -4048,7 +3957,7 @@ async function applyManagedRefsPass(
     const psgLockFailure = itemFailures.find((f) => PSG_LOCK.test(f.problem ?? f.error ?? ''));
     if (psgLockFailure) {
       // eslint-disable-next-line no-await-in-loop
-      await handlePsgLockItem(log, item, psgLockFailure, targetOrg);
+      handlePsgLockItem(log, item, psgLockFailure);
       continue;
     }
 
@@ -4425,10 +4334,11 @@ function markSuccessItems(items: BatchItem[], dryRun: boolean): void {
   for (const item of items) {
     const hasFixed = item.allRemovedFields.length > 0;
     const realUnhandled = item.allUnhandledErrors.filter(
-      (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+      (e) => !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ') && !e.startsWith('[PSG_UPDATING_WARN] ')
     );
     const hasUnhandled = realUnhandled.length > 0;
     const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
+    const hasPsgUpdatingWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[PSG_UPDATING_WARN] '));
     if (hasFixed && hasUnhandled) {
       item.status = dryRun ? 'Fixed (Dry Run) + Unhandled Errors' : 'Fixed & Committed + Unhandled Errors';
     } else if (hasFixed) {
@@ -4437,6 +4347,8 @@ function markSuccessItems(items: BatchItem[], dryRun: boolean): void {
       item.status = 'Unhandled Errors - Manual Fix Needed';
     } else if (hasObjPermWarnings) {
       item.status = 'Warnings - Copado Deployment Safe';
+    } else if (hasPsgUpdatingWarnings) {
+      item.status = 'Warnings - PSG Updating';
     } else {
       item.status = 'Success';
     }
@@ -5516,7 +5428,10 @@ export default class DeployAndFix extends SfCommand<void> {
     }
 
     const itemsWithUnhandled = summary.filter((r) =>
-      r.UnhandledErrors.split('; ').some((e) => e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] '))
+      r.UnhandledErrors.split('; ').some(
+        (e) =>
+          e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ') && !e.startsWith('[PSG_UPDATING_WARN] ')
+      )
     );
     if (itemsWithUnhandled.length > 0) {
       clog('\n------------------------------------------------------');
@@ -5524,7 +5439,8 @@ export default class DeployAndFix extends SfCommand<void> {
       clog('------------------------------------------------------');
       itemsWithUnhandled.forEach((r) => {
         const realErrors = r.UnhandledErrors.split('; ').filter(
-          (e) => e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ')
+          (e) =>
+            e && !e.startsWith('[OBJ_PERM_WARN] ') && !e.startsWith('[HINT] ') && !e.startsWith('[PSG_UPDATING_WARN] ')
         );
         if (realErrors.length === 0) return;
         clog(`\n   [${r.Type}] ${r.Name}:`);
@@ -5549,6 +5465,23 @@ export default class DeployAndFix extends SfCommand<void> {
         const warns = r.UnhandledErrors.split('; ').filter((e) => e.startsWith('[OBJ_PERM_WARN] '));
         clog(`\n   [${r.Type}] ${r.Name}:`);
         warns.forEach((e) => clog(`      ~ ${e.replace('[OBJ_PERM_WARN] ', '')}`));
+      });
+      clog('');
+    }
+
+    const itemsWithPsgUpdatingWarnings = summary.filter((r) =>
+      r.UnhandledErrors.split('; ').some((e) => e.startsWith('[PSG_UPDATING_WARN] '))
+    );
+    if (itemsWithPsgUpdatingWarnings.length > 0) {
+      clog('\n-----------------------------------------------------------------');
+      clog('WARNINGS (PSG Updating) — Deploy via Copado once PSGs are updated');
+      clog('-----------------------------------------------------------------');
+      clog('   These Permission Set Groups were still recalculating at validation time.');
+      clog('   This is not an error. Deploy via Copado once PSG recalculation is complete.');
+      itemsWithPsgUpdatingWarnings.forEach((r) => {
+        const warns = r.UnhandledErrors.split('; ').filter((e) => e.startsWith('[PSG_UPDATING_WARN] '));
+        clog(`\n   [${r.Type}] ${r.Name}:`);
+        warns.forEach((e) => clog(`      ~ ${e.replace('[PSG_UPDATING_WARN] ', '')}`));
       });
       clog('');
     }
