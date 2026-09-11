@@ -2557,7 +2557,17 @@ function processFailures(
     // the <userPermissions> block for system perms so validation can continue; for
     // object-flag PermDep it returns false and the item stops as Partial/Manual.
     if (/Permission .+ depends on permission\(s\):/i.test(err)) {
-      unhandledErrors.push(err);
+      // Object-perm dependency errors in PermissionSets (e.g. "Permission Read Case_Audit__c
+      // depends on permission(s): Read Case") are cross-PS dependencies that Copado satisfies
+      // at org level via profiles/other PSes — no XML fix needed. Tag as warning-only.
+      if (
+        metadataType === 'PermissionSet' &&
+        /^Permission (?:Read|Create|Edit|Delete|ViewAll|ModifyAll) \S+ depends on permission\(s\):/i.test(err)
+      ) {
+        unhandledErrors.push('[OBJ_PERM_WARN] ' + err);
+      } else {
+        unhandledErrors.push(err);
+      }
       continue;
     }
 
@@ -3666,11 +3676,13 @@ function markPassedItems(
         );
       } else {
         const hasFixed = item.allRemovedFields.length > 0;
-        const hasUnhandled = item.allUnhandledErrors.length > 0;
+        const realUnhandled = item.allUnhandledErrors.filter((e) => !e.startsWith('[OBJ_PERM_WARN] '));
+        const hasUnhandled = realUnhandled.length > 0;
+        const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
         log(
           `   [${item.itemName}] No failures this iteration — passed${
             hasUnhandled ? ' (with unhandled/skipped errors — see report)' : ''
-          }.`
+          }${hasObjPermWarnings && !hasUnhandled ? ' (with obj-perm warnings — Copado deployment safe)' : ''}.`
         );
         if (hasFixed && hasUnhandled) {
           item.status = dryRun ? 'Fixed (Dry Run) + Unhandled Errors' : 'Fixed & Committed + Unhandled Errors';
@@ -3678,6 +3690,8 @@ function markPassedItems(
           item.status = dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed';
         } else if (hasUnhandled) {
           item.status = 'Unhandled Errors - Manual Fix Needed';
+        } else if (hasObjPermWarnings) {
+          item.status = 'Warnings - Copado Deployment Safe';
         } else {
           item.status = 'Success';
         }
@@ -4344,13 +4358,17 @@ async function processItemsInIteration(
 function markSuccessItems(items: BatchItem[], dryRun: boolean): void {
   for (const item of items) {
     const hasFixed = item.allRemovedFields.length > 0;
-    const hasUnhandled = item.allUnhandledErrors.length > 0;
+    const realUnhandled = item.allUnhandledErrors.filter((e) => !e.startsWith('[OBJ_PERM_WARN] '));
+    const hasUnhandled = realUnhandled.length > 0;
+    const hasObjPermWarnings = item.allUnhandledErrors.some((e) => e.startsWith('[OBJ_PERM_WARN] '));
     if (hasFixed && hasUnhandled) {
       item.status = dryRun ? 'Fixed (Dry Run) + Unhandled Errors' : 'Fixed & Committed + Unhandled Errors';
     } else if (hasFixed) {
       item.status = dryRun ? 'Fixed (Dry Run)' : 'Fixed & Committed';
     } else if (hasUnhandled) {
       item.status = 'Unhandled Errors - Manual Fix Needed';
+    } else if (hasObjPermWarnings) {
+      item.status = 'Warnings - Copado Deployment Safe';
     } else {
       item.status = 'Success';
     }
@@ -4479,12 +4497,17 @@ async function runBatchDeploy(
     // without this, a mid-deploy exception leaves files in the masked state and every
     // subsequent iteration reads masked content as "original", silently deleting real blocks.
     const savedContents = maskActiveItems(activeItems, whitelist);
+    // Include already-validated items as context so Salesforce can resolve cross-PS
+    // dependencies (e.g. Case Read in a passed PS satisfying child-object perms in an
+    // active PS). Without them, iteration N only sees the remaining items and flags
+    // dependencies that were satisfied by items that passed in earlier iterations.
+    const passedItems = batchItems.filter((i) => i.done && i.status === 'Success');
     let deployResult: DeployResult | null = null;
     try {
       // eslint-disable-next-line no-await-in-loop
       deployResult = await invokeDeployWithRetry(
         log,
-        activeItems,
+        [...activeItems, ...passedItems],
         targetOrg,
         deployErrorsFile,
         timeoutMins,
@@ -5424,16 +5447,36 @@ export default class DeployAndFix extends SfCommand<void> {
       });
     }
 
-    const itemsWithUnhandled = summary.filter((r) => r.UnhandledErrors);
+    const itemsWithUnhandled = summary.filter((r) =>
+      r.UnhandledErrors.split('; ').some((e) => e && !e.startsWith('[OBJ_PERM_WARN] '))
+    );
     if (itemsWithUnhandled.length > 0) {
       clog('\n------------------------------------------------------');
       clog('UNHANDLED ERRORS — These need manual fixes in the XML:');
       clog('------------------------------------------------------');
       itemsWithUnhandled.forEach((r) => {
+        const realErrors = r.UnhandledErrors.split('; ').filter((e) => e && !e.startsWith('[OBJ_PERM_WARN] '));
+        if (realErrors.length === 0) return;
         clog(`\n   [${r.Type}] ${r.Name}:`);
-        r.UnhandledErrors.split('; ')
-          .filter(Boolean)
-          .forEach((e) => clog(`      ! ${e}`));
+        realErrors.forEach((e) => clog(`      ! ${e}`));
+      });
+      clog('');
+    }
+
+    const itemsWithObjPermWarnings = summary.filter((r) =>
+      r.UnhandledErrors.split('; ').some((e) => e.startsWith('[OBJ_PERM_WARN] '))
+    );
+    if (itemsWithObjPermWarnings.length > 0) {
+      clog('\n-------------------------------------------------------------------------');
+      clog('WARNINGS (PermissionSet object-perm dependencies) — Copado Deployment Safe');
+      clog('-------------------------------------------------------------------------');
+      clog('   These PS have child-object permissions (e.g. Case_Audit__c) whose parent');
+      clog('   object Read (e.g. Case) is granted via a Profile or another PermissionSet');
+      clog('   already in the org. Copado deployment will NOT fail for these.');
+      itemsWithObjPermWarnings.forEach((r) => {
+        const warns = r.UnhandledErrors.split('; ').filter((e) => e.startsWith('[OBJ_PERM_WARN] '));
+        clog(`\n   [${r.Type}] ${r.Name}:`);
+        warns.forEach((e) => clog(`      ~ ${e.replace('[OBJ_PERM_WARN] ', '')}`));
       });
       clog('');
     }
