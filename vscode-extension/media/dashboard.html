@@ -1593,6 +1593,8 @@
         <span id="sbStatus">Ready</span>
         <span class="sb-sep">|</span>
         <span>Org: <span id="sbOrg">—</span></span>
+        <span class="sb-sep" id="sbModeSep" style="display: none">|</span>
+        <span id="sbMode" style="display: none; color: #f59e0b; font-style: italic"></span>
         <span class="sb-sep">|</span>
         <span id="sbIter">—</span>
         <span class="sb-sep" style="margin-left: auto">|</span>
@@ -2029,6 +2031,17 @@
             document.getElementById('runBtn').style.display = _isNsPurge ? 'none' : '';
             document.getElementById('exportBtn').style.display = _isNsPurge ? 'none' : '';
             document.getElementById('sbOrg').textContent = _isNsPurge ? 'ns:' + _cfg.namespace : _cfg.org || '—';
+            const _modeLabel = _cfg.mode === 'dryrun' ? 'Dry Run' : _cfg.mode === 'namespace-purge' ? 'NS Purge' : '';
+            const _sbMode = document.getElementById('sbMode');
+            const _sbModeSep = document.getElementById('sbModeSep');
+            if (_modeLabel) {
+              _sbMode.textContent = _modeLabel;
+              _sbMode.style.display = '';
+              _sbModeSep.style.display = '';
+            } else {
+              _sbMode.style.display = 'none';
+              _sbModeSep.style.display = 'none';
+            }
             document.getElementById('sbSummary').textContent = '—';
             document.getElementById('statJsonFixed').textContent = '0';
             document.getElementById('statRepoFixed').textContent = '0';

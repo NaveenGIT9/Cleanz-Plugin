@@ -38,7 +38,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  public updateStats(stats: { fixed: number; warnings: number; attention: number; deploys: number; org: string }) {
+  public updateStats(stats: {
+    fixed: number;
+    warnings: number;
+    attention: number;
+    deploys: number;
+    org: string;
+    mode?: string;
+  }) {
     this._view?.webview.postMessage({ command: 'updateStats', stats });
   }
 
@@ -140,7 +147,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         document.getElementById('sWarn').textContent = s.warnings;
         document.getElementById('sAttn').textContent = s.attention;
         document.getElementById('sDeploy').textContent = s.deploys;
-        document.getElementById('orgInfo').innerHTML = 'Org: <span>' + s.org + '</span>';
+        const modeLabel = s.mode === 'dryrun' ? ' | <em>Dry Run</em>' : s.mode === 'namespace-purge' ? ' | <em>NS Purge</em>' : '';
+        document.getElementById('orgInfo').innerHTML = 'Org: <span>' + s.org + '</span>' + modeLabel;
         document.getElementById('statRow').style.display = 'grid';
       }
     });

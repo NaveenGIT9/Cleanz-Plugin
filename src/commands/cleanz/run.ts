@@ -5007,6 +5007,25 @@ export default class DeployAndFix extends SfCommand<void> {
     // ================= LOAD & PARSE INPUT FILE =================
     const promotionData = loadInputFile(log, inputFilePath);
 
+    // If the same component appears multiple times with different operations, prioritize ADD/FULL
+    // over RetrieveOnly so a retrieve-only duplicate never silently hides a deployable entry.
+    const deployablePriority = (op: string | undefined): number => {
+      if (!op) return 2;
+      const o = op.toLowerCase();
+      if (o.startsWith('retrieve') || o.startsWith('delete')) return 0;
+      if (o === 'full') return 3;
+      return 2; // add or anything else deployable
+    };
+    const effectiveOp = new Map<string, PromotionItem>();
+    for (const item of promotionData) {
+      const key = `${item.t}::${item.n}`;
+      const existing = effectiveOp.get(key);
+      if (!existing || deployablePriority(item.a) > deployablePriority(existing.a)) {
+        effectiveOp.set(key, item);
+      }
+    }
+    const deduped = [...effectiveOp.values()];
+
     // Exclude RetrieveOnly and Delete items from validation — they are not being deployed.
     // For package.xml (no "a" field), treat all entries as deployable (preserve existing behavior).
     const isDeployable = (i: PromotionItem): boolean => {
@@ -5016,52 +5035,66 @@ export default class DeployAndFix extends SfCommand<void> {
     };
 
     const permSets = [
-      ...new Set(promotionData.filter((i) => i.t === 'PermissionSet' && isDeployable(i)).map((i) => i.n)),
+      ...new Set(deduped.filter((i) => i.t === 'PermissionSet' && isDeployable(i)).map((i) => i.n)),
     ].sort();
     const mutingPermSets = [
-      ...new Set(promotionData.filter((i) => i.t === 'MutingPermissionSet' && isDeployable(i)).map((i) => i.n)),
+      ...new Set(deduped.filter((i) => i.t === 'MutingPermissionSet' && isDeployable(i)).map((i) => i.n)),
     ].sort();
     const permSetGroups = [
-      ...new Set(promotionData.filter((i) => i.t === 'PermissionSetGroup' && isDeployable(i)).map((i) => i.n)),
+      ...new Set(deduped.filter((i) => i.t === 'PermissionSetGroup' && isDeployable(i)).map((i) => i.n)),
     ].sort();
-    const profiles = [
-      ...new Set(promotionData.filter((i) => i.t === 'Profile' && isDeployable(i)).map((i) => i.n)),
-    ].sort();
+    const profiles = [...new Set(deduped.filter((i) => i.t === 'Profile' && isDeployable(i)).map((i) => i.n))].sort();
     const reportTypes = [
-      ...new Set(promotionData.filter((i) => i.t === 'ReportType' && isDeployable(i)).map((i) => i.n)),
+      ...new Set(deduped.filter((i) => i.t === 'ReportType' && isDeployable(i)).map((i) => i.n)),
     ].sort();
-    const layouts = [
-      ...new Set(promotionData.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n)),
-    ].sort();
+    const layouts = [...new Set(deduped.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n))].sort();
+
+    // Auto-discover RecordTypes for any deployable CustomObject — Salesforce deploys all
+    // nested components (including RecordTypes) when an object is deployed, so we must
+    // validate those RecordType files even if they aren't explicitly listed in the JSON.
+    const deployableObjects = new Set(deduped.filter((i) => i.t === 'CustomObject' && isDeployable(i)).map((i) => i.n));
+    const autoDiscoveredRecordTypes = new Set<string>();
+    for (const objName of deployableObjects) {
+      const rtDir = path.join(OBJECTS_BASE_PATH, objName, 'recordTypes');
+      if (fs.existsSync(rtDir)) {
+        for (const f of fs.readdirSync(rtDir)) {
+          if (f.endsWith('.recordType-meta.xml')) {
+            const devName = f.replace('.recordType-meta.xml', '');
+            autoDiscoveredRecordTypes.add(`${objName}.${devName}`);
+          }
+        }
+      }
+    }
+
+    // Merge auto-discovered with explicitly listed RecordTypes (explicit entries keep their priority).
+    const explicitRecordTypes = new Set(deduped.filter((i) => i.t === 'RecordType' && isDeployable(i)).map((i) => i.n));
+    const allRecordTypes = [...new Set([...explicitRecordTypes, ...autoDiscoveredRecordTypes])].sort();
+
+    if (autoDiscoveredRecordTypes.size > 0) {
+      const newOnes = [...autoDiscoveredRecordTypes].filter((n) => !explicitRecordTypes.has(n));
+      if (newOnes.length > 0) {
+        log(`   [RecordType] Auto-discovered ${newOnes.length} RecordType(s) from deployable objects:`);
+        for (const n of newOnes) log(`   - ${n}`);
+      }
+    }
+
     const whitelist: WhitelistMap = {
-      fields: [
-        ...new Set(promotionData.filter((i) => i.t === 'CustomField' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
-      apps: [
-        ...new Set(promotionData.filter((i) => i.t === 'CustomApplication' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
-      classes: [...new Set(promotionData.filter((i) => i.t === 'ApexClass' && isDeployable(i)).map((i) => i.n))].sort(),
-      pages: [...new Set(promotionData.filter((i) => i.t === 'ApexPage' && isDeployable(i)).map((i) => i.n))].sort(),
-      tabs: [...new Set(promotionData.filter((i) => i.t === 'CustomTab' && isDeployable(i)).map((i) => i.n))].sort(),
-      objects: [
-        ...new Set(promotionData.filter((i) => i.t === 'CustomObject' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
-      flows: [...new Set(promotionData.filter((i) => i.t === 'Flow' && isDeployable(i)).map((i) => i.n))].sort(),
-      layouts: [...new Set(promotionData.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n))].sort(),
-      flexipages: [
-        ...new Set(promotionData.filter((i) => i.t === 'FlexiPage' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
-      recordTypes: [
-        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
+      fields: [...new Set(deduped.filter((i) => i.t === 'CustomField' && isDeployable(i)).map((i) => i.n))].sort(),
+      apps: [...new Set(deduped.filter((i) => i.t === 'CustomApplication' && isDeployable(i)).map((i) => i.n))].sort(),
+      classes: [...new Set(deduped.filter((i) => i.t === 'ApexClass' && isDeployable(i)).map((i) => i.n))].sort(),
+      pages: [...new Set(deduped.filter((i) => i.t === 'ApexPage' && isDeployable(i)).map((i) => i.n))].sort(),
+      tabs: [...new Set(deduped.filter((i) => i.t === 'CustomTab' && isDeployable(i)).map((i) => i.n))].sort(),
+      objects: [...new Set(deduped.filter((i) => i.t === 'CustomObject' && isDeployable(i)).map((i) => i.n))].sort(),
+      flows: [...new Set(deduped.filter((i) => i.t === 'Flow' && isDeployable(i)).map((i) => i.n))].sort(),
+      layouts: [...new Set(deduped.filter((i) => i.t === 'Layout' && isDeployable(i)).map((i) => i.n))].sort(),
+      flexipages: [...new Set(deduped.filter((i) => i.t === 'FlexiPage' && isDeployable(i)).map((i) => i.n))].sort(),
+      recordTypes: allRecordTypes,
       // CustomMetadata type definitions appear as CustomObject with __mdt suffix.
       // Individual CMT records appear as CustomMetadata with "TypeName__mdt.RecordName" format.
       customMetadataTypes: [
         ...new Set([
-          ...promotionData
-            .filter((i) => i.t === 'CustomObject' && isDeployable(i) && i.n.endsWith('__mdt'))
-            .map((i) => i.n),
-          ...promotionData
+          ...deduped.filter((i) => i.t === 'CustomObject' && isDeployable(i) && i.n.endsWith('__mdt')).map((i) => i.n),
+          ...deduped
             .filter((i) => i.t === 'CustomMetadata' && isDeployable(i))
             .map((i) => {
               const dot = i.n.indexOf('.');
@@ -5070,11 +5103,9 @@ export default class DeployAndFix extends SfCommand<void> {
         ]),
       ].sort(),
       customPermissions: [
-        ...new Set(promotionData.filter((i) => i.t === 'CustomPermission' && isDeployable(i)).map((i) => i.n)),
+        ...new Set(deduped.filter((i) => i.t === 'CustomPermission' && isDeployable(i)).map((i) => i.n)),
       ].sort(),
-      recordTypeVisibilities: [
-        ...new Set(promotionData.filter((i) => i.t === 'RecordType' && isDeployable(i)).map((i) => i.n)),
-      ].sort(),
+      recordTypeVisibilities: allRecordTypes,
     };
 
     // Build full file path list upfront — sweepOtherFiles needs this.
@@ -5138,19 +5169,19 @@ export default class DeployAndFix extends SfCommand<void> {
     log(`Max retries             : ${MAX_RETRIES} per deploy call`);
 
     log('\nPermission Sets to process:');
-    permSets.forEach((ps) => log(`   - ${ps} [${getItemOperation(promotionData, 'PermissionSet', ps)}]`));
+    permSets.forEach((ps) => log(`   - ${ps} [${getItemOperation(deduped, 'PermissionSet', ps)}]`));
     log('\nMuting Permission Sets to process:');
-    logItemList(log, mutingPermSets, promotionData, 'MutingPermissionSet');
+    logItemList(log, mutingPermSets, deduped, 'MutingPermissionSet');
     log('\nPermission Set Groups to process:');
-    logItemList(log, permSetGroups, promotionData, 'PermissionSetGroup');
+    logItemList(log, permSetGroups, deduped, 'PermissionSetGroup');
     log('\nProfiles to process:');
-    profiles.forEach((p) => log(`   - ${p} [${getItemOperation(promotionData, 'Profile', p)}]`));
+    profiles.forEach((p) => log(`   - ${p} [${getItemOperation(deduped, 'Profile', p)}]`));
 
     log('\nReport Types to process:');
-    logItemList(log, reportTypes, promotionData, 'ReportType');
+    logItemList(log, reportTypes, deduped, 'ReportType');
 
     log('\nLayouts to process:');
-    logItemList(log, layouts, promotionData, 'Layout');
+    logItemList(log, layouts, deduped, 'Layout');
 
     logWhitelistDetails(log, whitelist);
 
@@ -5197,7 +5228,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'PermissionSet',
         itemName: n,
         filePath: path.join(PS_BASE_PATH, `${n}.permissionset-meta.xml`),
-        operation: getItemOperation(promotionData, 'PermissionSet', n),
+        operation: getItemOperation(deduped, 'PermissionSet', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5212,7 +5243,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'MutingPermissionSet',
         itemName: n,
         filePath: path.join(MUTING_PS_BASE_PATH, `${n}.mutingpermissionset-meta.xml`),
-        operation: getItemOperation(promotionData, 'MutingPermissionSet', n),
+        operation: getItemOperation(deduped, 'MutingPermissionSet', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5227,7 +5258,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'PermissionSetGroup',
         itemName: n,
         filePath: path.join(PSG_BASE_PATH, `${n}.permissionsetgroup-meta.xml`),
-        operation: getItemOperation(promotionData, 'PermissionSetGroup', n),
+        operation: getItemOperation(deduped, 'PermissionSetGroup', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5242,7 +5273,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'Profile',
         itemName: n,
         filePath: path.join(PROFILE_BASE_PATH, `${n}.profile-meta.xml`),
-        operation: getItemOperation(promotionData, 'Profile', n),
+        operation: getItemOperation(deduped, 'Profile', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5257,7 +5288,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'ReportType',
         itemName: n,
         filePath: path.join(REPORT_TYPE_BASE_PATH, `${n}.reportType-meta.xml`),
-        operation: getItemOperation(promotionData, 'ReportType', n),
+        operation: getItemOperation(deduped, 'ReportType', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5272,7 +5303,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'Layout',
         itemName: n,
         filePath: path.join(LAYOUT_BASE_PATH, `${n}.layout-meta.xml`),
-        operation: getItemOperation(promotionData, 'Layout', n),
+        operation: getItemOperation(deduped, 'Layout', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],
@@ -5287,7 +5318,7 @@ export default class DeployAndFix extends SfCommand<void> {
         metadataType: 'RecordType',
         itemName: n,
         filePath: recordTypeFilePath(n, OBJECTS_BASE_PATH),
-        operation: getItemOperation(promotionData, 'RecordType', n),
+        operation: getItemOperation(deduped, 'RecordType', n),
         status: 'No Change',
         allRemovedFields: [] as Array<{ label: string; error: string }>,
         allRemovedRefs: [] as RemovedRef[],

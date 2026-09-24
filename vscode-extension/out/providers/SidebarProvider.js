@@ -187,7 +187,8 @@ class SidebarProvider {
         document.getElementById('sWarn').textContent = s.warnings;
         document.getElementById('sAttn').textContent = s.attention;
         document.getElementById('sDeploy').textContent = s.deploys;
-        document.getElementById('orgInfo').innerHTML = 'Org: <span>' + s.org + '</span>';
+        const modeLabel = s.mode === 'dryrun' ? ' | <em>Dry Run</em>' : s.mode === 'namespace-purge' ? ' | <em>NS Purge</em>' : '';
+        document.getElementById('orgInfo').innerHTML = 'Org: <span>' + s.org + '</span>' + modeLabel;
         document.getElementById('statRow').style.display = 'grid';
       }
     });
