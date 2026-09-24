@@ -455,6 +455,7 @@ export class DashboardPanel {
           MutingPermissionSet: 'MutingPermSet',
           ReportType: 'ReportType',
           Layout: 'Layout',
+          RecordType: 'RecordType',
         };
         const raw = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')) as Array<{ t: string; n: string; a?: string }>;
         const seen = new Set<string>();
