@@ -1,7 +1,7 @@
 {
   "name": "@naveenbonthu/plugin-cleanz",
   "description": "Cleanz",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "author": "NaveenGIT9",
   "bugs": "https://github.com/forcedotcom/cli/issues",
   "dependencies": {
