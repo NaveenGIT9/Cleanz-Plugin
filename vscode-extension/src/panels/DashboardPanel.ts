@@ -991,11 +991,15 @@ export class DashboardPanel {
           try {
             const pluginPath = await this._findPluginCleanzPath();
             if (pluginPath) {
-              // Clear wireit cache then rebuild
+              // Clear wireit cache then rebuild TypeScript
               const wireitDir = path.join(pluginPath, '.wireit');
               if (fs.existsSync(wireitDir)) fs.rmSync(wireitDir, { recursive: true, force: true });
               await new Promise<void>((resolve, reject) => {
                 exec('npm run build', { cwd: pluginPath, timeout: 60_000 }, (err) => (err ? reject(err) : resolve()));
+              });
+              // Regenerate oclif.manifest.json so SF CLI can discover cleanz:run
+              await new Promise<void>((resolve) => {
+                exec('npx oclif manifest', { cwd: pluginPath, timeout: 30_000 }, () => resolve());
               });
               rebuilt = true;
               this._queueLog('ok', '✓ Rebuild complete — retrying...');
@@ -1378,7 +1382,9 @@ ${unhandledConclusionHtml}
       exec('sf plugins --json', { timeout: 10_000 }, (_err: unknown, stdout: string) => {
         try {
           const plugins = JSON.parse(stdout) as Array<{ name: string; root: string }>;
-          const cleanz = plugins.find((p) => p.name === '@naveengit9/plugin-cleanz');
+          const cleanz = plugins.find(
+            (p) => p.name === '@naveenbonthu/plugin-cleanz' || p.name === '@naveengit9/plugin-cleanz'
+          );
           resolve(cleanz?.root ?? null);
         } catch {
           resolve(null);
