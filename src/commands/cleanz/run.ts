@@ -23,7 +23,7 @@ import { SfCommand, Flags } from '@salesforce/sf-plugins-core';
 import { Messages } from '@salesforce/core';
 
 Messages.importMessagesDirectoryFromMetaUrl(import.meta.url);
-const messages = Messages.loadMessages('@naveengit9/plugin-cleanz', 'cleanz.run');
+const messages = Messages.loadMessages('@naveenbonthu/plugin-cleanz', 'cleanz.run');
 
 // ===============================================================
 // TYPES
@@ -126,6 +126,7 @@ type RefType =
   | 'customMetadataType' // customMetadataTypeAccesses block referencing a missing __mdt type
   | 'customPermission' // customPermissions block referencing a missing CustomPermission
   | 'recordTypeVisibility' // recordTypeVisibilities block referencing a missing RecordType
+  | 'recordTypePicklistValue' // <values> entry in a RecordType <picklistValues> block referencing an inactive/missing picklist value
   | 'reportTypeColumn' // columns block in a ReportType referencing a missing field/object
   | 'reportTypeJoin'; // join block in a ReportType referencing a missing relationship
 
@@ -159,6 +160,7 @@ function resolveRepoPaths(): {
   PROFILE_BASE_PATH: string;
   LAYOUT_BASE_PATH: string;
   REPORT_TYPE_BASE_PATH: string;
+  OBJECTS_BASE_PATH: string;
 } {
   const repoPath = execSync('git rev-parse --show-toplevel', { cwd: process.cwd() }).toString().trim();
   return {
@@ -169,6 +171,7 @@ function resolveRepoPaths(): {
     PROFILE_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'profiles'),
     LAYOUT_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'layouts'),
     REPORT_TYPE_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'reportTypes'),
+    OBJECTS_BASE_PATH: path.join(repoPath, 'force-app', 'main', 'default', 'objects'),
   };
 }
 
@@ -614,6 +617,41 @@ function removeCustomPermissionFromXml(xmlContent: string, name: string): { upda
 }
 function removeRecordTypeVisibilityFromXml(xmlContent: string, name: string): { updated: string; removed: boolean } {
   return removeXmlBlock(xmlContent, 'recordTypeVisibilities', 'recordType', name);
+}
+
+// Removes a single <values> entry from the <picklistValues> block that matches picklistField.
+// Used to fix: "Picklist Value: X in picklist:Y not found" errors on RecordType files.
+function removeRecordTypePicklistValueFromXml(
+  xmlContent: string,
+  picklistField: string,
+  picklistValue: string
+): { updated: string; removed: boolean } {
+  const escField = picklistField.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escValue = picklistValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const blockRegex = /([ \t]*<picklistValues>[\s\S]*?<\/picklistValues>[ \t]*\r?\n?)/g;
+  let removed = false;
+  const updated = xmlContent.replace(blockRegex, (block) => {
+    if (!new RegExp(`<picklist>\\s*${escField}\\s*<\\/picklist>`, 'i').test(block)) return block;
+    const valueRegex = new RegExp(
+      `[ \\t]*<values>[\\s\\S]*?<fullName>\\s*${escValue}\\s*<\\/fullName>[\\s\\S]*?<\\/values>[ \\t]*\\r?\\n?`,
+      'gi'
+    );
+    const newBlock = block.replace(valueRegex, () => {
+      removed = true;
+      return '';
+    });
+    return newBlock;
+  });
+  return { updated, removed };
+}
+
+// Maps "Object.DeveloperName" (Copado JSON format) to the recordType file path.
+function recordTypeFilePath(name: string, objectsBase: string): string {
+  const dot = name.indexOf('.');
+  if (dot < 0) return path.join(objectsBase, 'recordTypes', `${name}.recordType-meta.xml`);
+  const obj = name.substring(0, dot);
+  const devName = name.substring(dot + 1);
+  return path.join(objectsBase, obj, 'recordTypes', `${devName}.recordType-meta.xml`);
 }
 export function removeColumnFromReportType(
   xmlContent: string,
@@ -2646,6 +2684,35 @@ function processFailures(
       if (layoutResult.handled) {
         updatedXml = layoutResult.xmlContent;
         if (layoutResult.removedRef) removedRefs.push(layoutResult.removedRef);
+        continue;
+      }
+    }
+
+    // ── RecordType picklist value removal ────────────────────────
+    // Error: "Picklist Value: X in picklist:Y not found"
+    // Org has made the picklist value inactive or it was never deployed to the target.
+    // Fix: remove the <values> entry for that value from the matching <picklistValues> block.
+    if (metadataType === 'RecordType') {
+      const m = /Picklist Value:\s*(.+?)\s+in picklist:(.+?)\s+not found/i.exec(err);
+      if (m) {
+        const picklistValue = m[1].trim();
+        const picklistField = m[2].trim();
+        const { updated, removed } = removeRecordTypePicklistValueFromXml(updatedXml, picklistField, picklistValue);
+        if (removed) {
+          updatedXml = updated;
+          removedRefs.push({
+            type: 'recordTypePicklistValue',
+            name: `${picklistField}.${picklistValue}`,
+            label: `[RecordType] ${picklistField}:${picklistValue}`,
+            deployError: err,
+          });
+          log(`   [RecordType] Removed inactive picklist value '${picklistValue}' from picklist '${picklistField}'`);
+        } else {
+          log(
+            `   [RecordType] Picklist value '${picklistValue}' not found in picklist '${picklistField}' XML — unhandled`
+          );
+          unhandledErrors.push(err);
+        }
         continue;
       }
     }
@@ -4924,6 +4991,7 @@ export default class DeployAndFix extends SfCommand<void> {
       PROFILE_BASE_PATH,
       LAYOUT_BASE_PATH,
       REPORT_TYPE_BASE_PATH,
+      OBJECTS_BASE_PATH,
     } = resolveRepoPaths();
 
     if (choice === '2') {
@@ -5026,6 +5094,7 @@ export default class DeployAndFix extends SfCommand<void> {
       // Only JSON batch report types — cross-sweep stays within the batch.
       // Out-of-batch report types are handled by repoWideSweep at the end.
       ...reportTypes.map((n) => path.join(REPORT_TYPE_BASE_PATH, `${n}.reportType-meta.xml`)),
+      ...whitelist.recordTypes.map((n) => recordTypeFilePath(n, OBJECTS_BASE_PATH)),
     ];
 
     const totalWhitelisted = Object.values(whitelist).reduce((sum, arr) => sum + arr.length, 0);
@@ -5214,6 +5283,21 @@ export default class DeployAndFix extends SfCommand<void> {
         calcFailedRetries: 0,
         consecutiveZeroFailures: 0,
       })),
+      ...whitelist.recordTypes.map((n) => ({
+        metadataType: 'RecordType',
+        itemName: n,
+        filePath: recordTypeFilePath(n, OBJECTS_BASE_PATH),
+        operation: getItemOperation(promotionData, 'RecordType', n),
+        status: 'No Change',
+        allRemovedFields: [] as Array<{ label: string; error: string }>,
+        allRemovedRefs: [] as RemovedRef[],
+        allSkippedFields: [] as string[],
+        allUnhandledErrors: [] as string[],
+        errorBasedMasks: [] as ErrorMask[],
+        done: false,
+        calcFailedRetries: 0,
+        consecutiveZeroFailures: 0,
+      })),
     ];
 
     // Deduplication pre-pass is intentionally skipped.
@@ -5277,7 +5361,7 @@ export default class DeployAndFix extends SfCommand<void> {
 
     log('\n######################################################');
     log(
-      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${permSetGroups.length} PSG(s) + ${profiles.length} Profile(s) + ${reportTypes.length} ReportType(s) + ${layouts.length} Layout(s)`
+      `  PROCESSING BATCH: ${permSets.length} PermSet(s) + ${mutingPermSets.length} MutingPermSet(s) + ${permSetGroups.length} PSG(s) + ${profiles.length} Profile(s) + ${reportTypes.length} ReportType(s) + ${layouts.length} Layout(s) + ${whitelist.recordTypes.length} RecordType(s)`
     );
     log('######################################################');
 
@@ -5379,6 +5463,21 @@ export default class DeployAndFix extends SfCommand<void> {
       log('   (none)');
     }
 
+    log('\nRECORD TYPES:');
+    if (summary.filter((r) => r.Type === 'RecordType').length > 0) {
+      summary
+        .filter((r) => r.Type === 'RecordType')
+        .forEach((r) =>
+          log(
+            `   [${r.Name}] Status: ${r.Status} | Removed: ${r.RemovedFields || 'none'} | Skipped: ${
+              r.SkippedFields || 'none'
+            }`
+          )
+        );
+    } else {
+      log('   (none)');
+    }
+
     // ================= CONCLUSION =================
     const passedClean = summary.filter((r) => r.Status === 'Success' || r.Status === 'No Change');
     const hadFixes = summary.filter((r) => r.Status === 'Fixed & Committed');
@@ -5410,6 +5509,8 @@ export default class DeployAndFix extends SfCommand<void> {
         ? 'ReportType'
         : r.Type === 'Layout'
         ? 'Layout'
+        : r.Type === 'RecordType'
+        ? 'RecordType'
         : 'Profile',
       r.Name,
       r.Status,
