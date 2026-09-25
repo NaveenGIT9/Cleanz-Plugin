@@ -452,14 +452,24 @@ class DashboardPanel {
           RecordType: 'RecordType',
         };
         const raw = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
-        const seen = new Set();
-        const allKnown = raw
-          .filter((i) => typeMap[i.t])
-          .filter((i) => {
-            if (seen.has(i.n)) return false;
-            seen.add(i.n);
-            return true;
-          });
+        // Same priority logic as run.ts: ADD/FULL wins over RetrieveOnly for the same type+name.
+        const deployablePriorityUI = (op) => {
+          if (!op) return 2;
+          const o = op.toLowerCase();
+          if (o.startsWith('retrieve') || o.startsWith('delete')) return 0;
+          if (o === 'full') return 3;
+          return 2;
+        };
+        const effectiveOpMap = new Map();
+        for (const i of raw) {
+          if (!typeMap[i.t]) continue;
+          const key = `${i.t}::${i.n}`;
+          const existing = effectiveOpMap.get(key);
+          if (!existing || deployablePriorityUI(i.a) > deployablePriorityUI(existing.a)) {
+            effectiveOpMap.set(key, i);
+          }
+        }
+        const allKnown = [...effectiveOpMap.values()];
         const skipped = allKnown
           .filter((i) => {
             const op = (i.a ?? '').toLowerCase();
