@@ -27,8 +27,57 @@ import {
   removeJoinFromReportType,
   removeProfileActionOverridesWithMissingObject,
   removeProfileActionOverridesWithMissingRecordType,
+  removeRecordTypePicklistValueFromXml,
   removeXmlBlock,
 } from '../../../src/commands/cleanz/run.js';
+
+describe('removeRecordTypePicklistValueFromXml', () => {
+  const values = (field: string, names: string[]): string =>
+    [
+      '    <picklistValues>',
+      `        <picklist>${field}</picklist>`,
+      ...names.map(
+        (n) =>
+          `        <values>\n            <fullName>${n}</fullName>\n            <default>false</default>\n        </values>`
+      ),
+      '    </picklistValues>',
+    ].join('\n');
+  const xml = [
+    '<RecordType>',
+    values('Source_Replacement_Category__c', ['CONSUMPTION', 'Cloud Vault', 'Enterprise Flex', 'M365 Data Protection']),
+    values('Target_Replacement_Category__c', ['CONSUMPTION', 'Enterprise Flex']),
+    '</RecordType>',
+  ].join('\n');
+
+  it('removes only the failing value, keeping earlier and later values', () => {
+    const { updated, removed } = removeRecordTypePicklistValueFromXml(
+      xml,
+      'Source_Replacement_Category__c',
+      'Enterprise Flex'
+    );
+    expect(removed).to.equal(true);
+    const source = updated.split('</picklistValues>')[0];
+    expect(source).to.include('<fullName>CONSUMPTION</fullName>');
+    expect(source).to.include('<fullName>Cloud Vault</fullName>');
+    expect(source).to.include('<fullName>M365 Data Protection</fullName>');
+    expect(source).not.to.include('Enterprise Flex');
+    expect(updated.split('</picklistValues>')[1]).to.include('<fullName>Enterprise Flex</fullName>');
+    expect(updated.match(/<values>/g)).to.have.length(5);
+  });
+
+  it('matches URL-encoded fullName values', () => {
+    const encoded = values('F__c', ['A', 'Data %26 Protection', 'B']);
+    const { updated, removed } = removeRecordTypePicklistValueFromXml(encoded, 'F__c', 'Data & Protection');
+    expect(removed).to.equal(true);
+    expect(updated.match(/<values>/g)).to.have.length(2);
+  });
+
+  it('reports not removed when value is absent', () => {
+    const { updated, removed } = removeRecordTypePicklistValueFromXml(xml, 'Source_Replacement_Category__c', 'Nope');
+    expect(removed).to.equal(false);
+    expect(updated).to.equal(xml);
+  });
+});
 
 // ─── buildAsciiTable ─────────────────────────────────────────────────────────
 

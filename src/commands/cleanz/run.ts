@@ -621,26 +621,33 @@ function removeRecordTypeVisibilityFromXml(xmlContent: string, name: string): { 
 
 // Removes a single <values> entry from the <picklistValues> block that matches picklistField.
 // Used to fix: "Picklist Value: X in picklist:Y not found" errors on RecordType files.
-function removeRecordTypePicklistValueFromXml(
+export function removeRecordTypePicklistValueFromXml(
   xmlContent: string,
   picklistField: string,
   picklistValue: string
 ): { updated: string; removed: boolean } {
   const escField = picklistField.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const escValue = picklistValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const target = picklistValue.trim().toLowerCase();
+  const decode = (s: string): string => {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  };
   const blockRegex = /([ \t]*<picklistValues>[\s\S]*?<\/picklistValues>[ \t]*\r?\n?)/g;
+  // Match one <values> entry at a time; a single regex spanning to the target <fullName> swallows every earlier value.
+  const valueRegex = /[ \t]*<values>[\s\S]*?<\/values>[ \t]*\r?\n?/g;
   let removed = false;
   const updated = xmlContent.replace(blockRegex, (block) => {
     if (!new RegExp(`<picklist>\\s*${escField}\\s*<\\/picklist>`, 'i').test(block)) return block;
-    const valueRegex = new RegExp(
-      `[ \\t]*<values>[\\s\\S]*?<fullName>\\s*${escValue}\\s*<\\/fullName>[\\s\\S]*?<\\/values>[ \\t]*\\r?\\n?`,
-      'gi'
-    );
-    const newBlock = block.replace(valueRegex, () => {
+    return block.replace(valueRegex, (entry) => {
+      const fullName = /<fullName>\s*([\s\S]*?)\s*<\/fullName>/.exec(entry)?.[1];
+      if (fullName === undefined) return entry;
+      if (fullName.toLowerCase() !== target && decode(fullName).toLowerCase() !== target) return entry;
       removed = true;
       return '';
     });
-    return newBlock;
   });
   return { updated, removed };
 }
