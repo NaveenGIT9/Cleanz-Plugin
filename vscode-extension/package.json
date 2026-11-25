@@ -2,7 +2,7 @@
   "name": "cleanz-vscode",
   "displayName": "Cleanz — Salesforce Metadata Cleaner",
   "description": "Validate and clean missing references in Salesforce metadata (Profiles, Permission Sets, PSGs)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "NaveenGIT9",
   "engines": {
     "vscode": "^1.85.0"
