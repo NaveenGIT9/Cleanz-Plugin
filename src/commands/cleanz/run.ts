@@ -719,6 +719,44 @@ export function removeColumnFromReportType(
   return { updated: xmlContent, removed: false };
 }
 
+function reportTypeTableMatchesObject(table: string, objectName: string): boolean {
+  const lastSeg = (table.trim().toLowerCase().split('.').pop() ?? '').replace(/__r$/, '');
+  const obj = objectName.toLowerCase().replace(/__c$/, '');
+  const plural = obj.endsWith('y') ? obj.slice(0, -1) + 'ie' : obj;
+  return lastSeg.includes(obj) || lastSeg.includes(plural);
+}
+
+// Strips <columns> blocks for fields being deployed in this promotion, so a dry-run reports the next real missing
+// column instead of stopping at a whitelisted one. Exact <field> match only — no traversal fallback, so a real error is
+// never hidden. A field on Activity also exists on Task and Event.
+export function maskWhitelistedReportTypeColumns(
+  xmlContent: string,
+  whitelistedFields: string[]
+): { updated: string; masked: string[] } {
+  const masked: string[] = [];
+  let xml = xmlContent;
+  for (const name of whitelistedFields) {
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) continue;
+    const obj = name.substring(0, dot);
+    const field = name.substring(dot + 1);
+    const objects = obj.toLowerCase() === 'activity' ? [obj, 'Task', 'Event'] : [obj];
+    const escaped = field.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+    const inner = '(?:(?!<columns>)[\\s\\S])*?';
+    const blockRegex = new RegExp(
+      `[ \\t]*<columns>${inner}<field>[ \\t]*${escaped}[ \\t]*</field>${inner}</columns>[ \\t]*\\r?\\n?`,
+      'g'
+    );
+    const before = xml;
+    xml = xml.replace(blockRegex, (match: string) => {
+      const table = /<table>([\s\S]*?)<\/table>/i.exec(match)?.[1] ?? '';
+      return objects.some((o) => reportTypeTableMatchesObject(table, o)) ? '' : match;
+    });
+    if (xml !== before) masked.push(name);
+  }
+  return { updated: xml, masked };
+}
+
 // Stack-based helper: finds the innermost <join>…</join> block that contains `pos`.
 function findContainingJoinBlock(xml: string, pos: number): { start: number; end: number } | null {
   const openRe = /<join>/g;
@@ -3422,6 +3460,8 @@ const DEDUP_BLOCKS: Array<{ blockTag: string; keyTag: string }> = [
   // relatedLists excluded: same <relatedList> key appears legitimately in both <miniLayout> and
   // top-level sections — dedup by key would wrongly remove the top-level block.
   { blockTag: 'platformActionListItems', keyTag: 'actionName' },
+  // ReportType: SF rejects "Column X on table Y appears more than once" but only reports the first.
+  { blockTag: 'columns', keyTag: 'field' },
 ];
 
 export function deduplicateXmlBlocks(xmlContent: string): { updated: string; removedCount: number } {
@@ -3608,9 +3648,19 @@ function maskActiveItems(activeItems: BatchItem[], whitelist: WhitelistMap): Map
   const saved = new Map<string, string>();
   for (const item of activeItems) {
     if (!fs.existsSync(item.filePath)) continue;
-    // ReportType files have no false-positive masking — skip save/restore so committed
-    // fixes persist on disk across iterations rather than being overwritten by restoreItems.
-    if (item.filePath.toLowerCase().endsWith('.reporttype-meta.xml')) continue;
+    if (item.filePath.toLowerCase().endsWith('.reporttype-meta.xml')) {
+      // Restored right after the dry-run, before any fix is written, so committed fixes are not lost.
+      const rtOrig = readFileWithRetry(item.filePath);
+      const { updated, masked } = maskWhitelistedReportTypeColumns(rtOrig, whitelist.fields);
+      if (masked.length === 0) continue;
+      for (const name of masked) {
+        const entry = `[Column] ${name}`;
+        if (!item.allSkippedFields.includes(entry)) item.allSkippedFields.push(entry);
+      }
+      saved.set(item.filePath, rtOrig);
+      writeFileWithRetry(item.filePath, updated);
+      continue;
+    }
     const orig = readFileWithRetry(item.filePath);
     let masked = maskWhitelistedEntries(orig, whitelist);
     if (item.filePath.endsWith('.profile-meta.xml')) {

@@ -18,9 +18,11 @@ import { expect } from 'chai';
 import {
   buildAsciiTable,
   deduplicateXmlBlocks,
+  fixMalformedXmlTags,
   formatXml,
   getRootNodeName,
   maskPermSetFalsePositives,
+  maskWhitelistedReportTypeColumns,
   maskProfileFalsePositives,
   removeColumnFromReportType,
   removeCustomButtonEntry,
@@ -272,6 +274,17 @@ describe('maskPermSetFalsePositives', () => {
 // ─── deduplicateXmlBlocks ────────────────────────────────────────────────────
 
 describe('deduplicateXmlBlocks', () => {
+  it('removes an identical duplicate ReportType column but keeps the same field on another table', () => {
+    const col = (table: string) =>
+      `        <columns>\n            <checkedByDefault>false</checkedByDefault>\n            <field>peopleai__Created_by_PeopleAI__c</field>\n            <table>${table}</table>\n        </columns>\n`;
+    const ocr = 'Contact.AdvocateHub__Opportunities__r.OpportunityContactRoles';
+    const xml = col('Contact') + col(ocr) + col(ocr);
+    const { updated, removedCount } = deduplicateXmlBlocks(xml);
+    expect(removedCount).to.equal(1);
+    expect(updated).to.equal(col('Contact') + col(ocr));
+    expect(fixMalformedXmlTags(updated).fixedCount).to.equal(0);
+  });
+
   it('removes a duplicate fieldPermissions block when content is 100% identical', () => {
     const block = [
       '    <fieldPermissions>',
@@ -617,6 +630,50 @@ describe('removeColumnFromReportType', () => {
     expect(removed).to.be.true;
     expect(updated).not.to.include('OperatingHours');
     expect(updated).to.include('AnnualRevenue');
+  });
+});
+
+// ─── maskWhitelistedReportTypeColumns ─────────────────────────────────────────
+
+describe('maskWhitelistedReportTypeColumns', () => {
+  it('masks a whitelisted column so the next real missing column is reported', () => {
+    const xml = makeRtXml([
+      { field: 'New_Field__c', table: 'Account' },
+      { field: 'OperatingHours', table: 'Account' },
+    ]);
+    const { updated, masked } = maskWhitelistedReportTypeColumns(xml, ['Account.New_Field__c']);
+    expect(masked).to.deep.equal(['Account.New_Field__c']);
+    expect(updated).not.to.include('New_Field__c');
+    expect(updated).to.include('OperatingHours');
+  });
+
+  it('matches relationship tables (__r, plural)', () => {
+    const xml = makeRtXml([{ field: 'Teaming_Partner__c', table: 'Contact.AdvocateHub__Opportunities__r' }]);
+    const { masked } = maskWhitelistedReportTypeColumns(xml, ['Opportunity.Teaming_Partner__c']);
+    expect(masked).to.deep.equal(['Opportunity.Teaming_Partner__c']);
+  });
+
+  it('leaves the same field name on another object alone', () => {
+    const xml = makeRtXml([{ field: 'New_Field__c', table: 'Contact' }]);
+    const { updated, masked } = maskWhitelistedReportTypeColumns(xml, ['Account.New_Field__c']);
+    expect(masked).to.be.empty;
+    expect(updated).to.equal(xml);
+  });
+
+  it('does not mask traversal-form fields (no fallback that could hide a real error)', () => {
+    const xml = makeRtXml([{ field: 'Parent__c.New_Field__c', table: 'Account' }]);
+    const { updated } = maskWhitelistedReportTypeColumns(xml, ['Account.New_Field__c']);
+    expect(updated).to.equal(xml);
+  });
+
+  it('Activity fields mask Task and Event columns', () => {
+    const xml = makeRtXml([
+      { field: 'Call_Type__c', table: 'Account.Tasks' },
+      { field: 'Call_Type__c', table: 'Account.Events' },
+    ]);
+    const { updated, masked } = maskWhitelistedReportTypeColumns(xml, ['Activity.Call_Type__c']);
+    expect(masked).to.deep.equal(['Activity.Call_Type__c']);
+    expect(updated).not.to.include('Call_Type__c');
   });
 });
 
